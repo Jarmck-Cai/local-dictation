@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export const RECOGNITION_MODEL_ID = "sense-voice-int8";
+export const DICTATION_CONFIG_REFRESH = "dictation-config-refresh";
 
 export type CleanupMode = "claude" | "local" | "off";
 export type CleanupStrength = "faithful" | "light" | "clear";
@@ -26,8 +27,13 @@ export interface CleanupStatus {
 
 export const dictationCommands = {
   getConfig: () => invoke<DictationConfigView>("get_dictation_config"),
-  saveConfig: (config: DictationConfig) =>
-    invoke<DictationConfigView>("save_dictation_config", { config }),
+  saveConfig: async (config: DictationConfig) => {
+    const view = await invoke<DictationConfigView>("save_dictation_config", {
+      config,
+    });
+    window.dispatchEvent(new Event(DICTATION_CONFIG_REFRESH));
+    return view;
+  },
   setClaudeKey: (key: string) => invoke<void>("set_claude_api_key", { key }),
   clearClaudeKey: () => invoke<void>("clear_claude_api_key"),
 };

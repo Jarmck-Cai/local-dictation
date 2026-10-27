@@ -1023,9 +1023,9 @@ pub fn run(cli_args: CliArgs) {
             // for portable mode (redirects WebView2 cache to portable Data dir)
             let mut win_builder =
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("/".into()))
-                    .title("Local Dictation")
-                    .inner_size(680.0, 570.0)
-                    .min_inner_size(680.0, 570.0)
+                    .title("轻述")
+                    .inner_size(1000.0, 730.0)
+                    .min_inner_size(780.0, 600.0)
                     .resizable(true)
                     .maximizable(true)
                     .visible(false);

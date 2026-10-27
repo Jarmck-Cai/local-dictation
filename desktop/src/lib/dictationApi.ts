@@ -10,6 +10,7 @@ export interface DictationTiming {
   id: string;
   history_id: number | null;
   recorded_at_ms: number;
+  recording_ms?: number | null;
   asr_ms: number;
   cleanup_ms: number;
   paste_ms: number | null;

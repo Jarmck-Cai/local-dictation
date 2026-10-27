@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import type { DictationTiming } from "./dictationApi";
-import { summarizeResources, summarizeTimings } from "./dictationSummary";
+import {
+  isCompletedTiming,
+  summarizeResources,
+  summarizeTimings,
+} from "./dictationSummary";
 
 const now = 8 * 24 * 60 * 60 * 1000;
 const timing = (
@@ -32,6 +36,23 @@ const summary = summarizeTimings(
   ],
   now,
 );
+assert.equal(
+  isCompletedTiming(
+    timing("new-success", 1000, { outcome: "paste_read_observed" }),
+  ),
+  true,
+);
+for (const outcome of [
+  "paste_skipped",
+  "paste_unconfirmed",
+  "unknown_future_failure",
+]) {
+  assert.equal(
+    isCompletedTiming(timing("not-complete", 1000, { outcome })),
+    false,
+    `${outcome} is not a successful software input sample`,
+  );
+}
 assert.equal(
   summary.records.length,
   5,

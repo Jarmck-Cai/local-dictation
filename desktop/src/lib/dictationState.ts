@@ -1,5 +1,17 @@
 import type { CloudStatus, DictationTiming } from "./dictationApi";
 
+export function pasteErrorCode(
+  payload: unknown,
+): "clipboard_restore_failed" | "input_unconfirmed" | "failed" {
+  const code =
+    typeof payload === "object" && payload !== null
+      ? (payload as { code?: unknown }).code
+      : undefined;
+  if (code === "clipboard_restore_failed" || code === "input_unconfirmed")
+    return code;
+  return "failed";
+}
+
 /** Prevent old snapshots from overwriting a live event, retry, or unmounted view. */
 export class SnapshotGuard {
   private generation = 0;

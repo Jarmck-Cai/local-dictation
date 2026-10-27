@@ -7,8 +7,10 @@ export function useDictationMetrics() {
   const [metrics, setMetrics] = useState<DictationTiming[]>([]);
   const [failed, setFailed] = useState(false);
   const [reload, setReload] = useState(0);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    setLoading(true);
     let disposed = false;
     let unlisten: UnlistenFn | undefined;
     let snapshotReady = false;
@@ -42,6 +44,10 @@ export function useDictationMetrics() {
         setFailed(false);
       } catch {
         if (!disposed) setFailed(true);
+      } finally {
+        snapshotReady = true;
+        updates.clear();
+        if (!disposed) setLoading(false);
       }
     })();
     return () => {
@@ -50,5 +56,10 @@ export function useDictationMetrics() {
     };
   }, [reload]);
 
-  return { metrics, failed, retry: () => setReload((value) => value + 1) };
+  return {
+    metrics,
+    failed,
+    loading,
+    retry: () => setReload((value) => value + 1),
+  };
 }

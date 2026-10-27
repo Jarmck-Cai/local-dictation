@@ -9,6 +9,8 @@ const INCOMPLETE = new Set([
   "empty",
   "asr_failed",
   "paste_failed",
+  "paste_unconfirmed",
+  "paste_skipped",
 ]);
 const FALLBACK_REASONS = new Set([
   "cloud_paused",
@@ -25,6 +27,13 @@ const FALLBACK_REASONS = new Set([
   "missing_claude_api_key",
   "cloud_state_unavailable",
 ]);
+const COMPLETED_OUTCOMES = new Set([
+  "cleaned",
+  "ready",
+  "off",
+  "paste_read_observed",
+  ...FALLBACK_REASONS,
+]);
 
 function validDuration(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
@@ -38,10 +47,10 @@ function median(values: number[]): number {
     : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
-/** Only successful software insertion is a completed wait; screen paint is unmeasured. */
+/** Only known software completion is a completed wait; screen paint is unmeasured. */
 export function isCompletedTiming(row: DictationTiming): boolean {
   return (
-    !INCOMPLETE.has(row.outcome) &&
+    COMPLETED_OUTCOMES.has(row.outcome) &&
     [row.asr_ms, row.cleanup_ms, row.paste_ms, row.total_ms].every(
       validDuration,
     )

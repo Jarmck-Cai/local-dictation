@@ -12,6 +12,8 @@
 
 手动补贴的离线回归入口为 `python scripts/check-manual-paste.py` 和 `python scripts/check-protected-paste.py`，需要 Rust 编译器。检查使用生产状态与策略代码及合成数据，不操作系统剪贴板、不发出键盘输入、不调用模型。它们覆盖单次手势、忙时拒绝、按键释放、绑定升级及冲突、剪贴板恢复与并发复制；不能据此宣称目标应用已成功落字。原生构建和应用兼容性验证另行记录。
 
+自动输入回归使用 `python scripts/check-automatic-paste.py`，执行真实编排与共享事务的合成慢读、连续正文、取消和并发复制检查；`--legacy` 应复现旧机制的失败，不能作为新版通过命令。元数据兼容检查为 `python scripts/check-dictation-metadata.py`，读取实际Rust类型及已构建debug缓存的serde依赖，使用合成JSON。品牌矢量源为 `desktop/src-tauri/icons/qingshu.svg`，`scripts/export-qingshu-icons.py` 使用开发环境Pillow导出应用/托盘资源；应用运行不新增依赖。
+
 ## 正式交付
 
 用户可见功能或修复形成交付时，统一更新 `desktop/package.json`、`desktop/src-tauri/Cargo.toml`、`Cargo.lock` 中本包版本及 `tauri.conf.json`，并更新 README 和 `docs/releases.md`。检查通过后提交，建立不可变的 `vX.Y.Z` 标签，并推送提交与标签。后续修复使用新版本号。

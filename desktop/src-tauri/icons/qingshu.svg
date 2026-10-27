@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <title>轻述</title>
+  <defs>
+    <g id="mark-16">
+      <rect x="3" y="5" width="2" height="6" rx="1"/>
+      <rect x="7" y="2" width="2" height="12" rx="1"/>
+      <rect x="11" y="5" width="2" height="6"/>
+      <rect x="10" y="4" width="4" height="2"/>
+      <rect x="10" y="10" width="4" height="2"/>
+    </g>
+    <g id="mark-24">
+      <rect x="5" y="8" width="3" height="9" rx="1.5"/>
+      <rect x="11" y="3" width="3" height="18" rx="1.5"/>
+      <rect x="18" y="7" width="2" height="10"/>
+      <rect x="16" y="6" width="6" height="2"/>
+      <rect x="16" y="16" width="6" height="2"/>
+    </g>
+  </defs>
+  <rect id="tile" width="32" height="32" rx="8" fill="#a9d6b9"/>
+  <g id="mark-32" fill="#28543b">
+    <rect x="6" y="10" width="4" height="12" rx="2"/>
+    <rect x="14" y="4" width="4" height="24" rx="2"/>
+    <rect x="23" y="9" width="2" height="14"/>
+    <rect x="20" y="8" width="8" height="2"/>
+    <rect x="20" y="22" width="8" height="2"/>
+  </g>
+</svg>

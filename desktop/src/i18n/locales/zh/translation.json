@@ -332,16 +332,17 @@
       },
       "pasteMethod": {
         "title": "粘贴方式",
-        "description": "选择文字插入方式。直接：通过系统输入模拟打字。无：跳过粘贴，仅更新历史记录/剪贴板。",
+        "description": "选择发送的粘贴快捷键。跳过自动输入时，结果仍保留在历史中；是否写入剪贴板由剪贴板处理偏好决定。",
         "options": {
           "clipboard": "剪贴板 ({{modifier}}+V)",
           "clipboardCtrlShiftV": "剪贴板 (Ctrl+Shift+V)",
           "clipboardShiftInsert": "剪贴板 (Shift+Insert)",
           "direct": "直接",
-          "none": "无",
+          "none": "跳过自动输入",
           "externalScript": "外部脚本"
         },
-        "externalScriptPlaceholder": "/path/to/your/script.sh"
+        "externalScriptPlaceholder": "/path/to/your/script.sh",
+        "unsupportedSaved": "已保存的输入方式暂不支持，请选择可用方式。"
       },
       "typingTool": {
         "title": "输入工具",
@@ -352,7 +353,7 @@
       },
       "clipboardHandling": {
         "title": "剪贴板处理",
-        "description": "不修改剪贴板将在转录后保留当前剪贴板内容。复制到剪贴板将在粘贴后将转录结果留在剪贴板中。",
+        "description": "识别完成后保留原剪贴板，或把本次结果留在剪贴板中。",
         "options": {
           "dontModify": "不修改剪贴板",
           "copyToClipboard": "复制到剪贴板"
@@ -737,7 +738,7 @@
     "dismiss": "关闭"
   },
   "dictation": {
-    "productName": "Local Dictation",
+    "productName": "轻述",
     "preview": "Windows 内测版",
     "navigation": "主导航",
     "tagline": "本地识别 · 按住说话 · 松开输入",
@@ -753,9 +754,10 @@
     "defaultMicrophone": "系统默认麦克风",
     "moreInformation": "更多说明",
     "nav": {
-      "general": "听写",
-      "history": "历史记录",
-      "vocabulary": "个人词库"
+      "general": "设置",
+      "history": "最近转录",
+      "vocabulary": "专属词库",
+      "usage": "使用统计"
     },
     "status": {
       "ready": "可以开始听写",
@@ -797,7 +799,7 @@
         "off": "关闭整理"
       },
       "hints": {
-        "claude": "使用 Claude Haiku 5.5，仅发送转写文字，录音不上传。",
+        "claude": "使用 Claude Haiku 5.5，发送转写文字和相关词库提示，录音不上传。",
         "local": "连接本机兼容服务，失败时保留原文，不转用云端。",
         "off": "直接使用本地识别的原始转写。"
       },
@@ -836,16 +838,24 @@
     },
     "history": {
       "latest": "最近结果",
-      "title": "历史记录",
+      "title": "转录记录",
       "empty": "完成一次听写后，结果和原始转写会显示在这里。",
       "loadFailed": "无法读取历史记录。",
       "copyFinal": "复制结果",
       "copyRaw": "复制原文",
       "copied": "已复制",
       "raw": "查看原始转写",
-      "inputAttempt": "已尝试输入，未落字可复制。",
+      "inputAttempt": "生成结果已保留；无法确认目标应用中的实际文字。",
       "originalUsed": "此条保留了原始转写。",
-      "copyLatestFailed": "未能复制最近结果。请确认已有结果，或在历史记录中重试。"
+      "copyLatestFailed": "未能复制最近结果。请确认已有结果，或在历史记录中重试。",
+      "copy": "复制",
+      "collapse": "收起记录",
+      "today": "今天",
+      "yesterday": "昨天",
+      "recordCount": "{{count}} 条",
+      "loadMore": "加载更多记录",
+      "timing": "查看处理耗时",
+      "loadMoreFailed": "后续记录未能加载，已显示的记录仍保留。"
     },
     "vocabulary": {
       "title": "手动词库",
@@ -951,43 +961,48 @@
         "cleanup_storage_unavailable": "整理设置无法读取，使用本地转录",
         "claude_key_unavailable": "云端凭据无法读取，使用本地转录",
         "missing_claude_api_key": "未配置云端凭据，使用本地转录",
-        "cloud_state_unavailable": "云端状态无法读取，使用本地转录"
+        "cloud_state_unavailable": "云端状态无法读取，使用本地转录",
+        "paste_read_observed": "已观察到目标读取，屏幕落字未核实",
+        "paste_unconfirmed": "未能观察到目标读取，请检查输入框",
+        "paste_skipped": "已跳过自动输入，可从历史复制"
       },
       "cleanupFallback": "整理回退：{{reason}}",
       "cleanupFallbackUnknown": "整理未完成，保留本地转录",
       "summaryTitle": "近期运行统计",
       "summaryScope": "最近 7 天 · 保留 {{count}} 条 · 最多 300 条。回退计数可与其他结果重叠。",
       "counts": {
-        "completed": "输入完成",
+        "completed": "软件流程完成",
         "fallbacks": "云端回退",
         "cancelled": "已取消",
         "noAudio": "无音频",
         "unconfirmed": "其他未完成"
       },
-      "medianTitle": "{{count}} 条完成样本的中位耗时",
+      "medianTitle": "{{count}} 条软件完成样本的中位耗时",
       "smallSample": "完成样本少于 5 条，目前仅供初步参考。",
-      "noCompletedSamples": "暂无可确认输入完成的样本。取消、无音频和未完成记录不计入中位等待。",
+      "noCompletedSamples": "暂无软件输入流程完成的样本。取消、无音频和未完成记录不计入中位等待。",
       "fallbackTitle": "云端回退原因",
       "reasonCount": "{{reason}} · {{count}} 次",
-      "slowerTitle": "完成记录中等待最长的 3 条",
+      "slowerTitle": "软件完成记录中等待最长的 3 条",
       "slowerRecord": "{{date}} · {{value}}",
-      "insertionUnconfirmed": "无可确认的落字记录",
+      "insertionUnconfirmed": "未记录输入完成",
       "sampledMemory": "处理边界内存（读数最大值）",
       "processCpu": "处理期间进程 CPU 用时",
       "mebibytes": "{{value}} MiB",
-      "resourceNote": "仅在松键后的处理边界读取 Windows 当前进程。内存为边界读数中的最大工作集，并非真实峰值；CPU 为本进程在此期间的累计用时，可能包含其他并行任务，不是整机占用率。没有持续采样。"
+      "resourceNote": "仅在松键后的处理边界读取 Windows 当前进程。内存为边界读数中的最大工作集，并非真实峰值；CPU 为本进程在此期间的累计用时，可能包含其他并行任务，不是整机占用率。没有持续采样。",
+      "recording": "录音请求至松键"
     },
     "correction": {
-      "title": "提交修改稿作为样本",
-      "description": "把这条结果的修改稿粘贴到下方，在本机比较后提出术语或上下文纠错建议，由你确认。",
-      "label": "修改后的完整文字",
-      "placeholder": "在此粘贴这条记录修改后的完整版本…",
+      "title": "提供纠正",
+      "description": "用于生成词库建议，不修改这条记录。",
+      "label": "这条记录纠正后的完整文字",
+      "placeholder": "粘贴纠正后的完整文字…",
       "characters": "{{count}} / {{limit}} 字符",
-      "submit": "提交样本",
-      "submitting": "正在保存样本…",
+      "submit": "提供纠正",
+      "submitting": "正在保存…",
       "privacy": "仅接收你粘贴的文字，不读取剪贴板，不把样本发往云端，也不会重新输入。样本随对应文字历史清理。",
       "saved": "样本已保存在本机，可在下方审阅待确认词条。大幅改写可能不会生成纠错建议。",
-      "failed": "未能保存样本，请确认这条历史仍然存在后重试。"
+      "failed": "未能保存样本，请确认这条历史仍然存在后重试。",
+      "dataHelp": "样本如何处理"
     },
     "startup": {
       "label": "登录 Windows 后自动启动",
@@ -1023,6 +1038,50 @@
         "manual_paste_unavailable": "保护式补贴暂时不可用，结果仍在历史中。",
         "manual_paste_invalid_text": "没有可补贴的有效正文。",
         "manual_paste_unsupported_method": "当前配置的输入方式不支持补贴，正文仍可在历史中取用。"
+      }
+    },
+    "preferencesTitle": "输入与界面",
+    "usage": {
+      "title": "最近使用概览",
+      "period": "最近 7 天",
+      "scope": "保留记录 · 最多 300 条",
+      "transcriptions": "转录次数",
+      "generated": "生成文字",
+      "savedTime": "预计节省时间",
+      "times": "次",
+      "characters": "字符",
+      "minutes": "分钟",
+      "unavailable": "—",
+      "explain": "查看省时估算口径",
+      "method": "按中文 60 字/分钟、英文 40 词/分钟估算打字耗时，减去每条实际录音请求至松键时长和处理耗时，单条最低为零。数字、标点及其他语言不另估打字耗时。仅纳入时长完整、软件输入流程已完成的非空记录；失败、取消及未确认输入的记录不计。",
+      "estimateSamples": "{{count}} 条可估算样本",
+      "generatedNote": "生成文字按 Unicode 非空白字符计数，不代表目标应用中已确认落字的文字量。统计仅覆盖最近七天最多 300 条保留记录，删除或到期清理后随之变化。",
+      "noEstimate": "暂无可估算数据",
+      "loadFailed": "使用概览未能完整加载，请重试。"
+    },
+    "footer": {
+      "separator": "·",
+      "mode": "{{mode}} {{strength}}",
+      "modeUnavailable": "整理状态暂不可用",
+      "cloudPaused": "Claude 整理已暂停",
+      "shortcut": "按住 {{shortcut}} 说话",
+      "dataHelp": "查看当前模式的数据处理说明",
+      "dataTitle": "当前模式如何处理数据",
+      "audioLocal": "音频在本机识别，不上传。",
+      "dataModes": {
+        "claude": "启用 Claude 整理时，会发送转写文字和相关词库提示。",
+        "local": "转写文字交给设置中的本机兼容服务整理，失败时不转用云端。",
+        "off": "关闭整理，直接使用本地识别结果和已确认词库。"
+      }
+    },
+    "autoPaste": {
+      "clipboard_restore_failed": {
+        "title": "剪贴板恢复未完成",
+        "description": "未能完整恢复原剪贴板，请检查剪贴板；结果仍保留在最近转录。"
+      },
+      "input_unconfirmed": {
+        "title": "尚未确认输入结果",
+        "description": "未能确认目标应用已读取本次文字，请检查输入框，避免重复输入；结果仍保留在最近转录。"
       }
     }
   }

@@ -4,8 +4,33 @@ import {
   mergeTiming,
   cloudState,
   distinctCleanupReason,
+  pasteErrorCode,
 } from "./dictationState";
 import type { DictationTiming } from "./dictationApi";
+
+assert.equal(
+  pasteErrorCode({ code: "clipboard_restore_failed" }),
+  "clipboard_restore_failed",
+);
+assert.equal(
+  pasteErrorCode({ code: "input_unconfirmed" }),
+  "input_unconfirmed",
+);
+for (const payload of [
+  undefined,
+  null,
+  {},
+  "arbitrary text",
+  { code: "arbitrary text" },
+  { code: "__proto__" },
+  { code: "failed" },
+]) {
+  assert.equal(
+    pasteErrorCode(payload),
+    "failed",
+    "old or unknown error payloads use the generic safe fallback",
+  );
+}
 
 const requests = new SnapshotGuard();
 const first = requests.begin();

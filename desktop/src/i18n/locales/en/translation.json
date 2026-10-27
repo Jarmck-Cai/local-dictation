@@ -332,16 +332,17 @@
       },
       "pasteMethod": {
         "title": "Paste Method",
-        "description": "Choose how text is inserted. Direct: simulates typing via system input. None: skips paste, only updates history/clipboard.",
+        "description": "Choose the paste shortcut to send. Skipping automatic input keeps the result in history; the clipboard preference controls whether it is copied.",
         "options": {
           "clipboard": "Clipboard ({{modifier}}+V)",
           "clipboardCtrlShiftV": "Clipboard (Ctrl+Shift+V)",
           "clipboardShiftInsert": "Clipboard (Shift+Insert)",
           "direct": "Direct",
-          "none": "None",
+          "none": "Skip automatic input",
           "externalScript": "External Script"
         },
-        "externalScriptPlaceholder": "/path/to/your/script.sh"
+        "externalScriptPlaceholder": "/path/to/your/script.sh",
+        "unsupportedSaved": "The saved input method is unavailable. Choose a supported method."
       },
       "typingTool": {
         "title": "Typing Tool",
@@ -352,7 +353,7 @@
       },
       "clipboardHandling": {
         "title": "Clipboard Handling",
-        "description": "Don't Modify Clipboard preserves your current clipboard contents after transcription. Copy to Clipboard leaves the transcription result in your clipboard after pasting.",
+        "description": "Keep the original clipboard after transcription, or leave this result in the clipboard.",
         "options": {
           "dontModify": "Don't Modify Clipboard",
           "copyToClipboard": "Copy to Clipboard"
@@ -737,7 +738,7 @@
     "dismiss": "Dismiss"
   },
   "dictation": {
-    "productName": "Local Dictation",
+    "productName": "轻述",
     "preview": "Windows preview",
     "navigation": "Main navigation",
     "tagline": "Local recognition · Hold to speak · Release to insert",
@@ -753,9 +754,10 @@
     "defaultMicrophone": "System default microphone",
     "moreInformation": "More information",
     "nav": {
-      "general": "Dictation",
-      "history": "History",
-      "vocabulary": "Vocabulary"
+      "general": "Settings",
+      "history": "Recent transcripts",
+      "vocabulary": "Your vocabulary",
+      "usage": "Usage"
     },
     "status": {
       "ready": "Ready to dictate",
@@ -797,7 +799,7 @@
         "off": "Off"
       },
       "hints": {
-        "claude": "Uses Claude Haiku 5.5. Only transcript text is sent; audio is not uploaded.",
+        "claude": "Uses Claude Haiku 5.5. Transcript text and relevant vocabulary hints are sent; audio is not uploaded.",
         "local": "Connects to a compatible service on this computer. Failures keep the original text and do not switch to the cloud.",
         "off": "Uses the original local transcript directly."
       },
@@ -836,16 +838,24 @@
     },
     "history": {
       "latest": "Latest result",
-      "title": "History",
+      "title": "Transcripts",
       "empty": "Your result and original transcript will appear here after dictation.",
       "loadFailed": "History could not be read.",
       "copyFinal": "Copy result",
       "copyRaw": "Copy original",
       "copied": "Copied",
       "raw": "View original transcript",
-      "inputAttempt": "Insertion was attempted. Copy the result if no text appeared.",
+      "inputAttempt": "Generated text is retained; the actual text in the target app is unverified.",
       "originalUsed": "The original transcript was kept for this entry.",
-      "copyLatestFailed": "The latest result could not be copied. Check that a result exists or retry from history."
+      "copyLatestFailed": "The latest result could not be copied. Check that a result exists or retry from history.",
+      "copy": "Copy",
+      "collapse": "Collapse transcript",
+      "today": "Today",
+      "yesterday": "Yesterday",
+      "recordCount": "{{count}} records",
+      "loadMore": "Load more transcripts",
+      "timing": "Processing details",
+      "loadMoreFailed": "More transcripts could not be loaded. The records already shown are retained."
     },
     "vocabulary": {
       "title": "Manual vocabulary",
@@ -951,43 +961,48 @@
         "cleanup_storage_unavailable": "Cleanup settings unavailable; local transcript used",
         "claude_key_unavailable": "Cloud credentials unavailable; local transcript used",
         "missing_claude_api_key": "Cloud credentials missing; local transcript used",
-        "cloud_state_unavailable": "Cloud state unavailable; local transcript used"
+        "cloud_state_unavailable": "Cloud state unavailable; local transcript used",
+        "paste_read_observed": "Target read observed; displayed text unverified",
+        "paste_unconfirmed": "Target read unconfirmed; check the input field",
+        "paste_skipped": "Automatic input skipped; copy from history"
       },
       "cleanupFallback": "Cleanup fallback: {{reason}}",
       "cleanupFallbackUnknown": "Cleanup did not finish; local transcript retained",
       "summaryTitle": "Recent processing statistics",
       "summaryScope": "Last 7 days · {{count}} retained records · up to 300. Fallback counts can overlap other results.",
       "counts": {
-        "completed": "Insertion completed",
+        "completed": "Software flow complete",
         "fallbacks": "Cloud fallback",
         "cancelled": "Cancelled",
         "noAudio": "No audio",
         "unconfirmed": "Other incomplete"
       },
-      "medianTitle": "Median of {{count}} completed samples",
+      "medianTitle": "Median duration of {{count}} software-completed samples",
       "smallSample": "Fewer than 5 completed samples; these values are only an early reference.",
-      "noCompletedSamples": "No confirmed completed insertion samples yet. Cancelled, silent and incomplete attempts are excluded from median waits.",
+      "noCompletedSamples": "No completed software input samples yet. Cancelled, no-audio and incomplete records are excluded from median wait.",
       "fallbackTitle": "Cloud fallback reasons",
       "reasonCount": "{{reason}} · {{count}}",
-      "slowerTitle": "Longest completed waits (up to 3)",
+      "slowerTitle": "Three longest waits among software-completed records",
       "slowerRecord": "{{date}} · {{value}}",
-      "insertionUnconfirmed": "No confirmed insertion",
+      "insertionUnconfirmed": "Input completion not recorded",
       "sampledMemory": "Memory at processing boundaries (maximum)",
       "processCpu": "Process CPU time during processing",
       "mebibytes": "{{value}} MiB",
-      "resourceNote": "Current Windows process only, read at processing boundaries after recording release. Memory is the largest sampled working set, not a true peak. CPU is process time during this interval, may include concurrent work, and is not whole-system usage. No continuous sampling."
+      "resourceNote": "Current Windows process only, read at processing boundaries after recording release. Memory is the largest sampled working set, not a true peak. CPU is process time during this interval, may include concurrent work, and is not whole-system usage. No continuous sampling.",
+      "recording": "Recording request to release"
     },
     "correction": {
-      "title": "Provide a corrected sample",
-      "description": "Paste your revised version of this result. The app compares it locally and suggests terms or contextual corrections for your review.",
-      "label": "Your corrected text",
-      "placeholder": "Paste the complete corrected version for this record here…",
+      "title": "Provide a correction",
+      "description": "Used to suggest vocabulary changes. This transcript stays unchanged.",
+      "label": "The complete corrected text for this transcript",
+      "placeholder": "Paste the complete corrected text…",
       "characters": "{{count}} / {{limit}} characters",
-      "submit": "Submit sample",
-      "submitting": "Saving sample…",
+      "submit": "Provide correction",
+      "submitting": "Saving…",
       "privacy": "Only this text is submitted locally. No clipboard reading, cloud sample upload, or automatic insertion. The sample follows its text history retention.",
       "saved": "Sample saved locally. Review pending vocabulary below. Large rewrites may produce no correction suggestions.",
-      "failed": "The sample could not be saved. Check that the record still exists, then retry."
+      "failed": "The sample could not be saved. Check that the record still exists, then retry.",
+      "dataHelp": "How samples are handled"
     },
     "startup": {
       "label": "Start when signing in to Windows",
@@ -1023,6 +1038,50 @@
         "manual_paste_unavailable": "Protected paste is unavailable. The result remains in history.",
         "manual_paste_invalid_text": "No valid text is available to paste.",
         "manual_paste_unsupported_method": "The configured input method does not support manual paste. The result remains available in history."
+      }
+    },
+    "preferencesTitle": "Input and appearance",
+    "usage": {
+      "title": "Recent usage",
+      "period": "Last 7 days",
+      "scope": "Retained records · up to 300",
+      "transcriptions": "Transcriptions",
+      "generated": "Generated text",
+      "savedTime": "Estimated time saved",
+      "times": "times",
+      "characters": "characters",
+      "minutes": "min",
+      "unavailable": "—",
+      "explain": "View the time estimate method",
+      "method": "Reference typing speed: 60 Han characters/min and 40 English words/min, less each recording request-to-release duration and processing time, floored at zero per record. No typing time is added for numbers, punctuation or other scripts. Only nonempty records with complete durations and a completed software input flow qualify; failed, cancelled and unconfirmed input do not.",
+      "estimateSamples": "{{count}} eligible samples",
+      "generatedNote": "Generated text counts Unicode non-whitespace characters, not confirmed text in the target app. Usage covers up to 300 retained records from the last seven days and changes when records are deleted or expire.",
+      "noEstimate": "No eligible timing data yet",
+      "loadFailed": "Usage could not be fully loaded. Please retry."
+    },
+    "footer": {
+      "separator": "·",
+      "mode": "{{mode}} · {{strength}}",
+      "modeUnavailable": "Cleanup status unavailable",
+      "cloudPaused": "Claude cleanup paused",
+      "shortcut": "Hold {{shortcut}} to speak",
+      "dataHelp": "View data handling for the current mode",
+      "dataTitle": "How this mode handles data",
+      "audioLocal": "Audio is recognized locally and is not uploaded.",
+      "dataModes": {
+        "claude": "When Claude cleanup is enabled, transcript text and relevant vocabulary hints are sent to Claude.",
+        "local": "Transcript text is sent to the configured local compatible service. Failure does not switch to cloud cleanup.",
+        "off": "Cleanup is off. Local recognition and confirmed vocabulary are used directly."
+      }
+    },
+    "autoPaste": {
+      "clipboard_restore_failed": {
+        "title": "Clipboard restoration incomplete",
+        "description": "The original clipboard could not be fully restored. Please check your clipboard; the result remains in Recent transcripts."
+      },
+      "input_unconfirmed": {
+        "title": "Input is unconfirmed",
+        "description": "The target app could not be confirmed to have read this text. Check the input field to avoid duplicates; the result remains in Recent transcripts."
       }
     }
   }

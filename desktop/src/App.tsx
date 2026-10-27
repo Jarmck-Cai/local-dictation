@@ -19,11 +19,14 @@ import { useSettings } from "./hooks/useSettings";
 import { commands } from "@/bindings";
 import type { ModelStateEvent, RecordingErrorEvent } from "./lib/types/events";
 import { getLanguageDirection, initializeRTL } from "@/lib/utils/rtl";
+import { DictationDataProvider } from "./hooks/DictationData";
+import { DictationStatus } from "./components/settings/DictationStatus";
+import { pasteErrorCode } from "./lib/dictationState";
 
 function App() {
   const { t, i18n } = useTranslation();
   const [currentSection, setCurrentSection] =
-    useState<SidebarSection>("general");
+    useState<SidebarSection>("history");
   const [microphoneDenied, setMicrophoneDenied] = useState(false);
   const {
     settings,
@@ -95,10 +98,22 @@ function App() {
         toast.error(t("dictation.recordingFailed"));
       }
     });
-    void register("paste-error", () => {
-      toast.error(t("errors.pasteFailedTitle"), {
-        description: t("errors.pasteFailed"),
-      });
+    void register<unknown>("paste-error", (payload) => {
+      const code = pasteErrorCode(payload);
+      toast.error(
+        t(
+          code === "failed"
+            ? "errors.pasteFailedTitle"
+            : `dictation.autoPaste.${code}.title`,
+        ),
+        {
+          description: t(
+            code === "failed"
+              ? "errors.pasteFailed"
+              : `dictation.autoPaste.${code}.description`,
+          ),
+        },
+      );
     });
     void register("transcription-error", () => {
       toast.error(t("errors.transcriptionFailedTitle"), {
@@ -176,58 +191,60 @@ function App() {
   }
 
   return (
-    <div
-      dir={getLanguageDirection(i18n.language)}
-      className="h-screen flex select-none cursor-default overflow-hidden"
-    >
-      <Toaster theme="system" richColors closeButton />
-      <Sidebar
-        activeSection={currentSection}
-        onSectionChange={setCurrentSection}
-      />
-      <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
-        <header className="shrink-0 px-7 py-5 border-b border-mid-gray/15">
-          <h1 className="font-semibold text-xl">
-            {t(SECTIONS_CONFIG[currentSection].labelKey)}
-          </h1>
-          <p className="mt-1 text-xs text-text/50">{t("dictation.tagline")}</p>
-        </header>
-        <div ref={scrollRef} className="flex-1 overflow-y-auto p-6">
-          {microphoneDenied && (
-            <div className="max-w-3xl mx-auto mb-5 rounded-lg border border-warning/25 bg-warning/10 p-4 space-y-3">
-              <p className="text-sm">
-                {t("errors.micPermissionDenied.windows")}
-              </p>
-              <div className="flex gap-2">
-                <Button
-                  variant="secondary"
-                  onClick={() => commands.openMicrophonePrivacySettings()}
-                >
-                  {t("dictation.openMicrophoneSettings")}
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={async () => {
-                    await checkMicrophone();
-                    await refreshAudioDevices();
-                  }}
-                >
-                  {t("dictation.retry")}
-                </Button>
+    <DictationDataProvider>
+      <div
+        dir={getLanguageDirection(i18n.language)}
+        className="qs-shell h-screen flex select-none cursor-default overflow-hidden"
+      >
+        <Toaster theme="system" richColors closeButton />
+        <Sidebar
+          activeSection={currentSection}
+          onSectionChange={setCurrentSection}
+        />
+        <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
+          <header className="qs-page-header shrink-0">
+            <h1 className="font-semibold text-2xl">
+              {t(SECTIONS_CONFIG[currentSection].labelKey)}
+            </h1>
+          </header>
+          <div ref={scrollRef} className="qs-content flex-1 overflow-y-auto">
+            {microphoneDenied && (
+              <div className="max-w-3xl mx-auto mb-5 rounded-lg border border-warning/25 bg-warning/10 p-4 space-y-3">
+                <p className="text-sm">
+                  {t("errors.micPermissionDenied.windows")}
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="secondary"
+                    onClick={() => commands.openMicrophonePrivacySettings()}
+                  >
+                    {t("dictation.openMicrophoneSettings")}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={async () => {
+                      await checkMicrophone();
+                      await refreshAudioDevices();
+                    }}
+                  >
+                    {t("dictation.retry")}
+                  </Button>
+                </div>
               </div>
-            </div>
-          )}
-          {Object.entries(SECTIONS_CONFIG).map(([id, section]) => {
-            const Section = section.component;
-            return (
-              <div key={id} hidden={currentSection !== id}>
-                <Section />
-              </div>
-            );
-          })}
-        </div>
-      </main>
-    </div>
+            )}
+            {Object.entries(SECTIONS_CONFIG).map(([id, section]) => {
+              const Section = section.component;
+              return (
+                <div key={id} hidden={currentSection !== id}>
+                  <Section />
+                </div>
+              );
+            })}
+          </div>
+          <DictationStatus />
+        </main>
+      </div>
+    </DictationDataProvider>
   );
 }
 

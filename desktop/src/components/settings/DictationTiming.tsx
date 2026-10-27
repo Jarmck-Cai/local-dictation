@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { useDictationMetrics } from "@/hooks/useDictationMetrics";
+import { useDictationData } from "@/hooks/DictationData";
 import type { DictationTiming } from "@/lib/dictationApi";
 import { distinctCleanupReason } from "@/lib/dictationState";
 import { summarizeResources, summarizeTimings } from "@/lib/dictationSummary";
@@ -21,6 +21,14 @@ export const DictationTimingDetails = ({
       }),
     });
   const values = [
+    [
+      "recording",
+      typeof timing.recording_ms === "number" &&
+      Number.isFinite(timing.recording_ms) &&
+      timing.recording_ms >= 0
+        ? seconds(timing.recording_ms)
+        : t("dictation.timing.unavailable"),
+    ],
     ["asr", seconds(timing.asr_ms)],
     ["cleanup", seconds(timing.cleanup_ms)],
     [
@@ -223,11 +231,15 @@ const DictationTimingSummary = ({
 
 export const LatestDictationTiming = () => {
   const { t } = useTranslation();
-  const { metrics, failed, retry } = useDictationMetrics();
+  const {
+    timing: { metrics, failed, loading, retry },
+  } = useDictationData();
   return (
     <SettingsGroup title={t("dictation.timing.summaryTitle")}>
       <div className="p-4">
-        {failed ? (
+        {loading ? (
+          <p className="text-sm text-text/55">{t("common.loading")}</p>
+        ) : failed ? (
           <div className="flex gap-3 items-center justify-between">
             <p role="alert" className="text-sm text-text/65">
               {t("dictation.timing.loadFailed")}

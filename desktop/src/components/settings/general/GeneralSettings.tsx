@@ -4,20 +4,18 @@ import { ShortcutInput } from "../ShortcutInput";
 import { SettingsGroup } from "../../ui/SettingsGroup";
 import { MuteWhileRecording } from "../MuteWhileRecording";
 import { DictationCleanup } from "../DictationCleanup";
-import { DictationStatus } from "../DictationStatus";
 import { SenseVoiceModel } from "../SenseVoiceModel";
-import { HistorySettings } from "../history/HistorySettings";
-import { LatestDictationTiming } from "../DictationTiming";
 import { AutostartToggle } from "../AutostartToggle";
 import { ManualPasteShortcut } from "../ManualPasteShortcut";
+import { ClipboardHandlingSetting } from "../ClipboardHandling";
+import { PasteMethodSetting } from "../PasteMethod";
+import { AppLanguageSelector } from "../AppLanguageSelector";
+import { ThemeSelector } from "../ThemeSelector";
 
 export const GeneralSettings = () => {
   const { t } = useTranslation();
   return (
-    <div className="max-w-3xl w-full mx-auto space-y-6">
-      <DictationStatus />
-      <HistorySettings latestOnly />
-      <LatestDictationTiming />
+    <div className="qs-page space-y-6">
       <SenseVoiceModel />
       <DictationCleanup />
       <SettingsGroup title={t("dictation.settingsTitle")}>
@@ -33,6 +31,12 @@ export const GeneralSettings = () => {
         <MicrophoneSelector grouped />
         <MuteWhileRecording grouped />
         <AutostartToggle descriptionMode="inline" grouped />
+      </SettingsGroup>
+      <SettingsGroup title={t("dictation.preferencesTitle")}>
+        <PasteMethodSetting descriptionMode="inline" grouped />
+        <ClipboardHandlingSetting descriptionMode="inline" grouped />
+        <AppLanguageSelector grouped />
+        <ThemeSelector grouped />
       </SettingsGroup>
       <p className="px-4 text-xs text-text/50">{t("dictation.retention")}</p>
     </div>

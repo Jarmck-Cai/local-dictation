@@ -1,193 +1,174 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Copy, Trash2 } from "lucide-react";
+import { Check, ChevronDown, Copy, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { commands, events, type HistoryEntry } from "@/bindings";
+import type { HistoryEntry } from "@/bindings";
 import { formatDateTime } from "@/utils/dateFormat";
+import { useDictationData } from "@/hooks/DictationData";
+import { historyFinalText } from "@/lib/usageSummary";
 import { Button } from "../../ui/Button";
-import { SettingsGroup } from "../../ui/SettingsGroup";
 import { copyToClipboard } from "./clipboard";
-import { useDictationMetrics } from "@/hooks/useDictationMetrics";
 import type { DictationTiming } from "@/lib/dictationApi";
 import { DictationTimingDetails } from "../DictationTiming";
 import { CorrectionSample } from "./CorrectionSample";
+import { UsageOverview } from "../UsageOverview";
 
 const PAGE_SIZE = 30;
 
-export const HistorySettings = ({
-  latestOnly = false,
-}: {
-  latestOnly?: boolean;
-}) => {
-  const { t } = useTranslation();
-  const { metrics } = useDictationMetrics();
-  const [entries, setEntries] = useState<HistoryEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [failed, setFailed] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
+export const HistorySettings = () => {
+  const { t, i18n } = useTranslation();
+  const {
+    history,
+    timing: { metrics },
+  } = useDictationData();
+  const {
+    entries,
+    loading,
+    failed,
+    retry,
+    removeEntry,
+    hasMore,
+    loadingMore,
+    moreFailed,
+    loadMore,
+    retryMore,
+  } = history;
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
-  const entriesRef = useRef<HistoryEntry[]>([]);
-  const loadingRef = useRef(false);
-  const requestRef = useRef(0);
+
+  const revealMore = useCallback(async () => {
+    if (loading || loadingMore || failed || moreFailed) return;
+    const nextCount = visibleCount + PAGE_SIZE;
+    setVisibleCount(nextCount);
+    if (nextCount > entries.length && hasMore) await loadMore();
+  }, [
+    loading,
+    loadingMore,
+    failed,
+    moreFailed,
+    visibleCount,
+    entries.length,
+    hasMore,
+    loadMore,
+  ]);
 
   useEffect(() => {
-    entriesRef.current = entries;
-  }, [entries]);
-
-  const loadPage = useCallback(
-    async (cursor?: number) => {
-      const first = cursor === undefined;
-      if (!first && loadingRef.current) return;
-      const request = ++requestRef.current;
-      loadingRef.current = true;
-      if (first) setLoading(true);
-      setFailed(false);
-      try {
-        const result = await commands.getHistoryEntries(
-          cursor ?? null,
-          latestOnly ? 1 : PAGE_SIZE,
-        );
-        if (request !== requestRef.current) return;
-        if (result.status !== "ok") throw new Error("history unavailable");
-        setEntries((previous) =>
-          first
-            ? result.data.entries
-            : [
-                ...previous,
-                ...result.data.entries.filter(
-                  (entry) => !previous.some((old) => old.id === entry.id),
-                ),
-              ],
-        );
-        setHasMore(result.data.has_more);
-      } catch {
-        if (request === requestRef.current) setFailed(true);
-      } finally {
-        if (request === requestRef.current) {
-          setLoading(false);
-          loadingRef.current = false;
-        }
-      }
-    },
-    [latestOnly],
-  );
-
-  useEffect(() => {
-    void loadPage();
-    return () => {
-      requestRef.current += 1;
-    };
-  }, [loadPage]);
-
-  useEffect(() => {
-    if (loading || latestOnly || !hasMore || failed) return;
     const sentinel = sentinelRef.current;
-    if (!sentinel) return;
+    if (
+      !sentinel ||
+      loading ||
+      loadingMore ||
+      failed ||
+      moreFailed ||
+      (visibleCount >= entries.length && !hasMore)
+    )
+      return;
     const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) {
-        const last = entriesRef.current[entriesRef.current.length - 1];
-        if (last) void loadPage(last.id);
-      }
+      if (entry.isIntersecting) void revealMore();
     });
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [loading, latestOnly, hasMore, failed, loadPage]);
+  }, [
+    loading,
+    loadingMore,
+    failed,
+    moreFailed,
+    visibleCount,
+    entries.length,
+    hasMore,
+    revealMore,
+  ]);
 
-  useEffect(() => {
-    let disposed = false;
-    let stopListening: (() => void) | undefined;
-    const unlisten = events.historyUpdatePayload.listen(({ payload }) => {
-      if (payload.action === "added") {
-        // A new pipeline result supersedes an in-flight first-page snapshot.
-        requestRef.current += 1;
-        loadingRef.current = false;
-        setLoading(false);
-        setFailed(false);
-        setEntries((previous) => {
-          const next = [
-            payload.entry,
-            ...previous.filter((entry) => entry.id !== payload.entry.id),
-          ];
-          return latestOnly ? next.slice(0, 1) : next;
-        });
-      } else if (payload.action === "updated") {
-        setEntries((previous) =>
-          previous.map((entry) =>
-            entry.id === payload.entry.id ? payload.entry : entry,
-          ),
-        );
-      } else if (payload.action === "deleted") {
-        if (latestOnly) void loadPage();
-        else
-          setEntries((previous) =>
-            previous.filter((entry) => entry.id !== payload.id),
-          );
-      }
-    });
-    void unlisten.then((stop) => {
-      if (disposed) stop();
-      else stopListening = stop;
-    });
-    return () => {
-      disposed = true;
-      stopListening?.();
-    };
-  }, [latestOnly, loadPage]);
-
-  const deleteEntry = async (id: number) => {
-    const result = await commands.deleteHistoryEntry(id);
-    if (result.status !== "ok") throw new Error("delete failed");
-    setEntries((previous) => previous.filter((entry) => entry.id !== id));
-    if (latestOnly || entriesRef.current.length <= 1) await loadPage();
-  };
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const groups = new Map<string, { label: string; entries: HistoryEntry[] }>();
+  for (const entry of entries.slice(0, visibleCount)) {
+    const date = new Date(entry.timestamp * 1000);
+    const key = date.toDateString();
+    const label =
+      key === today.toDateString()
+        ? t("dictation.history.today")
+        : key === yesterday.toDateString()
+          ? t("dictation.history.yesterday")
+          : date.toLocaleDateString(i18n.language, {
+              month: "long",
+              day: "numeric",
+            });
+    if (!groups.has(key)) groups.set(key, { label, entries: [] });
+    groups.get(key)!.entries.push(entry);
+  }
 
   return (
-    <div className="max-w-3xl w-full mx-auto space-y-4">
-      <SettingsGroup
-        title={t(
-          latestOnly ? "dictation.history.latest" : "dictation.history.title",
-        )}
-      >
-        {loading ? (
-          <p className="p-4 text-sm text-text/60">
+    <div className="qs-page space-y-6">
+      <UsageOverview />
+      <section aria-label={t("dictation.history.title")}>
+        {loading && !entries.length && (
+          <p role="status" className="qs-empty">
             {t("settings.history.loading")}
           </p>
-        ) : failed ? (
-          <div className="p-4 flex items-center justify-between gap-3">
-            <p role="alert" className="text-sm text-error">
-              {t("dictation.history.loadFailed")}
-            </p>
-            <Button variant="secondary" onClick={() => loadPage()}>
+        )}
+        {failed && (
+          <div className="qs-inline-alert" role="alert">
+            <p>{t("dictation.history.loadFailed")}</p>
+            <Button variant="secondary" onClick={retry}>
               {t("dictation.retry")}
             </Button>
           </div>
-        ) : entries.length === 0 ? (
-          <p className="p-5 text-sm text-text/55">
-            {t("dictation.history.empty")}
-          </p>
-        ) : (
-          entries.map((entry) => (
-            <HistoryEntryCard
-              key={entry.id}
-              entry={entry}
-              timing={
-                latestOnly
-                  ? undefined
-                  : metrics.find((timing) => timing.history_id === entry.id)
-              }
-              onDelete={() => deleteEntry(entry.id)}
-            />
-          ))
         )}
-      </SettingsGroup>
-      {!latestOnly && (
-        <>
-          <div ref={sentinelRef} className="h-1" />
-          <p className="px-4 text-xs text-text/50">
-            {t("dictation.retention")}
-          </p>
-        </>
-      )}
+        {!loading && !failed && !entries.length && (
+          <p className="qs-empty">{t("dictation.history.empty")}</p>
+        )}
+        {[...groups].map(([key, group]) => (
+          <section key={key} className="qs-day-group" aria-label={group.label}>
+            <div className="qs-day-heading">
+              <h2>{group.label}</h2>
+              <span>
+                {t("dictation.history.recordCount", {
+                  count: group.entries.length,
+                })}
+              </span>
+            </div>
+            {group.entries.map((entry) => (
+              <HistoryEntryCard
+                key={entry.id}
+                entry={entry}
+                timing={metrics.find((row) => row.history_id === entry.id)}
+                expanded={expandedId === entry.id}
+                onToggle={() =>
+                  setExpandedId((id) => (id === entry.id ? null : entry.id))
+                }
+                onDelete={() => removeEntry(entry.id)}
+              />
+            ))}
+          </section>
+        ))}
+        <div ref={sentinelRef} className="h-1" />
+        {moreFailed && (
+          <div className="qs-inline-alert" role="alert">
+            <p>{t("dictation.history.loadMoreFailed")}</p>
+            <Button variant="secondary" size="sm" onClick={() => retryMore()}>
+              {t("dictation.retry")}
+            </Button>
+          </div>
+        )}
+        {!moreFailed && (visibleCount < entries.length || hasMore) && (
+          <div className="py-3 text-center">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={revealMore}
+              disabled={loading || loadingMore || failed}
+            >
+              {t(loadingMore ? "common.loading" : "dictation.history.loadMore")}
+            </Button>
+          </div>
+        )}
+      </section>
+      <p className="text-xs text-text/45 leading-relaxed">
+        {t("dictation.retention")}
+      </p>
     </div>
   );
 };
@@ -196,29 +177,29 @@ const HistoryEntryCard = ({
   entry,
   onDelete,
   timing,
+  expanded,
+  onToggle,
 }: {
   entry: HistoryEntry;
   onDelete: () => Promise<void>;
   timing?: DictationTiming;
+  expanded: boolean;
+  onToggle: () => void;
 }) => {
   const { t, i18n } = useTranslation();
   const [copied, setCopied] = useState<"final" | "raw" | null>(null);
   const [deleting, setDeleting] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout>>();
-  const finalText = entry.post_processed_text?.trim()
-    ? entry.post_processed_text
-    : entry.transcription_text;
-
-  useEffect(
-    () => () => {
-      clearTimeout(timerRef.current);
-    },
-    [],
-  );
+  const finalText = historyFinalText(entry);
+  const detailsId = `history-details-${entry.id}`;
+  useEffect(() => () => clearTimeout(timerRef.current), []);
 
   const copy = async (kind: "final" | "raw") => {
-    const text = kind === "final" ? finalText : entry.transcription_text;
-    if (!(await copyToClipboard(text))) {
+    if (
+      !(await copyToClipboard(
+        kind === "final" ? finalText : entry.transcription_text,
+      ))
+    ) {
       toast.error(t("settings.history.copyError"));
       return;
     }
@@ -226,7 +207,6 @@ const HistoryEntryCard = ({
     clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => setCopied(null), 2000);
   };
-
   const remove = async () => {
     setDeleting(true);
     try {
@@ -239,76 +219,115 @@ const HistoryEntryCard = ({
   };
 
   return (
-    <article className="p-4 space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <time className="text-xs text-text/50">
-          {formatDateTime(String(entry.timestamp), i18n.language)}
-        </time>
-        <div className="flex gap-1.5">
-          <Button
-            variant="secondary"
-            size="sm"
-            className="flex items-center gap-1.5"
-            onClick={() => copy("final")}
-            disabled={deleting || !finalText.trim()}
+    <article className={`qs-record ${expanded ? "qs-record-expanded" : ""}`}>
+      <div className="qs-record-row">
+        <button
+          type="button"
+          className="qs-record-toggle"
+          aria-expanded={expanded}
+          aria-controls={detailsId}
+          onClick={onToggle}
+        >
+          <time
+            title={formatDateTime(String(entry.timestamp), i18n.language)}
+            dateTime={new Date(entry.timestamp * 1000).toISOString()}
           >
-            {copied === "final" ? <Check size={14} /> : <Copy size={14} />}
-            {t(
-              copied === "final"
-                ? "dictation.history.copied"
-                : "dictation.history.copyFinal",
+            {new Date(entry.timestamp * 1000).toLocaleTimeString(
+              i18n.language,
+              { hour: "2-digit", minute: "2-digit" },
             )}
-          </Button>
+          </time>
+          <span
+            className={`qs-record-preview ${expanded ? "qs-record-collapse" : ""}`}
+          >
+            {expanded
+              ? t("dictation.history.collapse")
+              : finalText || t("settings.history.transcriptionFailed")}
+          </span>
+          <ChevronDown
+            size={15}
+            className="qs-record-chevron"
+            aria-hidden="true"
+          />
+        </button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="qs-copy"
+          onClick={() => copy("final")}
+          disabled={deleting || !finalText.trim()}
+        >
+          {copied === "final" ? (
+            <Check size={13} aria-hidden="true" />
+          ) : (
+            <Copy size={13} aria-hidden="true" />
+          )}
+          {t(
+            copied === "final"
+              ? "dictation.history.copied"
+              : "dictation.history.copy",
+          )}
+        </Button>
+      </div>
+      <div
+        id={detailsId}
+        hidden={!expanded}
+        className="qs-record-details space-y-4"
+      >
+        <p className="select-text cursor-text whitespace-pre-wrap break-words text-sm leading-relaxed">
+          {finalText || t("settings.history.transcriptionFailed")}
+        </p>
+        {entry.post_process_requested && !entry.post_processed_text && (
+          <p className="text-xs text-text/55">
+            {t("dictation.history.originalUsed")}
+          </p>
+        )}
+        <details className="qs-detail-section">
+          <summary>{t("dictation.history.raw")}</summary>
+          <div className="pt-3 space-y-3">
+            <p className="select-text cursor-text whitespace-pre-wrap break-words text-sm text-text/70">
+              {entry.transcription_text ||
+                t("settings.history.transcriptionFailed")}
+            </p>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={deleting || !entry.transcription_text.trim()}
+              onClick={() => copy("raw")}
+            >
+              {t(
+                copied === "raw"
+                  ? "dictation.history.copied"
+                  : "dictation.history.copyRaw",
+              )}
+            </Button>
+          </div>
+        </details>
+        {timing && (
+          <details className="qs-detail-section">
+            <summary>{t("dictation.history.timing")}</summary>
+            <div className="pt-3">
+              <DictationTimingDetails timing={timing} />
+            </div>
+          </details>
+        )}
+        {finalText.trim() && <CorrectionSample historyId={entry.id} />}
+        <div className="flex items-center justify-between gap-4 border-t border-mid-gray/15 pt-3">
+          <p className="text-xs text-text/45">
+            {t("dictation.history.inputAttempt")}
+          </p>
           <Button
             variant="danger-ghost"
             size="sm"
             onClick={remove}
             disabled={deleting}
-            aria-label={t("settings.history.delete")}
-            title={t("settings.history.delete")}
+            className="flex items-center gap-1.5 shrink-0"
           >
-            <Trash2 size={15} />
+            <Trash2 size={13} aria-hidden="true" />
+            {t("settings.history.delete")}
           </Button>
         </div>
       </div>
-      <p className="select-text cursor-text whitespace-pre-wrap break-words text-sm leading-relaxed">
-        {finalText || t("settings.history.transcriptionFailed")}
-      </p>
-      {finalText.trim() && (
-        <p className="text-xs text-text/50">
-          {t("dictation.history.inputAttempt")}
-        </p>
-      )}
-      {entry.post_process_requested && !entry.post_processed_text && (
-        <p className="text-xs text-text/55">
-          {t("dictation.history.originalUsed")}
-        </p>
-      )}
-      {timing && <DictationTimingDetails timing={timing} />}
-      <details className="border-t border-mid-gray/15 pt-2">
-        <summary className="text-xs text-text/60 cursor-pointer">
-          {t("dictation.history.raw")}
-        </summary>
-        <div className="pt-3 space-y-3">
-          <p className="select-text cursor-text whitespace-pre-wrap break-words text-sm text-text/70">
-            {entry.transcription_text ||
-              t("settings.history.transcriptionFailed")}
-          </p>
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={deleting || !entry.transcription_text.trim()}
-            onClick={() => copy("raw")}
-          >
-            {t(
-              copied === "raw"
-                ? "dictation.history.copied"
-                : "dictation.history.copyRaw",
-            )}
-          </Button>
-        </div>
-      </details>
-      <CorrectionSample historyId={entry.id} />
     </article>
   );
 };
