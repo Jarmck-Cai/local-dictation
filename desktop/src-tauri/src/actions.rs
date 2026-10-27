@@ -95,6 +95,9 @@ pub(crate) struct ProcessedTranscription {
     pub post_processed_text: Option<String>,
     pub post_process_prompt: Option<String>,
     pub post_process_requested: bool,
+    pub cleanup_ms: u64,
+    pub cleanup_budget_ms: u64,
+    pub cleanup_outcome: String,
 }
 
 fn processed_outcome(outcome: CleanupOutcome) -> ProcessedTranscription {
@@ -107,6 +110,12 @@ fn processed_outcome(outcome: CleanupOutcome) -> ProcessedTranscription {
         post_processed_text: Some(final_text),
         post_process_prompt: None,
         post_process_requested: outcome.requested,
+        cleanup_ms: outcome.elapsed_ms,
+        cleanup_budget_ms: outcome.budget_ms,
+        cleanup_outcome: outcome
+            .reason
+            .unwrap_or(if outcome.requested { "cleaned" } else { "off" })
+            .into(),
     }
 }
 
@@ -115,7 +124,11 @@ pub(crate) async fn process_transcription_output(
     transcription: &str,
     _legacy_post_process: bool,
 ) -> ProcessedTranscription {
-    processed_outcome(dictation_cleanup::cleanup(app, &get_settings(app), transcription).await)
+    let prepared = crate::vocabulary::apply_confirmed(app, transcription);
+    let mut processed =
+        processed_outcome(dictation_cleanup::cleanup(app, &get_settings(app), &prepared).await);
+    processed.raw_text = transcription.into();
+    processed
 }
 
 async fn process_with_session(
@@ -123,7 +136,11 @@ async fn process_with_session(
     transcription: &str,
     session: &CleanupSession,
 ) -> ProcessedTranscription {
-    processed_outcome(dictation_cleanup::cleanup_with_session(app, session, transcription).await)
+    let prepared = crate::vocabulary::apply_confirmed(app, transcription);
+    let mut processed =
+        processed_outcome(dictation_cleanup::cleanup_with_session(app, session, &prepared).await);
+    processed.raw_text = transcription.into();
+    processed
 }
 
 impl ShortcutAction for TranscribeAction {
@@ -357,6 +374,8 @@ impl ShortcutAction for TranscribeAction {
             .unwrap_or_else(CleanupSession::unavailable);
         let post_process = cleanup_session.is_enabled();
         let cancel_generation = rm.cancel_generation();
+        let mut timing =
+            crate::dictation_metrics::DictationTiming::new(cleanup_session.mode_name());
 
         tauri::async_runtime::spawn(async move {
             let guard = Arc::new(FinishGuard(ah.clone(), Arc::clone(&tm)));
@@ -381,6 +400,9 @@ impl ShortcutAction for TranscribeAction {
 
                 if rm.was_cancelled_since(cancel_generation) {
                     debug!("Transcription operation cancelled after recording stop");
+                    timing.outcome = "cancelled".into();
+                    timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
+                    crate::dictation_metrics::record(&ah, timing);
                     tm.cancel_stream();
                     utils::hide_recording_overlay(&ah);
                     set_tray_state(&ah, TrayIconState::Idle);
@@ -389,6 +411,9 @@ impl ShortcutAction for TranscribeAction {
 
                 if samples.is_empty() {
                     debug!("Recording produced no audio samples; skipping persistence");
+                    timing.outcome = "no_audio".into();
+                    timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
+                    crate::dictation_metrics::record(&ah, timing);
                     // Tear down any streaming worker so its channel doesn't leak
                     // and block the next start_stream.
                     tm.cancel_stream();
@@ -420,6 +445,7 @@ impl ShortcutAction for TranscribeAction {
                         Ok(_) => tm.transcribe(samples),
                         Err(err) => Err(err),
                     };
+                    timing.asr_ms = crate::dictation_metrics::elapsed_ms(transcription_time);
 
                     // Await WAV save and verify
                     let wav_saved = match wav_handle.await {
@@ -447,6 +473,9 @@ impl ShortcutAction for TranscribeAction {
 
                     if rm.was_cancelled_since(cancel_generation) {
                         debug!("Transcription operation cancelled before output handling");
+                        timing.outcome = "cancelled".into();
+                        timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
+                        crate::dictation_metrics::record(&ah, timing);
                         utils::hide_recording_overlay(&ah);
                         set_tray_state(&ah, TrayIconState::Idle);
                         return;
@@ -467,6 +496,7 @@ impl ShortcutAction for TranscribeAction {
                                     show_processing_overlay(&ah);
                                 }
                             }
+                            let cleanup_time = Instant::now();
                             let Some(processed) = complete_unless_cancelled(
                                 process_with_session(&ah, &transcription, &cleanup_session),
                                 || rm.was_cancelled_since(cancel_generation),
@@ -474,6 +504,11 @@ impl ShortcutAction for TranscribeAction {
                             .await
                             else {
                                 debug!("Transcription operation cancelled during output handling");
+                                timing.cleanup_ms =
+                                    crate::dictation_metrics::elapsed_ms(cleanup_time);
+                                timing.outcome = "cancelled".into();
+                                timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
+                                crate::dictation_metrics::record(&ah, timing);
                                 utils::hide_recording_overlay(&ah);
                                 set_tray_state(&ah, TrayIconState::Idle);
                                 return;
@@ -481,6 +516,16 @@ impl ShortcutAction for TranscribeAction {
 
                             if rm.was_cancelled_since(cancel_generation) {
                                 debug!("Transcription operation cancelled before paste");
+                                timing.cleanup_ms = processed.cleanup_ms;
+                                timing.cleanup_budget_ms = processed.cleanup_budget_ms;
+                                timing.cleanup_reason = (!matches!(
+                                    processed.cleanup_outcome.as_str(),
+                                    "cleaned" | "off"
+                                ))
+                                .then(|| processed.cleanup_outcome.clone());
+                                timing.outcome = "cancelled".into();
+                                timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
+                                crate::dictation_metrics::record(&ah, timing);
                                 utils::hide_recording_overlay(&ah);
                                 set_tray_state(&ah, TrayIconState::Idle);
                                 return;
@@ -489,17 +534,40 @@ impl ShortcutAction for TranscribeAction {
                             // Recoverable text does not depend on successful
                             // audio persistence. Missing audio only disables
                             // playback/retranscription of this history entry.
-                            if let Err(err) = hm.save_entry(
+                            timing.cleanup_ms = processed.cleanup_ms;
+                            timing.cleanup_budget_ms = processed.cleanup_budget_ms;
+                            timing.outcome = processed.cleanup_outcome.clone();
+                            timing.cleanup_reason =
+                                (!matches!(processed.cleanup_outcome.as_str(), "cleaned" | "off"))
+                                    .then(|| processed.cleanup_outcome.clone());
+                            match hm.save_entry(
                                 file_name,
                                 processed.raw_text,
                                 processed.post_process_requested,
                                 processed.post_processed_text.clone(),
                                 processed.post_process_prompt.clone(),
                             ) {
-                                error!("Failed to save history entry: {}", err);
+                                Ok(entry) => {
+                                    timing.history_id = Some(entry.id);
+                                    let learning_app = ah.clone();
+                                    tauri::async_runtime::spawn_blocking(move || {
+                                        if crate::vocabulary::observe_transcript(
+                                            &learning_app,
+                                            &entry,
+                                        )
+                                        .is_err()
+                                        {
+                                            log::warn!("Could not update vocabulary candidates");
+                                        }
+                                    });
+                                }
+                                Err(err) => error!("Failed to save history entry: {}", err),
                             }
 
                             if processed.final_text.is_empty() {
+                                timing.outcome = "empty".into();
+                                timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
+                                crate::dictation_metrics::record(&ah, timing);
                                 utils::hide_recording_overlay(&ah);
                                 set_tray_state(&ah, TrayIconState::Idle);
                             } else {
@@ -507,8 +575,12 @@ impl ShortcutAction for TranscribeAction {
                                 let paste_time = Instant::now();
                                 let final_text = processed.final_text;
                                 let rm_for_paste = Arc::clone(&rm);
+                                let mut dispatch_failure_timing = timing.clone();
                                 paste_delivery::dispatch_paste(Arc::clone(&guard), |work| ah.run_on_main_thread(work), move || {
                                     if rm_for_paste.was_cancelled_since(cancel_generation) {
+                                        timing.outcome = "cancelled".into();
+                                        timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
+                                        crate::dictation_metrics::record(&ah_clone, timing);
                                         debug!("Transcription operation cancelled before paste");
                                         utils::hide_recording_overlay(&ah_clone);
                                         set_tray_state(&ah_clone, TrayIconState::Idle);
@@ -516,20 +588,29 @@ impl ShortcutAction for TranscribeAction {
                                     }
 
                                     match utils::paste_cancellable(final_text, ah_clone.clone(), || rm_for_paste.was_cancelled_since(cancel_generation)) {
-                                        Ok(true) => debug!(
-                                            "Text pasted successfully in {:?}",
-                                            paste_time.elapsed()
-                                        ),
-                                        Ok(false) => debug!("Transcription operation cancelled before key injection"),
+                                        Ok(true) => {
+                                            debug!("Text pasted successfully in {:?}", paste_time.elapsed());
+                                            timing.paste_ms = Some(crate::dictation_metrics::elapsed_ms(paste_time));
+                                        }
+                                        Ok(false) => {
+                                            timing.outcome = "cancelled".into();
+                                            debug!("Transcription operation cancelled before key injection");
+                                        }
                                         Err(e) => {
+                                            timing.outcome = "paste_failed".into();
                                             error!("Failed to paste transcription: {}", e);
                                             let _ = ah_clone.emit("paste-error", ());
                                         }
                                     }
+                                    timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
+                                    crate::dictation_metrics::record(&ah_clone, timing);
                                     utils::hide_recording_overlay(&ah_clone);
                                     set_tray_state(&ah_clone, TrayIconState::Idle);
                                 })
                                 .unwrap_or_else(|e| {
+                                    dispatch_failure_timing.outcome = "paste_failed".into();
+                                    dispatch_failure_timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
+                                    crate::dictation_metrics::record(&ah, dispatch_failure_timing);
                                     error!("Failed to run paste on main thread: {:?}", e);
                                     let _ = ah.emit("paste-error", ());
                                     utils::hide_recording_overlay(&ah);
@@ -538,6 +619,14 @@ impl ShortcutAction for TranscribeAction {
                             }
                         }
                         Err(err) => {
+                            timing.outcome = if rm.was_cancelled_since(cancel_generation) {
+                                "cancelled"
+                            } else {
+                                "asr_failed"
+                            }
+                            .into();
+                            timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
+                            crate::dictation_metrics::record(&ah, timing);
                             if rm.was_cancelled_since(cancel_generation) {
                                 debug!(
                                     "Transcription operation cancelled after transcription error"
@@ -570,6 +659,9 @@ impl ShortcutAction for TranscribeAction {
                 }
             } else {
                 debug!("No samples retrieved from recording stop");
+                timing.outcome = "no_audio".into();
+                timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
+                crate::dictation_metrics::record(&ah, timing);
                 // Tear down any streaming worker so its channel doesn't leak.
                 tm.cancel_stream();
                 utils::hide_recording_overlay(&ah);

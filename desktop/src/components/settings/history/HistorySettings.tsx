@@ -7,6 +7,10 @@ import { formatDateTime } from "@/utils/dateFormat";
 import { Button } from "../../ui/Button";
 import { SettingsGroup } from "../../ui/SettingsGroup";
 import { copyToClipboard } from "./clipboard";
+import { useDictationMetrics } from "@/hooks/useDictationMetrics";
+import type { DictationTiming } from "@/lib/dictationApi";
+import { DictationTimingDetails } from "../DictationTiming";
+import { CorrectionSample } from "./CorrectionSample";
 
 const PAGE_SIZE = 30;
 
@@ -16,6 +20,7 @@ export const HistorySettings = ({
   latestOnly?: boolean;
 }) => {
   const { t } = useTranslation();
+  const { metrics } = useDictationMetrics();
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -165,6 +170,11 @@ export const HistorySettings = ({
             <HistoryEntryCard
               key={entry.id}
               entry={entry}
+              timing={
+                latestOnly
+                  ? undefined
+                  : metrics.find((timing) => timing.history_id === entry.id)
+              }
               onDelete={() => deleteEntry(entry.id)}
             />
           ))
@@ -185,9 +195,11 @@ export const HistorySettings = ({
 const HistoryEntryCard = ({
   entry,
   onDelete,
+  timing,
 }: {
   entry: HistoryEntry;
   onDelete: () => Promise<void>;
+  timing?: DictationTiming;
 }) => {
   const { t, i18n } = useTranslation();
   const [copied, setCopied] = useState<"final" | "raw" | null>(null);
@@ -272,6 +284,7 @@ const HistoryEntryCard = ({
           {t("dictation.history.originalUsed")}
         </p>
       )}
+      {timing && <DictationTimingDetails timing={timing} />}
       <details className="border-t border-mid-gray/15 pt-2">
         <summary className="text-xs text-text/60 cursor-pointer">
           {t("dictation.history.raw")}
@@ -295,6 +308,7 @@ const HistoryEntryCard = ({
           </Button>
         </div>
       </details>
+      <CorrectionSample historyId={entry.id} />
     </article>
   );
 };

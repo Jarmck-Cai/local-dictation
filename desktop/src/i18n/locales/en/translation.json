@@ -183,6 +183,10 @@
           "copy_latest_result": {
             "name": "Copy latest result",
             "description": "Ctrl+Shift+F8 by default. Copies an existing result without recognizing, cleaning, or pasting again."
+          },
+          "toggle_cloud": {
+            "name": "Pause / resume cloud cleanup",
+            "description": "Ctrl+Alt+F8 by default. Skip cloud cleanup while keeping local recognition. Click to change."
           }
         },
         "errors": {
@@ -793,7 +797,7 @@
         "local": "Connects to a compatible service on this computer. Failures keep the original text and do not switch to the cloud.",
         "off": "Uses the original local transcript directly."
       },
-      "fallback": "Timeouts or failed checks keep the original text.",
+      "fallback": "Slow or failed cleanup uses the complete local transcript with confirmed vocabulary.",
       "saved": "Cleanup settings saved",
       "saveFailed": "Settings were not saved. Check the local address and model name, then retry.",
       "loadFailed": "Cleanup settings could not be read.",
@@ -810,7 +814,21 @@
       "localAddress": "Local cleanup address",
       "localAddressPlaceholder": "http://127.0.0.1:11434/v1",
       "localModel": "Model name",
-      "localModelPlaceholder": "Model name from your local service"
+      "localModelPlaceholder": "Model name from your local service",
+      "strength": "Cleanup strength",
+      "strengths": {
+        "faithful": "Close to speech",
+        "light": "Light cleanup",
+        "clear": "Clear expression"
+      },
+      "strengthHints": {
+        "faithful": "Fix punctuation and clear errors while preserving your phrasing.",
+        "light": "Remove empty fillers and repetitions, with conservative sentence cleanup.",
+        "clear": "Improve local sentence order and clarity while keeping your meaning and tone."
+      },
+      "paragraphs": "Natural paragraphs",
+      "paragraphsHint": "Separate related ideas into paragraphs. A pause alone does not create a paragraph.",
+      "fidelity": "Every level preserves facts, numbers, code, negation, conditions, and uncertainty. No added facts, answers, or summaries."
     },
     "history": {
       "latest": "Latest result",
@@ -826,9 +844,96 @@
       "copyLatestFailed": "The latest result could not be copied. Check that a result exists or retry from history."
     },
     "vocabulary": {
-      "title": "Personal vocabulary",
-      "description": "Keep common names, products, and technical terms. Existing fuzzy correction primarily supports Latin letters and numbers and may not correct every name."
+      "title": "Manual vocabulary",
+      "description": "Add known names, products, and technical terms yourself. Learned vocabulary below is kept separately.",
+      "learningTitle": "Vocabulary learning",
+      "learningDescription": "Review recurring terms and suggestions from correction samples before they take effect.",
+      "localOnly": "Candidates and correction samples are analyzed on this computer. Confirmed terms can help local fallback too.",
+      "candidates": "Awaiting confirmation",
+      "confirmHint": "Review spelling and context. A frequent transcript term can still be wrong; suggestions never apply before confirmation.",
+      "noCandidates": "No candidates awaiting confirmation.",
+      "candidateInfo": "{{source}} · observed {{count}} time(s)",
+      "sources": {
+        "transcript": "Transcript term",
+        "correction": "Correction sample",
+        "asr_correction": "Recognition correction",
+        "cleanup_correction": "Cleanup correction"
+      },
+      "replacement": "{{from}} → {{term}}",
+      "context": "Context: {{context}}",
+      "accept": "Confirm",
+      "reject": "Dismiss",
+      "learned": "Confirmed vocabulary",
+      "learnedHint": "These terms remain after source history expires. Remove any term to stop applying it.",
+      "noLearned": "No learned terms yet.",
+      "aliases": "Recognized variants: {{aliases}}",
+      "separator": ", ",
+      "delete": "Remove",
+      "refresh": "Refresh",
+      "loadFailed": "Vocabulary could not be read. Please refresh.",
+      "changeFailed": "Vocabulary could not be changed. Please refresh and retry."
     },
-    "settingsFailed": "App settings could not be read."
+    "settingsFailed": "App settings could not be read.",
+    "cloud": {
+      "states": {
+        "active": "Cloud cleanup enabled",
+        "manual": "Cloud cleanup manually paused",
+        "cooldown": "Cloud temporarily paused · {{seconds}} s remaining",
+        "nextRecording": "Cooldown finished · retry on the next recording"
+      },
+      "pause": "Pause cloud",
+      "resume": "Resume for next recording",
+      "hint": "Pause skips pending cloud cleanup and keeps local transcription. Resume applies to the next recording; local model mode is unaffected.",
+      "loadFailed": "Cloud status could not be read.",
+      "changeFailed": "Cloud status could not be changed. Please retry.",
+      "policy": "Short text gets a 3-second cloud budget, with up to 8 seconds for longer text. Three consecutive timeouts or network failures pause cloud cleanup for 10 minutes."
+    },
+    "timing": {
+      "title": "Latest processing time",
+      "asr": "Recognition",
+      "cleanup": "Cleanup",
+      "paste": "Insertion",
+      "total": "Total wait",
+      "seconds": "{{value}} s",
+      "unavailable": "Not measured",
+      "note": "Measured from recording release to software completion; this does not measure when text becomes visible on screen. Times are local and contain no transcript text.",
+      "result": "{{mode}} · {{outcome}}",
+      "budget": "Cleanup wait budget: {{value}}",
+      "empty": "Processing times appear after your next dictation.",
+      "loadFailed": "Processing times could not be read.",
+      "outcomes": {
+        "cleaned": "Cleanup complete",
+        "ready": "Cleanup complete",
+        "off": "Cleanup off",
+        "cloud_paused": "Cloud manually paused; local transcript used",
+        "cloud_cooldown": "Cloud cooling down; local transcript used",
+        "cloud_paused_during_cleanup": "Cloud paused while waiting; local transcript used",
+        "cleanup_timeout": "Cleanup timed out; local transcript used",
+        "cleanup_request_failed": "Connection failed; local transcript used",
+        "cleanup_http_error": "Cloud service unavailable; local transcript used",
+        "cleanup_redirect_rejected": "Connection rejected; local transcript used",
+        "invalid_response": "Cleanup failed validation; local transcript used",
+        "cancelled": "Cancelled",
+        "asr_failed": "Recognition failed",
+        "paste_failed": "Insertion failed; copy from history",
+        "no_audio": "No audio captured",
+        "empty": "No text recognized",
+        "unknown": "Local transcript retained or processing incomplete"
+      },
+      "cleanupFallback": "Cleanup fallback: {{reason}}",
+      "cleanupFallbackUnknown": "Cleanup did not finish; local transcript retained"
+    },
+    "correction": {
+      "title": "Provide a corrected sample",
+      "description": "Paste your revised version of this result. The app compares it locally and suggests terms or contextual corrections for your review.",
+      "label": "Your corrected text",
+      "placeholder": "Paste the complete corrected version for this record here…",
+      "characters": "{{count}} / {{limit}} characters",
+      "submit": "Submit sample",
+      "submitting": "Saving sample…",
+      "privacy": "Only this text is submitted locally. No clipboard reading, cloud sample upload, or automatic insertion. The sample follows its text history retention.",
+      "saved": "Sample saved locally. Review pending vocabulary below. Large rewrites may produce no correction suggestions.",
+      "failed": "The sample could not be saved. Check that the record still exists, then retry."
+    }
   }
 }

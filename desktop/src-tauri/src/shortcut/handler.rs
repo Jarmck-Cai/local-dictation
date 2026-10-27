@@ -12,6 +12,10 @@ use crate::settings::get_settings;
 use crate::transcription_coordinator::is_transcribe_binding;
 use crate::TranscriptionCoordinator;
 
+#[path = "press_latch.rs"]
+mod press_latch;
+static CLOUD_PRESS: press_latch::PressLatch = press_latch::PressLatch::new();
+
 /// Handle a shortcut event from either implementation.
 ///
 /// This function contains the shared logic for:
@@ -31,6 +35,14 @@ pub fn handle_shortcut_event(
     hotkey_string: &str,
     is_pressed: bool,
 ) {
+    if binding_id == "toggle_cloud" {
+        if CLOUD_PRESS.update(is_pressed)
+            && crate::dictation_cleanup::toggle_dictation_cloud(app.clone()).is_err()
+        {
+            warn!("Could not change cloud cleanup pause state");
+        }
+        return;
+    }
     if binding_id == "copy_latest_result" {
         if is_pressed {
             let copied = crate::clipboard::copy_latest_result(app.clone(), app.state()).is_ok();

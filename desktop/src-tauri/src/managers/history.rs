@@ -31,6 +31,7 @@ static MIGRATIONS: &[M] = &[
     M::up("ALTER TABLE transcription_history ADD COLUMN post_processed_text TEXT;"),
     M::up("ALTER TABLE transcription_history ADD COLUMN post_process_prompt TEXT;"),
     M::up("ALTER TABLE transcription_history ADD COLUMN post_process_requested BOOLEAN NOT NULL DEFAULT 0;"),
+    M::up(crate::vocabulary::SCHEMA),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
@@ -199,7 +200,9 @@ impl HistoryManager {
     }
 
     fn get_connection(&self) -> Result<Connection> {
-        Ok(Connection::open(&self.db_path)?)
+        let connection = Connection::open(&self.db_path)?;
+        connection.busy_timeout(std::time::Duration::from_secs(2))?;
+        Ok(connection)
     }
 
     fn map_history_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryEntry> {
@@ -381,17 +384,22 @@ impl HistoryManager {
             return Ok(0);
         }
 
-        let conn = self.get_connection()?;
+        let mut conn = self.get_connection()?;
+        let transaction = conn.transaction()?;
         let mut deleted_count = 0;
 
         for (id, _) in entries {
             // Automatic text retention never changes the independent audio
             // deadline. Audio without a history row is expired by the tree scan.
-            deleted_count += conn.execute(
+            deleted_count += transaction.execute(
                 "DELETE FROM transcription_history WHERE id = ?1",
                 params![id],
             )?;
         }
+
+        // Dependent samples and pending candidates are removed by the migration's
+        // history-delete trigger in this same transaction. Confirmed terms survive.
+        transaction.commit()?;
 
         Ok(deleted_count)
     }

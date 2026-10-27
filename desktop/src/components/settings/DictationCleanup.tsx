@@ -4,11 +4,13 @@ import { toast } from "sonner";
 import {
   dictationCommands,
   type CleanupMode,
+  type CleanupStrength,
   type DictationConfigView,
 } from "@/lib/dictation";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { SettingsGroup } from "../ui/SettingsGroup";
+import { DictationCloudControl } from "./DictationCloudControl";
 
 export const DictationCleanup = () => {
   const { t } = useTranslation();
@@ -39,13 +41,22 @@ export const DictationCleanup = () => {
     if (!config) return;
     setBusy(true);
     try {
-      const { mode, local_base_url, local_model, timeout_ms } = config;
+      const {
+        mode,
+        local_base_url,
+        local_model,
+        timeout_ms,
+        strength,
+        natural_paragraphs,
+      } = config;
       setConfig(
         await dictationCommands.saveConfig({
           mode,
           local_base_url: local_base_url.trim(),
           local_model: local_model.trim(),
           timeout_ms,
+          strength,
+          natural_paragraphs,
         }),
       );
       setDirty(false);
@@ -129,6 +140,7 @@ export const DictationCleanup = () => {
             </p>
             {config.mode === "claude" && (
               <div className="space-y-3">
+                <DictationCloudControl />
                 <p className="text-sm">
                   {t(
                     config.claude_key_configured
@@ -198,6 +210,66 @@ export const DictationCleanup = () => {
                     }}
                   />
                 </label>
+              </div>
+            )}
+            {config.mode !== "off" && (
+              <div className="space-y-3 border-t border-mid-gray/15 pt-4">
+                <p className="text-sm font-medium">
+                  {t("dictation.cleanup.strength")}
+                </p>
+                <div
+                  className="grid grid-cols-3 gap-2"
+                  role="group"
+                  aria-label={t("dictation.cleanup.strength")}
+                >
+                  {(["faithful", "light", "clear"] as const).map(
+                    (strength: CleanupStrength) => (
+                      <Button
+                        key={strength}
+                        variant={
+                          config.strength === strength
+                            ? "primary-soft"
+                            : "secondary"
+                        }
+                        aria-pressed={config.strength === strength}
+                        disabled={busy}
+                        onClick={() => {
+                          setConfig({ ...config, strength });
+                          setDirty(true);
+                        }}
+                      >
+                        {t(`dictation.cleanup.strengths.${strength}`)}
+                      </Button>
+                    ),
+                  )}
+                </div>
+                <p className="text-xs text-text/65">
+                  {t(`dictation.cleanup.strengthHints.${config.strength}`)}
+                </p>
+                <label className="flex items-start gap-2 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="mt-1 accent-logo-primary"
+                    checked={config.natural_paragraphs}
+                    disabled={busy}
+                    onChange={(event) => {
+                      setConfig({
+                        ...config,
+                        natural_paragraphs: event.target.checked,
+                      });
+                      setDirty(true);
+                    }}
+                  />
+                  <span>
+                    {t("dictation.cleanup.paragraphs")}
+                    <span className="block text-xs text-text/60 mt-1">
+                      {t("dictation.cleanup.paragraphsHint")}
+                    </span>
+                  </span>
+                </label>
+                <p className="text-xs text-text/55">
+                  {t("dictation.cleanup.fidelity")}
+                </p>
               </div>
             )}
             <div className="flex items-center justify-between gap-3">

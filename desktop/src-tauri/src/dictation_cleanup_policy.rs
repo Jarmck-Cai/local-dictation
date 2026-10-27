@@ -23,8 +23,19 @@ pub(crate) fn validate_cleanup_text(raw: &str, candidate: &str) -> Result<String
     if has_added_preface(raw, text) {
         return Err("unexpected_preface");
     }
+    // Ignore punctuation and paragraph whitespace when bounding additions.
+    // This is a conservative expansion guard, not a claim to prove semantic
+    // equivalence; factual and action fidelity also remain prompt constraints.
+    let source_length = comparison_text(raw).chars().count();
+    let candidate_length = comparison_text(text).chars().count();
+    if candidate_length > source_length.saturating_mul(6) / 5 + 8 {
+        return Err("unexpected_expansion");
+    }
     if meaning_markers(raw) != meaning_markers(text) {
         return Err("meaning_markers_changed");
+    }
+    if qualified_markers(raw) != qualified_markers(text) {
+        return Err("qualifiers_changed");
     }
     if technical_tokens(raw) != technical_tokens(text) {
         return Err("technical_tokens_changed");
@@ -257,6 +268,49 @@ fn meaning_markers(text: &str) -> Vec<String> {
     markers
 }
 
+fn qualified_markers(text: &str) -> Vec<String> {
+    const ENGLISH: &[&str] = &[
+        "may",
+        "might",
+        "maybe",
+        "perhaps",
+        "probably",
+        "possibly",
+        "certainly",
+        "definitely",
+        "if",
+        "unless",
+        "only",
+        "must",
+        "should",
+        "could",
+        "would",
+    ];
+    const CHINESE: &[&str] = &[
+        "可能", "也许", "或许", "大概", "应该", "确定", "肯定", "如果", "除非", "只有", "否则",
+    ];
+    let text = text.to_lowercase();
+    let mut markers = Vec::new();
+    let mut offset = 0;
+    while offset < text.len() {
+        let suffix = &text[offset..];
+        if let Some(marker) = CHINESE.iter().find(|marker| suffix.starts_with(**marker)) {
+            markers.push(marker.to_string());
+            offset += marker.len();
+        } else if suffix.as_bytes()[0].is_ascii_alphabetic() {
+            let length = suffix.bytes().take_while(u8::is_ascii_alphabetic).count();
+            let word = &suffix[..length];
+            if ENGLISH.contains(&word) {
+                markers.push(word.to_string());
+            }
+            offset += length;
+        } else {
+            offset += suffix.chars().next().map(char::len_utf8).unwrap_or(1);
+        }
+    }
+    markers
+}
+
 fn technical_tokens(text: &str) -> Vec<String> {
     text.split(|c: char| {
         c.is_whitespace()
@@ -349,6 +403,37 @@ pub(crate) fn validation_key_from_text(text: &str) -> Result<String, &'static st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_expansion_but_accepts_natural_paragraph_breaks() {
+        assert_eq!(
+            validate_cleanup_text(
+                "先讨论",
+                "先讨论。接下来制定实施计划并完成所有功能，然后进行部署。"
+            ),
+            Err("unexpected_expansion")
+        );
+        assert!(validate_cleanup_text(
+            "请先看当前问题 然后讨论下一步的安排",
+            "请先看当前问题。\n\n然后讨论下一步的安排。"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn certainty_and_conditions_are_not_filler_words() {
+        for (raw, candidate) in [
+            ("可能可以先讨论", "可以先讨论。"),
+            ("如果通过再开始", "通过再开始。"),
+            ("we might need this", "we need this."),
+            ("only if it works", "if it works."),
+        ] {
+            assert_eq!(
+                validate_cleanup_text(raw, candidate),
+                Err("qualifiers_changed")
+            );
+        }
+    }
 
     #[test]
     fn accepts_conservative_punctuation_and_mixed_language() {

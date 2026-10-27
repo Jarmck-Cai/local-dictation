@@ -1,0 +1,65 @@
+import { invoke } from "@tauri-apps/api/core";
+
+export interface CloudStatus {
+  manual_paused: boolean;
+  cooldown_remaining_ms: number;
+  consecutive_failures: number;
+}
+
+export interface DictationTiming {
+  id: string;
+  history_id: number | null;
+  recorded_at_ms: number;
+  asr_ms: number;
+  cleanup_ms: number;
+  paste_ms: number | null;
+  total_ms: number;
+  cleanup_budget_ms: number;
+  mode: string;
+  outcome: string;
+  cleanup_reason?: string | null;
+}
+
+export interface VocabularyCandidate {
+  id: number;
+  term: string;
+  replacement_from: string | null;
+  context: string | null;
+  source: string;
+  occurrences: number;
+}
+
+export interface VocabularyTerm {
+  id: number;
+  term: string;
+  aliases: string[];
+  context: string | null;
+}
+
+export interface VocabularyView {
+  candidates: VocabularyCandidate[];
+  entries: VocabularyTerm[];
+}
+
+export const dictationApi = {
+  getCloudStatus: () => invoke<CloudStatus>("get_dictation_cloud_status"),
+  setCloudPaused: (paused: boolean) =>
+    invoke<CloudStatus>("set_dictation_cloud_paused", { paused }),
+  toggleCloud: () => invoke<CloudStatus>("toggle_dictation_cloud"),
+  getMetrics: () => invoke<DictationTiming[]>("get_dictation_metrics"),
+  getVocabulary: () => invoke<VocabularyView>("get_vocabulary"),
+  reviewCandidate: (id: number, accept: boolean) =>
+    invoke<VocabularyView>("review_vocabulary_candidate", { id, accept }),
+  deleteLearnedTerm: (id: number) =>
+    invoke<VocabularyView>("delete_learned_term", { id }),
+  submitCorrection: (historyId: number, correctedText: string) =>
+    invoke<VocabularyView>("submit_correction_sample", {
+      historyId,
+      correctedText,
+    }),
+};
+
+// Refresh sibling views after a local mutation without polling or clipboard access.
+export const VOCABULARY_REFRESH = "dictation-vocabulary-refresh";
+export const notifyVocabularyChanged = () =>
+  window.dispatchEvent(new Event(VOCABULARY_REFRESH));

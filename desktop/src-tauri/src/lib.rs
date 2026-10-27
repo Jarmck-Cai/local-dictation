@@ -12,6 +12,7 @@ mod commands;
 mod desktop_resources;
 mod dictation_cleanup;
 mod dictation_lifecycle;
+mod dictation_metrics;
 mod helpers;
 mod input;
 mod llm_client;
@@ -29,6 +30,7 @@ mod transcription_coordinator;
 mod tray;
 mod tray_i18n;
 mod utils;
+mod vocabulary;
 
 pub use cli::CliArgs;
 #[cfg(debug_assertions)]
@@ -222,13 +224,16 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     app_handle.manage(model_manager.clone());
     app_handle.manage(transcription_manager.clone());
     app_handle.manage(history_manager.clone());
+    dictation_metrics::prune(app_handle);
     let cleanup_history = history_manager.clone();
+    let cleanup_app = app_handle.clone();
     // Recheck expiry once per day while the app remains running.
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(86400));
         if let Err(error) = cleanup_history.cleanup_old_entries() {
             log::warn!("Expired audio cleanup failed: {error}");
         }
+        dictation_metrics::prune(&cleanup_app);
     });
     app_handle.manage(tray::TrayState::new());
     transcription_manager.initiate_model_load();
@@ -666,6 +671,14 @@ pub fn run(cli_args: CliArgs) {
             dictation_cleanup::save_dictation_config,
             dictation_cleanup::set_claude_api_key,
             dictation_cleanup::clear_claude_api_key,
+            dictation_cleanup::get_dictation_cloud_status,
+            dictation_cleanup::set_dictation_cloud_paused,
+            dictation_cleanup::toggle_dictation_cloud,
+            dictation_metrics::get_dictation_metrics,
+            vocabulary::get_vocabulary,
+            vocabulary::review_vocabulary_candidate,
+            vocabulary::delete_learned_term,
+            vocabulary::submit_correction_sample,
             clipboard::copy_latest_result,
             overlay::dismiss_overlay_error,
             shortcut::change_binding,

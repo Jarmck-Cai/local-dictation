@@ -939,6 +939,18 @@ pub fn get_default_settings() -> AppSettings {
         },
     );
 
+    bindings.insert(
+        "toggle_cloud".to_string(),
+        ShortcutBinding {
+            id: "toggle_cloud".to_string(),
+            name: "Pause or resume cloud cleanup".to_string(),
+            description: "Pause cloud cleanup immediately or resume for the next recording."
+                .to_string(),
+            default_binding: "ctrl+alt+f8".to_string(),
+            current_binding: "ctrl+alt+f8".to_string(),
+        },
+    );
+
     AppSettings {
         settings_schema_version: default_settings_schema_version(),
         bindings,

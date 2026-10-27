@@ -3,12 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 export const RECOGNITION_MODEL_ID = "sense-voice-int8";
 
 export type CleanupMode = "claude" | "local" | "off";
+export type CleanupStrength = "faithful" | "light" | "clear";
 
 export interface DictationConfig {
   mode: CleanupMode;
   local_base_url: string;
   local_model: string;
   timeout_ms: number;
+  strength: CleanupStrength;
+  natural_paragraphs: boolean;
 }
 
 // Credentials never cross this read interface. Only a configuration flag does.

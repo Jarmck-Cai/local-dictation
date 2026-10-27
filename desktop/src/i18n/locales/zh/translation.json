@@ -203,6 +203,10 @@
           "copy_latest_result": {
             "name": "复制最近结果",
             "description": "默认 Ctrl+Shift+F8。只复制已有结果，不重新识别或整理，也不自动粘贴。"
+          },
+          "toggle_cloud": {
+            "name": "暂停／恢复云端整理",
+            "description": "默认 Ctrl+Alt+F8。跳过云端整理，继续使用本地识别。点击可修改。"
           }
         },
         "errors": {
@@ -793,7 +797,7 @@
         "local": "连接本机兼容服务，失败时保留原文，不转用云端。",
         "off": "直接使用本地识别的原始转写。"
       },
-      "fallback": "超时或校验未通过时，保留原文。",
+      "fallback": "整理超时或失败时，使用应用了已确认词库的完整本地转录。",
       "saved": "整理设置已保存",
       "saveFailed": "设置未保存，请检查本机地址与模型名称后重试。",
       "loadFailed": "无法读取整理设置。",
@@ -810,7 +814,21 @@
       "localAddress": "本机整理地址",
       "localAddressPlaceholder": "http://127.0.0.1:11434/v1",
       "localModel": "模型名称",
-      "localModelPlaceholder": "填写本机服务中的模型名称"
+      "localModelPlaceholder": "填写本机服务中的模型名称",
+      "strength": "整理强度",
+      "strengths": {
+        "faithful": "贴近原话",
+        "light": "轻整理",
+        "clear": "清晰表达"
+      },
+      "strengthHints": {
+        "faithful": "主要处理标点和明确错词，尽量保留原来的口语和句式。",
+        "light": "删除无意义填充词、重复和明确口误，保留你的说话方式。",
+        "clear": "在原意范围内调整局部语序，让表达更清楚，保留语气和意图。"
+      },
+      "paragraphs": "自然分段",
+      "paragraphsHint": "根据内容关系划分自然段，不把每次停顿都变成新段落。",
+      "fidelity": "所有档位都保留事实、数字、代码、否定、条件和确定程度，不补事实、不回答、不擅自总结。"
     },
     "history": {
       "latest": "最近结果",
@@ -826,9 +844,96 @@
       "copyLatestFailed": "未能复制最近结果。请确认已有结果，或在历史记录中重试。"
     },
     "vocabulary": {
-      "title": "个人词库",
-      "description": "保存常用人名、产品名和专业词汇。已有模糊纠错主要适用于英文字母及数字，不保证修正所有专名。"
+      "title": "手动词库",
+      "description": "手动添加已知的人名、产品名和专业术语。学习确认的词条单独保存在上方。",
+      "learningTitle": "词库学习",
+      "learningDescription": "审阅常用术语和修改稿提取出的建议，确认后才生效。",
+      "localOnly": "候选和修改样本只在本机分析。已确认词条也能用于本地回退。",
+      "candidates": "待确认候选",
+      "confirmHint": "请检查拼写和上下文。转录中反复出现的词也可能有误，未经确认的建议不会生效。",
+      "noCandidates": "暂时没有待确认候选。",
+      "candidateInfo": "{{source}} · 出现 {{count}} 次",
+      "sources": {
+        "transcript": "转录术语",
+        "correction": "修改样本",
+        "asr_correction": "识别纠错",
+        "cleanup_correction": "整理纠错"
+      },
+      "replacement": "{{from}} → {{term}}",
+      "context": "上下文：{{context}}",
+      "accept": "确认加入",
+      "reject": "忽略",
+      "learned": "已确认词库",
+      "learnedHint": "原始历史过期后，确认词条仍然保留。删除后停止应用该词条。",
+      "noLearned": "还没有学习确认的词条。",
+      "aliases": "识别变体：{{aliases}}",
+      "separator": "、",
+      "delete": "删除",
+      "refresh": "刷新",
+      "loadFailed": "无法读取词库，请刷新重试。",
+      "changeFailed": "词库更改未完成，请刷新后重试。"
     },
-    "settingsFailed": "无法读取应用设置。"
+    "settingsFailed": "无法读取应用设置。",
+    "cloud": {
+      "states": {
+        "active": "云端整理已开启",
+        "manual": "云端整理已手动暂停",
+        "cooldown": "云端暂时停用 · 剩余 {{seconds}} 秒",
+        "nextRecording": "冷却已结束 · 下次录音尝试恢复"
+      },
+      "pause": "暂停云端",
+      "resume": "恢复云端（下次录音）",
+      "hint": "暂停会跳过尚未完成的云端整理，保留本地转录。恢复从下一次录音生效；本机模型模式不受影响。",
+      "loadFailed": "无法读取云端状态。",
+      "changeFailed": "未能更改云端状态，请重试。",
+      "policy": "短文等待预算为 3 秒，长文最多 8 秒；连续 3 次超时或网络失败后，云端自动暂停 10 分钟。"
+    },
+    "timing": {
+      "title": "最近一次处理耗时",
+      "asr": "本地识别",
+      "cleanup": "文字整理",
+      "paste": "输入文字",
+      "total": "总等待",
+      "seconds": "{{value}} 秒",
+      "unavailable": "未记录",
+      "note": "从松键到软件处理完成的记录，不代表文字在屏幕上显示的时刻。耗时保存在本机，不包含正文。",
+      "result": "{{mode}} · {{outcome}}",
+      "budget": "本次整理等待预算：{{value}}",
+      "empty": "下次语音输入后显示各阶段耗时。",
+      "loadFailed": "无法读取处理耗时。",
+      "outcomes": {
+        "cleaned": "整理完成",
+        "ready": "整理完成",
+        "off": "未启用整理",
+        "cloud_paused": "云端已手动暂停，使用本地转录",
+        "cloud_cooldown": "云端冷却中，使用本地转录",
+        "cloud_paused_during_cleanup": "等待期间已暂停云端，使用本地转录",
+        "cleanup_timeout": "整理超时，使用本地转录",
+        "cleanup_request_failed": "连接失败，使用本地转录",
+        "cleanup_http_error": "云端服务未完成，使用本地转录",
+        "cleanup_redirect_rejected": "连接被拒绝，使用本地转录",
+        "invalid_response": "整理校验未通过，使用本地转录",
+        "cancelled": "已取消",
+        "asr_failed": "识别失败",
+        "paste_failed": "自动输入未完成，可从历史复制",
+        "no_audio": "未捕获到音频",
+        "empty": "未识别到文字",
+        "unknown": "保留本地转录，或处理未完成"
+      },
+      "cleanupFallback": "整理回退：{{reason}}",
+      "cleanupFallbackUnknown": "整理未完成，保留本地转录"
+    },
+    "correction": {
+      "title": "提交修改稿作为样本",
+      "description": "把这条结果的修改稿粘贴到下方，在本机比较后提出术语或上下文纠错建议，由你确认。",
+      "label": "修改后的完整文字",
+      "placeholder": "在此粘贴这条记录修改后的完整版本…",
+      "characters": "{{count}} / {{limit}} 字符",
+      "submit": "提交样本",
+      "submitting": "正在保存样本…",
+      "privacy": "仅接收你粘贴的文字，不读取剪贴板，不把样本发往云端，也不会重新输入。样本随对应文字历史清理。",
+      "saved": "样本已保存在本机，可在下方审阅待确认词条。大幅改写可能不会生成纠错建议。",
+      "failed": "未能保存样本，请确认这条历史仍然存在后重试。"
+    }
   }
 }

@@ -7,6 +7,7 @@ import { DictationCleanup } from "../DictationCleanup";
 import { DictationStatus } from "../DictationStatus";
 import { SenseVoiceModel } from "../SenseVoiceModel";
 import { HistorySettings } from "../history/HistorySettings";
+import { LatestDictationTiming } from "../DictationTiming";
 
 export const GeneralSettings = () => {
   const { t } = useTranslation();
@@ -14,6 +15,7 @@ export const GeneralSettings = () => {
     <div className="max-w-3xl w-full mx-auto space-y-6">
       <DictationStatus />
       <HistorySettings latestOnly />
+      <LatestDictationTiming />
       <SenseVoiceModel />
       <DictationCleanup />
       <SettingsGroup title={t("dictation.settingsTitle")}>
@@ -24,6 +26,7 @@ export const GeneralSettings = () => {
         />
         <ShortcutInput shortcutId="cancel" grouped />
         <ShortcutInput shortcutId="copy_latest_result" grouped />
+        <ShortcutInput shortcutId="toggle_cloud" grouped />
         <MicrophoneSelector grouped />
         <MuteWhileRecording grouped />
       </SettingsGroup>

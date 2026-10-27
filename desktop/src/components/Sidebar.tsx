@@ -4,11 +4,13 @@ import { GeneralSettings } from "./settings/general/GeneralSettings";
 import { HistorySettings } from "./settings/history/HistorySettings";
 import { CustomWords } from "./settings/CustomWords";
 import { SettingsGroup } from "./ui/SettingsGroup";
+import { VocabularyLearning } from "./settings/VocabularyLearning";
 
 const VocabularySettings = () => {
   const { t } = useTranslation();
   return (
-    <div className="max-w-3xl w-full mx-auto">
+    <div className="max-w-3xl w-full mx-auto space-y-6">
+      <VocabularyLearning />
       <SettingsGroup
         title={t("dictation.vocabulary.title")}
         description={t("dictation.vocabulary.description")}
