@@ -225,6 +225,7 @@
   max-height: calc(100vh - 8px);
   box-sizing: border-box;
   flex-direction: column;
+  align-items: center;
   border-radius: 14px;
   padding: 14px;
   gap: 10px;
@@ -232,6 +233,7 @@
   color: var(--color-text);
   font-size: 13px;
   line-height: 1.5;
+  text-align: center;
 }
 .ov-stage.top .scard.error {
   flex-direction: column;
@@ -241,6 +243,8 @@
 }
 .error-actions {
   display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 .error-actions button {
@@ -253,6 +257,10 @@
 }
 .error-actions button:hover {
   background: var(--s-accent-soft);
+}
+.error-actions button:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 /* text region — auto-height open via grid-rows trick; region fades as a whole */

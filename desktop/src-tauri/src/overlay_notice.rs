@@ -7,6 +7,7 @@ pub struct OverlayNotice {
     failure_generation: u64,
     capture_generation: u64,
     capture_ready: bool,
+    paste_error_code: Option<&'static str>,
 }
 
 impl OverlayNotice {
@@ -21,13 +22,30 @@ impl OverlayNotice {
             failure_generation: 0,
             capture_generation: 0,
             capture_ready: false,
+            paste_error_code: None,
         }
     }
 
     pub fn report(&mut self, failure: u8) {
+        if failure & Self::PASTE != 0 {
+            self.paste_error_code = None;
+        }
         self.failures |= failure;
         self.failure_generation += 1;
         self.shown();
+    }
+
+    pub fn report_paste_error(&mut self, code: &str) {
+        self.report(Self::PASTE);
+        self.paste_error_code = match code {
+            "clipboard_restore_failed" => Some("clipboard_restore_failed"),
+            "input_unconfirmed" => Some("input_unconfirmed"),
+            _ => None,
+        };
+    }
+
+    pub fn paste_error_code(&self) -> &'static str {
+        self.paste_error_code.unwrap_or("failed")
     }
 
     pub fn failure_generation(&self) -> u64 {
@@ -89,6 +107,7 @@ impl OverlayNotice {
             return false;
         }
         self.failures = 0;
+        self.paste_error_code = None;
         self.shown();
         true
     }
@@ -97,6 +116,30 @@ impl OverlayNotice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_reason_survives_playback_notice_and_clears_only_on_current_dismissal() {
+        let mut notice = OverlayNotice::new();
+        notice.report_paste_error("clipboard_restore_failed");
+        let old_generation = notice.failure_generation();
+        assert_eq!(notice.paste_error_code(), "clipboard_restore_failed");
+        notice.report(OverlayNotice::PLAYBACK);
+        assert!(!notice.dismiss(old_generation));
+        assert_eq!(notice.paste_error_code(), "clipboard_restore_failed");
+        assert!(notice.dismiss(notice.failure_generation()));
+        assert_eq!(notice.paste_error_code(), "failed");
+    }
+
+    #[test]
+    fn paste_notice_never_exposes_arbitrary_error_payload() {
+        let mut notice = OverlayNotice::new();
+        notice.report_paste_error("synthetic arbitrary payload");
+        assert_eq!(notice.paste_error_code(), "failed");
+        notice.report_paste_error("input_unconfirmed");
+        assert_eq!(notice.paste_error_code(), "input_unconfirmed");
+        notice.report(OverlayNotice::PASTE);
+        assert_eq!(notice.paste_error_code(), "failed");
+    }
 
     #[test]
     fn normal_completion_and_new_progress_do_not_erase_unacknowledged_failure() {

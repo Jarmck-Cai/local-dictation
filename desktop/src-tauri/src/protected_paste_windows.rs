@@ -20,7 +20,7 @@ use windows::Win32::System::DataExchange::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
-    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CopyImage, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetWindowLongPtrW,
@@ -70,7 +70,9 @@ struct Global(HGLOBAL);
 impl Global {
     fn allocate(bytes: usize) -> Result<Self, &'static str> {
         unsafe {
-            GlobalAlloc(GMEM_MOVEABLE, bytes)
+            // GlobalAlloc may round capacity up. A later clipboard transfer must
+            // never expose uninitialized bytes beyond the copied source length.
+            GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes)
                 .map(Self)
                 .map_err(|_| BACKUP_FAILED)
         }
@@ -109,7 +111,7 @@ impl Drop for Bitmap {
 }
 
 enum SavedData {
-    Global(Global),
+    Global(Global, usize),
     Bitmap(Bitmap),
 }
 struct Saved {
@@ -123,7 +125,9 @@ impl Saved {
         // The caller still attempts every remaining format before returning.
         let data = self.data.take().ok_or(RESTORE_FAILED)?;
         match data {
-            SavedData::Global(global) => global.transfer(self.format).map_err(|_| RESTORE_FAILED),
+            SavedData::Global(global, _) => {
+                global.transfer(self.format).map_err(|_| RESTORE_FAILED)
+            }
             SavedData::Bitmap(bitmap) => {
                 unsafe {
                     SetClipboardData(self.format, Some(bitmap.0)).map_err(|_| RESTORE_FAILED)?;
@@ -350,6 +354,26 @@ fn safe_global_format(format: u32) -> bool {
     )
 }
 
+fn global_matches_snapshot(
+    saved: &Global,
+    bytes: usize,
+    current: HGLOBAL,
+) -> Result<bool, &'static str> {
+    unsafe {
+        // Compare complete backed-up data, not system-owned handle identity.
+        // Synthesized CF_TEXT/CF_OEMTEXT may return a fresh HGLOBAL each time.
+        // Allocation-size differences remain a conservative refusal here.
+        // Our GlobalAlloc can round up, so never compare its extra capacity.
+        if bytes == 0 || GlobalSize(saved.0) < bytes || GlobalSize(current) != bytes {
+            return Ok(false);
+        }
+        let saved = MemoryLock::new(saved.0)?;
+        let current = MemoryLock::new(current)?;
+        Ok(std::slice::from_raw_parts(saved.ptr, bytes)
+            == std::slice::from_raw_parts(current.ptr, bytes))
+    }
+}
+
 fn snapshot() -> Result<Vec<Saved>, &'static str> {
     let formats = enumerate()?;
     // Validate every kind before asking providers to render anything.
@@ -408,7 +432,7 @@ fn snapshot() -> Result<Vec<Saved>, &'static str> {
                     let dest = MemoryLock::new(copy.0)?;
                     std::ptr::copy_nonoverlapping(src.ptr, dest.ptr, bytes);
                 }
-                SavedData::Global(copy)
+                SavedData::Global(copy, bytes)
             }
         };
         result.push(Saved {
@@ -417,15 +441,24 @@ fn snapshot() -> Result<Vec<Saved>, &'static str> {
             source,
         });
     }
-    // A delayed provider can add/change formats while it renders under our lock.
-    // Refuse rather than snapshot a partial or internally inconsistent set.
-    if enumerate()? != formats {
-        return Err(BACKUP_FAILED);
-    }
     for saved in &result {
-        if unsafe { GetClipboardData(saved.format) }.map_err(|_| BACKUP_FAILED)? != saved.source {
+        let current = unsafe { GetClipboardData(saved.format) }.map_err(|_| BACKUP_FAILED)?;
+        let unchanged = match saved.data.as_ref() {
+            Some(SavedData::Global(global, bytes)) => {
+                global_matches_snapshot(global, *bytes, HGLOBAL(current.0))?
+            }
+            // Bitmap handling is unchanged; no byte-memory assumptions for GDI handles.
+            Some(SavedData::Bitmap(_)) => current == saved.source,
+            None => false,
+        };
+        if !unchanged {
             return Err(BACKUP_FAILED);
         }
+    }
+    // A delayed provider can add/change formats while it renders under our lock.
+    // Check after the final retrieval too, before any clipboard mutation.
+    if enumerate()? != formats {
+        return Err(BACKUP_FAILED);
     }
     Ok(result)
 }

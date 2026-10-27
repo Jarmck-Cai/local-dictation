@@ -19,6 +19,7 @@ struct OverlayUpdate {
     failure_generation: u64,
     capture_generation: u64,
     capture_ready: bool,
+    paste_error_code: &'static str,
 }
 
 fn overlay_failures() -> u8 {
@@ -29,21 +30,30 @@ fn overlay_failures() -> u8 {
 }
 
 fn register_failure_listeners(app_handle: &AppHandle) {
-    for (event, failure) in [
-        ("paste-error", OverlayNotice::PASTE),
-        ("playback-mute-error", OverlayNotice::PLAYBACK),
-    ] {
-        let app = app_handle.clone();
-        app_handle.listen(event, move |_| {
-            OVERLAY_NOTICE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .report(failure);
-            // Native listeners stay active when the settings WebView is hidden.
-            // Failures bypass the optional recording indicator preference.
-            queue_overlay_update(&app);
-        });
-    }
+    let app = app_handle.clone();
+    app_handle.listen("paste-error", move |event| {
+        let payload = serde_json::from_str::<serde_json::Value>(event.payload()).ok();
+        let code = payload
+            .as_ref()
+            .and_then(|value| value.get("code"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("failed");
+        OVERLAY_NOTICE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .report_paste_error(code);
+        // Deliver the same restricted reason to the native recovery window;
+        // a toast in a hidden settings WebView is not sufficient feedback.
+        queue_overlay_update(&app);
+    });
+    let app = app_handle.clone();
+    app_handle.listen("playback-mute-error", move |_| {
+        OVERLAY_NOTICE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .report(OverlayNotice::PLAYBACK);
+        queue_overlay_update(&app);
+    });
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -570,6 +580,7 @@ fn sync_overlay_on_main(app_handle: &AppHandle) {
             failure_generation: notice.failure_generation(),
             capture_generation: notice.capture_generation(),
             capture_ready: notice.capture_ready(),
+            paste_error_code: notice.paste_error_code(),
         };
         (state, update, notice.progress().unwrap_or("idle"))
     };

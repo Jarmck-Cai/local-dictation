@@ -16,6 +16,8 @@
 
 ## 正式交付
 
+Windows快照兼容回归使用 `python scripts/check-win32-snapshot.py`，默认只运行合成Win32适配器，不接触系统剪贴板。`--baseline`用于旧版失败对照。显式原生只备份诊断需额外传 `--native-snapshot --windows-rlib <已构建windows-0.61.3.rlib>`：仅在进程内读取/备份并释放，输出静态状态和格式数，不写剪贴板、不发键、不输出或保存正文；不能将其称为实际输入验证。`--build-native-only`只编译该诊断。
+
 用户可见功能或修复形成交付时，统一更新 `desktop/package.json`、`desktop/src-tauri/Cargo.toml`、`Cargo.lock` 中本包版本及 `tauri.conf.json`，并更新 README 和 `docs/releases.md`。检查通过后提交，建立不可变的 `vX.Y.Z` 标签，并推送提交与标签。后续修复使用新版本号。
 
 公开安装包只作为 GitHub Release 附件，源码 Git 不包含安装包、模型或运行数据。附件须核对版本、SHA-256、第三方资源许可及不含用户数据。

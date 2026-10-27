@@ -12,6 +12,11 @@ import type {
 } from "@/bindings";
 import i18n, { syncLanguageFromSettings } from "@/i18n";
 import { getLanguageDirection } from "@/lib/utils/rtl";
+import { pasteErrorCode } from "@/lib/dictationState";
+import {
+  OverlayCopyController,
+  type OverlayCopyState,
+} from "./overlayCopyController";
 
 type OverlayState =
   | "recording"
@@ -26,6 +31,7 @@ interface OverlayUpdate {
   failure_generation: number;
   capture_generation: number;
   capture_ready: boolean;
+  paste_error_code?: string;
 }
 
 // Number of reactive bars in the waveform (the simple, smoothed style shared by
@@ -37,9 +43,17 @@ const RecordingOverlay: React.FC = () => {
   const [isVisible, setIsVisible] = useState(false);
   const [state, setState] = useState<OverlayState>("recording");
   const [failures, setFailures] = useState(0);
-  const [failureGeneration, setFailureGeneration] = useState(0);
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
-    "idle",
+  const [pasteFailureCode, setPasteFailureCode] =
+    useState<ReturnType<typeof pasteErrorCode>>("failed");
+  const [copyState, setCopyState] = useState<OverlayCopyState>("idle");
+  const [copyController] = useState(
+    () =>
+      new OverlayCopyController({
+        copy: () => invoke<void>("copy_latest_result"),
+        dismiss: (failureGeneration) =>
+          invoke<void>("dismiss_overlay_error", { failureGeneration }),
+        onCopyState: setCopyState,
+      }),
   );
   // `Stream::play()` returning does not mean hardware callbacks are flowing.
   // Stay visually in an arming state until the backend processes the first
@@ -65,7 +79,6 @@ const RecordingOverlay: React.FC = () => {
 
   const smoothedLevelsRef = useRef<number[]>(Array(16).fill(0));
   const captureGenerationRef = useRef(0);
-  const failureGenerationRef = useRef(0);
   // Live-text scroll-back: the text region "sticks" to the newest line while the
   // user is at the bottom; if they scroll up to read history, auto-follow pauses
   // until they scroll back down.
@@ -80,16 +93,23 @@ const RecordingOverlay: React.FC = () => {
       const unlistenUpdate = await listen<OverlayUpdate>(
         "overlay-update",
         async (event) => {
+          if (disposed) return;
           const update = event.payload;
+          // Invalidate old copy promises/timers synchronously, before rendering
+          // or async settings reads can observe a newer card or capture.
+          copyController.show(update);
           // Apply visibility before any async settings reads. A late read must not
           // replace a newer error or bring back an already dismissed indicator.
           setState(update.state);
           setFailures(update.failures);
-          setFailureGeneration(update.failure_generation);
-          if (failureGenerationRef.current !== update.failure_generation) {
-            failureGenerationRef.current = update.failure_generation;
-            setCopyState("idle");
-          }
+          setPasteFailureCode(
+            pasteErrorCode({
+              code:
+                (update.failures & 1) !== 0
+                  ? update.paste_error_code
+                  : undefined,
+            }),
+          );
           setIsVisible(true);
           // An error only covers the active capture. Restoring it must retain
           // readiness, elapsed time and live text; reset only for a new capture.
@@ -122,7 +142,10 @@ const RecordingOverlay: React.FC = () => {
       );
 
       const unlistenHide = await listen("hide-overlay", () => {
+        if (disposed) return;
+        copyController.hide();
         setIsVisible(false);
+        setPasteFailureCode("failed");
         setCaptureReady(false);
       });
 
@@ -163,9 +186,10 @@ const RecordingOverlay: React.FC = () => {
     });
     return () => {
       disposed = true;
+      copyController.hide();
       cleanup?.();
     };
-  }, []);
+  }, [copyController]);
 
   // Elapsed capture timer starts only once microphone samples are flowing.
   useEffect(() => {
@@ -198,21 +222,28 @@ const RecordingOverlay: React.FC = () => {
         <div className="scard error" role="alert">
           {(failures & 1) !== 0 && (
             <div>
-              <strong>{t("errors.pasteFailedTitle")}</strong>
-              <p>{t("errors.pasteFailed")}</p>
+              <strong>
+                {t(
+                  pasteFailureCode === "failed"
+                    ? "errors.pasteFailedTitle"
+                    : `dictation.autoPaste.${pasteFailureCode}.title`,
+                )}
+              </strong>
+              <p>
+                {t(
+                  pasteFailureCode === "failed"
+                    ? "errors.pasteFailed"
+                    : `dictation.autoPaste.${pasteFailureCode}.description`,
+                )}
+              </p>
             </div>
           )}
           {(failures & 2) !== 0 && <p>{t("dictation.muteFailed")}</p>}
           <div className="error-actions">
             <button
-              onClick={async () => {
-                try {
-                  await invoke<void>("copy_latest_result");
-                  setCopyState("copied");
-                } catch {
-                  setCopyState("failed");
-                }
-              }}
+              disabled={copyState === "copying"}
+              aria-busy={copyState === "copying"}
+              onClick={() => void copyController.copy()}
             >
               {t(
                 copyState === "copied"
@@ -220,11 +251,7 @@ const RecordingOverlay: React.FC = () => {
                   : "dictation.history.copyFinal",
               )}
             </button>
-            <button
-              onClick={() =>
-                void invoke("dismiss_overlay_error", { failureGeneration })
-              }
-            >
+            <button onClick={() => void copyController.dismiss()}>
               {t("common.close")}
             </button>
           </div>
