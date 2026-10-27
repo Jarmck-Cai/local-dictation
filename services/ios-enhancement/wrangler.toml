@@ -1,0 +1,21 @@
+name = "local-dictation-ios-enhancement"
+main = "worker.mjs"
+compatibility_date = "2026-10-01"
+workers_dev = false
+preview_urls = false
+
+# Set the account and isolated custom domain in a PRIVATE deployment config.
+# Never add API keys, client tokens, account credentials or personal identifiers here.
+# The service fails closed until CLIENT_TOKEN, ANTHROPIC_API_KEY and
+# ANTHROPIC_MODEL are configured as Worker secrets.
+
+[[durable_objects.bindings]]
+name = "BUDGET"
+class_name = "PrototypeBudget"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PrototypeBudget"]
+
+[observability]
+enabled = false

@@ -2,11 +2,21 @@ name: iOS prototype
 on:
   push:
     branches: [codex/ios-prototype]
-    paths: ['ios/**', '.github/workflows/ios-prototype.yml']
+    paths: ['ios/**', 'services/ios-enhancement/**', '.github/workflows/ios-prototype.yml']
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
+  gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Test text gateway without paid calls
+        working-directory: services/ios-enhancement
+        run: npm test
   policies:
     runs-on: macos-15
     steps:

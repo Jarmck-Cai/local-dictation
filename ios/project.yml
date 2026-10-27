@@ -14,8 +14,7 @@ settings:
     MARKETING_VERSION: '0.1.0'
     CURRENT_PROJECT_VERSION: '1'
     CODE_SIGN_STYLE: Automatic
-    APP_GROUP_ID: group.com.localdictation.prototype.shared
-    PRODUCT_BUNDLE_IDENTIFIER: com.localdictation.prototype
+    PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_PREFIX)
 packages:
   LocalDictationCore:
     path: LocalDictationCore
@@ -42,7 +41,7 @@ targets:
         LDAppOnly: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.localdictation.prototype.offline
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_PREFIX).offline
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) APP_ONLY
     dependencies:
       - package: LocalDictationCore
@@ -101,7 +100,7 @@ targets:
         com.apple.security.application-groups: [$(APP_GROUP_ID)]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.localdictation.prototype.keyboard
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_PREFIX).keyboard
     dependencies:
       - package: LocalDictationCore
   DictationActivityOffline:
@@ -117,7 +116,7 @@ targets:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.localdictation.prototype.offline.activity
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_PREFIX).offline.activity
     dependencies:
       - package: LocalDictationCore
   DictationActivity:
@@ -137,7 +136,7 @@ targets:
         com.apple.security.application-groups: [$(APP_GROUP_ID)]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.localdictation.prototype.activity
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_PREFIX).activity
     dependencies:
       - package: LocalDictationCore
 schemes:

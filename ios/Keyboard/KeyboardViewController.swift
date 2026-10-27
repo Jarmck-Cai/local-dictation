@@ -51,7 +51,8 @@ final class KeyboardViewController: UIInputViewController {
         let before = textDocumentProxy.documentContextBeforeInput
         let after = textDocumentProxy.documentContextAfterInput
         guard before != nil || after != nil || !textDocumentProxy.hasText else { return nil }
-        let value = textDocumentProxy.documentIdentifier.uuidString + "\u{0}" + (before ?? "") + "\u{0}" + (after ?? "")
+        let selection = textDocumentProxy.selectedText.map { "some:\($0.utf8.count):\($0)" } ?? "nil"
+        let value = textDocumentProxy.documentIdentifier.uuidString + "\u{0}" + (before ?? "") + "\u{0}" + (after ?? "") + "\u{0}" + selection
         return SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
     }
     private func publishContext() {
