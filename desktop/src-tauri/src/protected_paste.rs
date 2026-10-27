@@ -1,4 +1,4 @@
-//! Synchronous, protected clipboard borrowing for the explicit manual-paste action.
+//! Synchronous, protected clipboard borrowing for manual and automatic output.
 //!
 //! `Ok(true)` means a delayed-render read was observed after input began. It
 //! cannot prove that the target inserted text. The transaction always settles
@@ -27,4 +27,16 @@ pub(crate) fn run(
         let _ = (text, inject, is_cancelled);
         Err("manual_paste_unavailable".into())
     }
+}
+
+/// Automatic Windows output shares the protected transaction. A copy preference
+/// is applied while the transaction still owns the clipboard, never afterwards.
+#[cfg(target_os = "windows")]
+pub(crate) fn run_automatic(
+    text: &str,
+    inject: impl FnOnce() -> Result<(), String>,
+    is_cancelled: impl Fn() -> bool,
+    copy_result: bool,
+) -> Result<bool, String> {
+    platform::run_automatic(text, inject, is_cancelled, copy_result)
 }

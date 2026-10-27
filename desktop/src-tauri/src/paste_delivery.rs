@@ -1,6 +1,48 @@
 //! Side-effect boundaries shared by the real dispatch/clipboard path and offline tests.
 use std::sync::Arc;
 
+/// Public event codes are a static whitelist; internal errors may contain details.
+pub fn paste_error_code(error: &str) -> &'static str {
+    match error {
+        "manual_paste_restore_failed" => "clipboard_restore_failed",
+        "automatic_paste_unconfirmed" => "input_unconfirmed",
+        _ => "failed",
+    }
+}
+
+/// The Windows protected transaction pumps its own clipboard-owner messages and
+/// can wait for a read. It must not occupy Tauri's UI thread while doing so.
+pub fn dispatch_automatic_paste<G, D, P>(
+    guard: Arc<G>,
+    dispatch_ui: D,
+    paste: P,
+) -> Result<(), String>
+where
+    G: Send + Sync + 'static,
+    D: FnOnce(Box<dyn FnOnce() + Send>) -> Result<(), String>,
+    P: FnOnce() + Send + 'static,
+{
+    #[cfg(target_os = "windows")]
+    {
+        let _ = dispatch_ui;
+        dispatch_paste(
+            guard,
+            |work| {
+                std::thread::Builder::new()
+                    .name("automatic-paste".into())
+                    .spawn(work)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            },
+            paste,
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        dispatch_paste(guard, dispatch_ui, paste)
+    }
+}
+
 pub fn dispatch_paste<G, D, P, E>(guard: Arc<G>, dispatch: D, paste: P) -> Result<(), E>
 where
     G: Send + Sync + 'static,
@@ -40,6 +82,26 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
+    #[test]
+    fn error_events_distinguish_restore_failure_without_exposing_internal_details() {
+        assert_eq!(
+            paste_error_code("manual_paste_restore_failed"),
+            "clipboard_restore_failed"
+        );
+        assert_eq!(
+            paste_error_code("automatic_paste_unconfirmed"),
+            "input_unconfirmed"
+        );
+        for error in [
+            "keys_held",
+            "manual_paste_backup_failed",
+            "private synthetic diagnostic",
+            "",
+        ] {
+            assert_eq!(paste_error_code(error), "failed");
+        }
+    }
+
     struct Finish(Arc<AtomicBool>);
     impl Drop for Finish {
         fn drop(&mut self) {
@@ -77,6 +139,45 @@ mod tests {
         queue.lock().unwrap().take().unwrap()();
         assert_eq!(injected.load(Ordering::SeqCst), 1);
         assert!(finished.load(Ordering::SeqCst));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn automatic_worker_returns_to_ui_and_keeps_guard_until_transaction_settles() {
+        struct Completion(std::sync::mpsc::Sender<()>);
+        impl Drop for Completion {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let (complete_tx, complete_rx) = std::sync::mpsc::channel();
+        let guard = Arc::new(Completion(complete_tx));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (settle_tx, settle_rx) = std::sync::mpsc::channel();
+        let ui_thread = std::thread::current().id();
+        dispatch_automatic_paste(
+            Arc::clone(&guard),
+            |_| panic!("Windows protected paste must not run on the UI dispatcher"),
+            move || {
+                assert_ne!(std::thread::current().id(), ui_thread);
+                assert_eq!(std::thread::current().name(), Some("automatic-paste"));
+                started_tx.send(()).unwrap();
+                settle_rx.recv().unwrap(); // Simulate waiting for read/restoration.
+            },
+        )
+        .unwrap();
+        drop(guard);
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(matches!(
+            complete_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        settle_tx.send(()).unwrap();
+        complete_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
     }
 
     #[test]

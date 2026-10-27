@@ -33,6 +33,20 @@ struct RecordingErrorEvent {
     detail: Option<String>,
 }
 
+#[derive(Clone, serde::Serialize)]
+struct PasteErrorEvent {
+    code: &'static str,
+}
+
+fn emit_paste_error(app: &AppHandle, error: &str) {
+    let _ = app.emit(
+        "paste-error",
+        PasteErrorEvent {
+            code: paste_delivery::paste_error_code(error),
+        },
+    );
+}
+
 /// Drop guard that finishes the transcription pipeline, including immediate
 /// model unloading on early exits.
 struct FinishGuard(AppHandle, Arc<TranscriptionManager>);
@@ -63,7 +77,8 @@ pub trait ShortcutAction: Send + Sync {
 struct TranscribeAction;
 
 // None is a recording cancellation tombstone, consumed by a racing stop().
-static CLEANUP_SESSIONS: Lazy<Mutex<HashMap<String, Option<CleanupSession>>>> =
+type TimedCleanupSession = (CleanupSession, Instant);
+static CLEANUP_SESSIONS: Lazy<Mutex<HashMap<String, Option<TimedCleanupSession>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 async fn complete_unless_cancelled<F, C>(operation: F, is_cancelled: C) -> Option<F::Output>
@@ -240,7 +255,7 @@ impl ShortcutAction for TranscribeAction {
         // the microphone; never re-read them in the async transcription path.
         let cleanup_session = dictation_cleanup::capture_session(app);
         if let Ok(mut sessions) = CLEANUP_SESSIONS.lock() {
-            sessions.insert(binding_id.clone(), Some(cleanup_session));
+            sessions.insert(binding_id.clone(), Some((cleanup_session, Instant::now())));
         }
         let mut recording_error: Option<String> = None;
         let recording_start_time = Instant::now();
@@ -346,14 +361,14 @@ impl ShortcutAction for TranscribeAction {
         // Claim the recording before changing its UI. Cancellation drops the
         // credential-bearing session and leaves a tombstone, so a release that
         // races with Esc cannot produce a second cancellation/no-audio record.
-        let cleanup_session = match CLEANUP_SESSIONS
+        let (cleanup_session, recording_started_at) = match CLEANUP_SESSIONS
             .lock()
             .ok()
             .and_then(|mut sessions| sessions.remove(binding_id))
         {
-            Some(Some(session)) => session,
+            Some(Some((session, started))) => (session, Some(started)),
             Some(None) => return,
-            None => CleanupSession::unavailable(),
+            None => (CleanupSession::unavailable(), None),
         };
         // Prevent a slow microphone from emitting a ready event or start chime
         // after the user has already requested stop.
@@ -361,6 +376,8 @@ impl ShortcutAction for TranscribeAction {
             .invalidate_recording_readiness();
 
         let stop_time = Instant::now();
+        let recording_ms =
+            crate::dictation_metrics::recording_elapsed_ms(recording_started_at, stop_time);
         debug!("TranscribeAction::stop called for binding: {}", binding_id);
 
         let ah = app.clone();
@@ -387,6 +404,7 @@ impl ShortcutAction for TranscribeAction {
         let post_process = cleanup_session.is_enabled();
         let mut timing =
             crate::dictation_metrics::DictationTiming::new(cleanup_session.mode_name());
+        timing.recording_ms = recording_ms;
         timing.begin_resources();
 
         tauri::async_runtime::spawn(async move {
@@ -590,7 +608,7 @@ impl ShortcutAction for TranscribeAction {
                                 let final_text = processed.final_text;
                                 let rm_for_paste = Arc::clone(&rm);
                                 let mut dispatch_failure_timing = timing.clone();
-                                paste_delivery::dispatch_paste(Arc::clone(&guard), |work| ah.run_on_main_thread(work), move || {
+                                paste_delivery::dispatch_automatic_paste(Arc::clone(&guard), |work| ah.run_on_main_thread(work).map_err(|error| error.to_string()), move || {
                                     if rm_for_paste.was_cancelled_since(cancel_generation) {
                                         timing.outcome = "cancelled".into();
                                         timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
@@ -603,17 +621,31 @@ impl ShortcutAction for TranscribeAction {
 
                                     match utils::paste_cancellable(final_text, ah_clone.clone(), || rm_for_paste.was_cancelled_since(cancel_generation)) {
                                         Ok(true) => {
-                                            debug!("Text pasted successfully in {:?}", paste_time.elapsed());
+                                            #[cfg(target_os = "windows")]
+                                            {
+                                                timing.outcome = "paste_read_observed".into();
+                                                debug!("Clipboard read observed in {:?}; target insertion is unconfirmed", paste_time.elapsed());
+                                            }
+                                            #[cfg(not(target_os = "windows"))]
+                                            debug!("Paste chord sent in {:?}", paste_time.elapsed());
                                             timing.paste_ms = Some(crate::dictation_metrics::elapsed_ms(paste_time));
                                         }
                                         Ok(false) => {
                                             timing.outcome = "cancelled".into();
                                             debug!("Transcription operation cancelled before key injection");
                                         }
+                                        Err(e) if e == "automatic_paste_unconfirmed" => {
+                                            timing.outcome = "paste_unconfirmed".into();
+                                            warn!("Automatic clipboard read was not confirmed; not retrying");
+                                            emit_paste_error(&ah_clone, &e);
+                                        }
+                                        Err(e) if e == "automatic_paste_disabled" => {
+                                            timing.outcome = "paste_skipped".into();
+                                        }
                                         Err(e) => {
                                             timing.outcome = "paste_failed".into();
                                             error!("Failed to paste transcription: {}", e);
-                                            let _ = ah_clone.emit("paste-error", ());
+                                            emit_paste_error(&ah_clone, &e);
                                         }
                                     }
                                     timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
@@ -625,8 +657,8 @@ impl ShortcutAction for TranscribeAction {
                                     dispatch_failure_timing.outcome = "paste_failed".into();
                                     dispatch_failure_timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
                                     crate::dictation_metrics::record(&ah, dispatch_failure_timing);
-                                    error!("Failed to run paste on main thread: {:?}", e);
-                                    let _ = ah.emit("paste-error", ());
+                                    error!("Failed to dispatch automatic paste: {:?}", e);
+                                    emit_paste_error(&ah, &e);
                                     utils::hide_recording_overlay(&ah);
                                     set_tray_state(&ah, TrayIconState::Idle);
                                 });
@@ -719,7 +751,7 @@ impl ShortcutAction for CancelAction {
                     .values_mut()
                     .filter_map(|session| {
                         crate::dictation_metrics::claim_recording_cancel(active, session)
-                            .map(|session| session.mode_name())
+                            .map(|(session, _)| session.mode_name())
                     })
                     .collect();
                 if !active {

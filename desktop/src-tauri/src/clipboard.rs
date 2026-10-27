@@ -803,9 +803,37 @@ pub(crate) fn paste_cancellable(
     app_handle: AppHandle,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<bool, String> {
-    // The experimental receipt transaction has no cancellation boundary inside
-    // its platform publisher. Automatic tasks use the guarded clipboard path.
+    // Windows automatic tasks use the synchronous protected transaction below,
+    // including cancellation and restoration before the worker releases its guard.
     paste_with_cancellation(text, app_handle, is_cancelled, false)
+}
+
+#[cfg(target_os = "windows")]
+fn paste_automatic_windows(
+    text: &str,
+    app_handle: &AppHandle,
+    paste_method: PasteMethod,
+    copy_result: bool,
+    is_cancelled: &impl Fn() -> bool,
+) -> Result<bool, String> {
+    with_enigo(app_handle, |enigo| {
+        if is_cancelled() {
+            return Ok(false);
+        }
+        // Acquire the keyboard lock before borrowing the clipboard: an Enigo
+        // wait must not sit between the transaction's lease check and its chord.
+        match crate::protected_paste::run_automatic(
+            text,
+            || crate::manual_paste::send_paste_chord(enigo, paste_method, is_cancelled),
+            is_cancelled,
+            copy_result,
+        ) {
+            Ok(true) => Ok(true), // A consumer read is evidence, not proof of insertion.
+            Ok(false) => Err("automatic_paste_unconfirmed".into()),
+            Err(code) if code == "manual_paste_cancelled" => Ok(false),
+            Err(code) => Err(code),
+        }
+    })
 }
 
 fn paste_with_cancellation(
@@ -846,9 +874,29 @@ fn paste_with_cancellation(
     match paste_method {
         PasteMethod::None => {
             info!("PasteMethod::None selected - skipping paste action");
+            #[cfg(target_os = "windows")]
+            if !allow_reliable {
+                if settings.clipboard_handling == ClipboardHandling::CopyToClipboard {
+                    write_text_to_clipboard(&app_handle, &text)?;
+                }
+                return Err("automatic_paste_disabled".into());
+            }
         }
         PasteMethod::Direct | PasteMethod::ExternalScript => validate_paste_method(paste_method)?,
         PasteMethod::CtrlV | PasteMethod::CtrlShiftV | PasteMethod::ShiftInsert => {
+            #[cfg(target_os = "windows")]
+            if !allow_reliable {
+                // Never fall back to the timer path after a backup, keyboard,
+                // ownership or observation failure; the single attempt may have
+                // reached a target already. Copy preference settles under lease.
+                return paste_automatic_windows(
+                    &text,
+                    &app_handle,
+                    paste_method,
+                    settings.clipboard_handling == ClipboardHandling::CopyToClipboard,
+                    &is_cancelled,
+                );
+            }
             // Debug-gated receipt-sequenced paste (#502): restore the clipboard
             // after the target actually reads the transcript, not on a timer.
             // Never retry an uncertain injection: the coordinator permits one

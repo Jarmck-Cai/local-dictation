@@ -6,7 +6,9 @@ mod policy;
 #[path = "dictation_resources.rs"]
 mod resources;
 
-pub(crate) use policy::{claim_recording_cancel, stopped_without_audio_outcome};
+pub(crate) use policy::{
+    claim_recording_cancel, recording_elapsed_ms, stopped_without_audio_outcome,
+};
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -34,6 +36,8 @@ pub struct DictationTiming {
     pub id: String,
     pub history_id: Option<i64>,
     pub recorded_at_ms: u64,
+    #[serde(default)]
+    pub recording_ms: Option<u64>,
     pub asr_ms: u64,
     pub cleanup_ms: u64,
     pub paste_ms: Option<u64>,
@@ -65,6 +69,7 @@ impl DictationTiming {
             id: format!("{timestamp}-{}", SEQUENCE.fetch_add(1, Ordering::Relaxed)),
             history_id: None,
             recorded_at_ms: timestamp,
+            recording_ms: None,
             asr_ms: 0,
             cleanup_ms: 0,
             paste_ms: None,

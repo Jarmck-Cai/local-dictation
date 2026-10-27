@@ -87,6 +87,41 @@ pub(crate) fn finished(elapsed: Duration, o: Observation) -> bool {
         || (o.read && o.quiet_for.is_some_and(|quiet| quiet >= READ_QUIET))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettlementAction {
+    PreserveNewCopy,
+    RestoreSnapshot,
+    RetainResult,
+}
+
+/// The provider calls this with its lease and cancellation sample under the
+/// final clipboard lock, immediately before the first settlement mutation.
+pub(crate) fn settlement_action(
+    copy_result: bool,
+    same_lease: bool,
+    cancelled: bool,
+) -> SettlementAction {
+    if !same_lease {
+        SettlementAction::PreserveNewCopy
+    } else if copy_result && !cancelled {
+        SettlementAction::RetainResult
+    } else {
+        SettlementAction::RestoreSnapshot
+    }
+}
+
+pub(crate) fn settlement_cancelled(is_cancelled: &dyn Fn() -> bool) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(is_cancelled)).unwrap_or(true)
+}
+
+pub(crate) fn settlement_result(cancelled: bool) -> Result<(), &'static str> {
+    if cancelled {
+        Err(CANCELLED)
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) trait Provider {
     fn prepare(&mut self, text: &str) -> Result<(), &'static str>;
     fn publish(&mut self) -> Result<(), &'static str>;
@@ -95,6 +130,38 @@ pub(crate) trait Provider {
     fn elapsed(&self) -> Duration;
     fn pause(&mut self);
     fn restore(&mut self) -> Result<(), &'static str>;
+    /// Explicit copy preference, settled under the same ownership/sequence lock.
+    fn retain_text(&mut self) -> Result<(), &'static str> {
+        Err("automatic_paste_copy_unavailable")
+    }
+    /// Includes a lease change discovered while settling, after the last poll.
+    fn ownership_lost(&self) -> bool {
+        false
+    }
+    /// Locking providers override this and sample cancellation after obtaining
+    /// their settlement lock, before choosing retention or restoring a snapshot.
+    fn settle(
+        &mut self,
+        copy_result: bool,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), &'static str> {
+        let cancelled = settlement_cancelled(is_cancelled);
+        if copy_result && !cancelled {
+            if let Err(error) = self.retain_text() {
+                self.restore()?;
+                return Err(error);
+            }
+            // Compatibility for non-locking providers: a cancellation raised
+            // inside retention must not leave the result persistently copied.
+            if settlement_cancelled(is_cancelled) {
+                self.restore()?;
+                return Err(CANCELLED);
+            }
+        } else {
+            self.restore()?;
+        }
+        settlement_result(cancelled || settlement_cancelled(is_cancelled))
+    }
 }
 
 pub(crate) fn transact<P: Provider>(
@@ -102,6 +169,16 @@ pub(crate) fn transact<P: Provider>(
     text: &str,
     inject: impl FnOnce() -> Result<(), String>,
     is_cancelled: impl Fn() -> bool,
+) -> Result<bool, String> {
+    transact_with_retention(provider, text, inject, is_cancelled, false)
+}
+
+pub(crate) fn transact_with_retention<P: Provider>(
+    provider: &mut P,
+    text: &str,
+    inject: impl FnOnce() -> Result<(), String>,
+    is_cancelled: impl Fn() -> bool,
+    copy_result: bool,
 ) -> Result<bool, String> {
     if is_cancelled() {
         return Err(CANCELLED.into());
@@ -133,15 +210,22 @@ pub(crate) fn transact<P: Provider>(
             }
             let observed = provider.observe()?;
             if finished(provider.elapsed(), observed) {
-                return Ok(observed.read);
+                if is_cancelled() {
+                    return Err(CANCELLED);
+                }
+                return Ok(observed.read && !observed.ownership_lost);
             }
             provider.pause();
         }
     }))
     .unwrap_or(Err(INJECTION_FAILED));
     // A restore failure must never be hidden by a read receipt or input error.
-    provider.restore().map_err(String::from)?;
-    outcome.map_err(String::from)
+    provider
+        .settle(copy_result && outcome.is_ok(), &is_cancelled)
+        .map_err(String::from)?;
+    outcome
+        .map(|read| read && !provider.ownership_lost())
+        .map_err(String::from)
 }
 
 #[cfg(test)]
@@ -158,6 +242,8 @@ mod tests {
         elapsed: Duration,
         observed: bool,
         concurrent_copy: bool,
+        concurrent_copy_on_settle: bool,
+        cancel_at_settlement: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     }
     impl Provider for Fake {
         fn prepare(&mut self, _: &str) -> Result<(), &'static str> {
@@ -209,10 +295,48 @@ mod tests {
             if self.failure == Some("restore") {
                 return Err(RESTORE_FAILED);
             }
-            if self.current == "temporary transcript" {
+            if self.concurrent_copy_on_settle {
+                self.current = "new user copy";
+            } else if self.current == "temporary transcript" {
                 self.current = self.original;
             }
             Ok(())
+        }
+        fn retain_text(&mut self) -> Result<(), &'static str> {
+            self.log.push("retain");
+            if self.failure == Some("retain") {
+                return Err("automatic_paste_copy_unavailable");
+            }
+            if self.concurrent_copy || self.concurrent_copy_on_settle {
+                self.current = "new user copy";
+            }
+            Ok(())
+        }
+        fn ownership_lost(&self) -> bool {
+            self.concurrent_copy || self.concurrent_copy_on_settle
+        }
+        fn settle(
+            &mut self,
+            copy_result: bool,
+            is_cancelled: &dyn Fn() -> bool,
+        ) -> Result<(), &'static str> {
+            // Represents acquiring the provider's final lock after a wait.
+            if let Some(flag) = &self.cancel_at_settlement {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            let cancelled = settlement_cancelled(is_cancelled);
+            match settlement_action(copy_result, !self.ownership_lost(), cancelled) {
+                SettlementAction::RetainResult => {
+                    if let Err(error) = self.retain_text() {
+                        self.restore()?;
+                        return Err(error);
+                    }
+                }
+                SettlementAction::RestoreSnapshot | SettlementAction::PreserveNewCopy => {
+                    self.restore()?
+                }
+            }
+            settlement_result(cancelled)
         }
     }
     fn clipboard() -> Fake {
@@ -290,6 +414,198 @@ mod tests {
         p.concurrent_copy = true;
         assert_eq!(transact(&mut p, "hello", || Ok(()), || false), Ok(false));
         assert_eq!(p.current, "new user copy");
+    }
+    #[test]
+    fn newer_user_copy_after_a_receipt_is_not_observed_success() {
+        let mut p = clipboard();
+        p.observed = true;
+        p.concurrent_copy = true;
+        assert_eq!(transact(&mut p, "hello", || Ok(()), || false), Ok(false));
+        assert_eq!(p.current, "new user copy");
+    }
+    #[test]
+    fn copy_preference_retains_text_without_an_extra_clipboard_write() {
+        let mut p = clipboard();
+        p.observed = true;
+        assert_eq!(
+            transact_with_retention(&mut p, "hello", || Ok(()), || false, true),
+            Ok(true)
+        );
+        assert_eq!(p.current, "temporary transcript");
+        assert_eq!(p.log, ["prepare", "publish", "begin", "retain"]);
+    }
+    #[test]
+    fn copy_preference_can_retain_an_unconfirmed_attempt_but_never_claims_a_read() {
+        let mut p = clipboard();
+        assert_eq!(
+            transact_with_retention(&mut p, "hello", || Ok(()), || false, true),
+            Ok(false)
+        );
+        assert_eq!(p.current, "temporary transcript");
+    }
+    #[test]
+    fn ownership_loss_during_settlement_overrides_an_earlier_receipt() {
+        for copy in [false, true] {
+            let mut p = clipboard();
+            p.observed = true;
+            p.concurrent_copy_on_settle = true;
+            assert_eq!(
+                transact_with_retention(&mut p, "hello", || Ok(()), || false, copy),
+                Ok(false)
+            );
+            assert_eq!(p.current, "new user copy");
+        }
+    }
+    #[test]
+    fn copy_preference_does_not_retain_cancelled_or_failed_output() {
+        for code in [CANCELLED, INJECTION_FAILED] {
+            let mut p = clipboard();
+            assert_eq!(
+                transact_with_retention(&mut p, "hello", || Err(code.into()), || false, true),
+                Err(code.into())
+            );
+            assert_eq!(p.current, "original rich content");
+            assert!(!p.log.contains(&"retain"));
+        }
+    }
+    #[test]
+    fn retain_failure_still_attempts_snapshot_restoration() {
+        let mut p = clipboard();
+        p.observed = true;
+        p.failure = Some("retain");
+        assert_eq!(
+            transact_with_retention(&mut p, "hello", || Ok(()), || false, true),
+            Err("automatic_paste_copy_unavailable".into())
+        );
+        assert_eq!(p.current, "original rich content");
+        assert_eq!(p.log, ["prepare", "publish", "begin", "retain", "restore"]);
+    }
+    #[test]
+    fn cancellation_during_provider_settlement_cannot_report_a_read_success() {
+        struct LateCancel<'a> {
+            cancelled: &'a Cell<bool>,
+            retained: bool,
+            restored: bool,
+        }
+        impl Provider for LateCancel<'_> {
+            fn prepare(&mut self, _: &str) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn publish(&mut self) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn begin_injection(&mut self) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn observe(&mut self) -> Result<Observation, &'static str> {
+                Ok(Observation {
+                    read: true,
+                    quiet_for: Some(READ_QUIET),
+                    ownership_lost: false,
+                })
+            }
+            fn elapsed(&self) -> Duration {
+                Duration::from_millis(200)
+            }
+            fn pause(&mut self) {
+                panic!("a quiet receipt is already available");
+            }
+            fn restore(&mut self) -> Result<(), &'static str> {
+                self.cancelled.set(true);
+                self.restored = true;
+                Ok(())
+            }
+            fn retain_text(&mut self) -> Result<(), &'static str> {
+                self.cancelled.set(true);
+                self.retained = true;
+                Ok(())
+            }
+        }
+        for copy in [false, true] {
+            let cancelled = Cell::new(false);
+            let mut p = LateCancel {
+                cancelled: &cancelled,
+                retained: false,
+                restored: false,
+            };
+            assert_eq!(
+                transact_with_retention(
+                    &mut p,
+                    "synthetic-current",
+                    || Ok(()),
+                    || cancelled.get(),
+                    copy
+                ),
+                Err(CANCELLED.into())
+            );
+            assert!(
+                p.restored,
+                "a cancellation during retention must restore the snapshot"
+            );
+        }
+    }
+    #[test]
+    fn lock_wait_cancellation_uses_the_real_settlement_decision_before_retention() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        for copy in [false, true] {
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let mut p = clipboard();
+            p.observed = true;
+            p.cancel_at_settlement = Some(Arc::clone(&cancelled));
+            assert_eq!(
+                transact_with_retention(
+                    &mut p,
+                    "synthetic-current",
+                    || Ok(()),
+                    || cancelled.load(Ordering::SeqCst),
+                    copy
+                ),
+                Err(CANCELLED.into())
+            );
+            assert_eq!(p.current, "original rich content");
+            assert!(!p.log.contains(&"retain"));
+        }
+    }
+    #[test]
+    fn lock_wait_cancel_preserves_a_new_copy_and_does_not_hide_restore_failure() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut p = clipboard();
+        p.observed = true;
+        p.concurrent_copy_on_settle = true;
+        p.cancel_at_settlement = Some(Arc::clone(&cancelled));
+        assert_eq!(
+            transact_with_retention(
+                &mut p,
+                "synthetic-current",
+                || Ok(()),
+                || cancelled.load(Ordering::SeqCst),
+                true
+            ),
+            Err(CANCELLED.into())
+        );
+        assert_eq!(p.current, "new user copy");
+        let mut p = clipboard();
+        p.observed = true;
+        p.failure = Some("restore");
+        cancelled.store(false, Ordering::SeqCst);
+        p.cancel_at_settlement = Some(Arc::clone(&cancelled));
+        assert_eq!(
+            transact_with_retention(
+                &mut p,
+                "synthetic-current",
+                || Ok(()),
+                || cancelled.load(Ordering::SeqCst),
+                true
+            ),
+            Err(RESTORE_FAILED.into())
+        );
     }
     #[test]
     fn cancellation_before_publish_preserves_original() {

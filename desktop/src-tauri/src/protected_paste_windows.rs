@@ -460,9 +460,11 @@ struct WinClipboard {
     markers: Vec<(u32, Global)>,
     mutated: bool,
     began: Instant,
+    copy_result: bool,
+    retained_text: Option<Global>,
 }
 impl WinClipboard {
-    fn new() -> Result<Self, &'static str> {
+    fn new(copy_result: bool) -> Result<Self, &'static str> {
         let context = Box::<Context>::default();
         let window = Window::create(&context)?;
         Ok(Self {
@@ -473,6 +475,8 @@ impl WinClipboard {
             markers: Vec::new(),
             mutated: false,
             began: Instant::now(),
+            copy_result,
+            retained_text: None,
         })
     }
     fn current_sequence(&self) -> Result<u32, &'static str> {
@@ -493,6 +497,9 @@ impl WinClipboard {
 impl Provider for WinClipboard {
     fn prepare(&mut self, text: &str) -> Result<(), &'static str> {
         *self.context.text.borrow_mut() = Some(text_memory(text)?);
+        if self.copy_result {
+            self.retained_text = Some(text_memory(text)?);
+        }
         // Allocate every restoration and marker resource before the first mutation.
         self.markers
             .try_reserve_exact(3)
@@ -579,8 +586,30 @@ impl Provider for WinClipboard {
         thread::sleep(POLL);
     }
     fn restore(&mut self) -> Result<(), &'static str> {
+        self.settle(false, &|| false)
+    }
+    fn retain_text(&mut self) -> Result<(), &'static str> {
+        self.settle(true, &|| false)
+    }
+    fn ownership_lost(&self) -> bool {
+        self.context.ownership_lost.get()
+    }
+    fn settle(
+        &mut self,
+        copy_result: bool,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), &'static str> {
+        WinClipboard::settle(self, copy_result, is_cancelled)
+    }
+}
+impl WinClipboard {
+    fn settle(
+        &mut self,
+        copy_result: bool,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), &'static str> {
         if !self.mutated {
-            return Ok(());
+            return policy::settlement_result(policy::settlement_cancelled(is_cancelled));
         }
         let started = Instant::now();
         let lock = loop {
@@ -598,14 +627,44 @@ impl Provider for WinClipboard {
         // EmptyClipboard. A new user's copy always wins over our old snapshot.
         let owns = unsafe { GetClipboardOwner() }.ok() == Some(self.window.hwnd);
         let sequence = self.current_sequence().map_err(|_| RESTORE_FAILED)?;
-        if !policy::same_lease(
+        let same_lease = policy::same_lease(
             self.context.expected_sequence.get(),
             sequence,
             owns,
             self.context.ownership_lost.get(),
-        ) {
+        );
+        // Settlement commits at this cancellation sample under the acquired
+        // clipboard lock. Esc during OpenClipboard retries restores the snapshot
+        // rather than retaining output. A cancellation after this commit point
+        // cannot revoke an already committed clipboard mutation.
+        let cancelled = policy::settlement_cancelled(is_cancelled);
+        let action = policy::settlement_action(copy_result, same_lease, cancelled);
+        if action == policy::SettlementAction::PreserveNewCopy {
+            self.context.ownership_lost.set(true);
             self.mutated = false;
-            return lock.close().map_err(|_| RESTORE_FAILED);
+            lock.close().map_err(|_| RESTORE_FAILED)?;
+            return policy::settlement_result(cancelled);
+        }
+        if action == policy::SettlementAction::RetainResult {
+            let retained = self.retained_text.take().ok_or(RESTORE_FAILED)?;
+            self.empty().map_err(|_| RESTORE_FAILED)?;
+            self.context.expected_sequence.set(self.current_sequence()?);
+            if retained.transfer(UNICODE_TEXT).is_ok() {
+                // The retained result is real clipboard memory, not a promise
+                // owned by the temporary window that is about to be destroyed.
+                self.context.text.borrow_mut().take();
+                self.mutated = false;
+                lock.close().map_err(|_| RESTORE_FAILED)?;
+                return policy::settlement_result(cancelled);
+            }
+            // Publication failed after EmptyClipboard. Keep the same lock and
+            // restore the complete snapshot before reporting the failure.
+            for saved in &mut self.saved {
+                let _ = saved.restore();
+            }
+            self.mutated = false;
+            let _ = lock.close();
+            return Err(RESTORE_FAILED);
         }
         self.empty().map_err(|_| RESTORE_FAILED)?;
         let mut failed = false;
@@ -619,7 +678,7 @@ impl Provider for WinClipboard {
         if failed {
             Err(RESTORE_FAILED)
         } else {
-            Ok(())
+            policy::settlement_result(cancelled)
         }
     }
 }
@@ -634,6 +693,16 @@ pub(super) fn run(
     inject: impl FnOnce() -> Result<(), String>,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<bool, String> {
-    let mut clipboard = WinClipboard::new().map_err(String::from)?;
+    let mut clipboard = WinClipboard::new(false).map_err(String::from)?;
     policy::transact(&mut clipboard, text, inject, is_cancelled)
+}
+
+pub(super) fn run_automatic(
+    text: &str,
+    inject: impl FnOnce() -> Result<(), String>,
+    is_cancelled: impl Fn() -> bool,
+    copy_result: bool,
+) -> Result<bool, String> {
+    let mut clipboard = WinClipboard::new(copy_result).map_err(String::from)?;
+    policy::transact_with_retention(&mut clipboard, text, inject, is_cancelled, copy_result)
 }

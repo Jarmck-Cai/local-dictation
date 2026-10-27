@@ -32,6 +32,17 @@ pub fn claim_recording_cancel<T>(recording_active: bool, session: &mut Option<T>
     }
 }
 
+/// Request-to-release time includes microphone readiness and silence. Unknown
+/// starts must stay unknown rather than inflate estimated time savings.
+pub fn recording_elapsed_ms(
+    started: Option<std::time::Instant>,
+    stopped: std::time::Instant,
+) -> Option<u64> {
+    stopped
+        .checked_duration_since(started?)
+        .map(|elapsed| elapsed.as_millis().min(u64::MAX as u128) as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +85,27 @@ mod tests {
         );
         assert_eq!(claim_recording_cancel(true, &mut session), None);
         assert_eq!(claim_recording_cancel(false, &mut session), None);
+    }
+
+    #[test]
+    fn unknown_recording_start_is_not_zero_duration() {
+        assert_eq!(recording_elapsed_ms(None, std::time::Instant::now()), None);
+    }
+
+    #[test]
+    fn recording_time_ends_at_release_and_each_session_has_its_own_start() {
+        let first = std::time::Instant::now();
+        let first_stop = first + std::time::Duration::from_secs(15);
+        let second = first_stop + std::time::Duration::from_secs(30);
+        let second_stop = second + std::time::Duration::from_secs(4);
+        assert_eq!(recording_elapsed_ms(Some(first), first_stop), Some(15_000));
+        assert_eq!(recording_elapsed_ms(Some(second), second_stop), Some(4_000));
+    }
+
+    #[test]
+    fn invalid_recording_order_stays_unknown() {
+        let stop = std::time::Instant::now();
+        let start = stop + std::time::Duration::from_secs(1);
+        assert_eq!(recording_elapsed_ms(Some(start), stop), None);
     }
 }

@@ -251,8 +251,8 @@ pub(crate) fn any_keyboard_key_down() -> Result<bool, &'static str> {
     Err("unsupported")
 }
 
-/// This helper is invoked inside with_enigo's locked closure, immediately
-/// before its only key attempt. The automatic input helpers remain unchanged.
+/// Shared protected-paste chord, invoked inside with_enigo's locked closure
+/// immediately before its only key attempt.
 pub(crate) fn send_paste_chord(
     enigo: &mut enigo::Enigo,
     method: settings::PasteMethod,
