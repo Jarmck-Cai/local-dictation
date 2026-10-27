@@ -210,7 +210,7 @@
           },
           "paste_latest_result": {
             "name": "补贴最近结果",
-            "description": "默认 Ctrl+Shift+F9。点回输入框，按下并松开后补贴最近终稿；保留原剪贴板，不重新识别或整理，不自动发送。"
+            "description": "默认 Ctrl+Shift+F9。点回输入框，按下并松开后补贴最近终稿；尽量恢复原剪贴板，不支持的内容可能被替换。不重新识别或整理，不自动发送。"
           }
         },
         "errors": {
@@ -353,9 +353,9 @@
       },
       "clipboardHandling": {
         "title": "剪贴板处理",
-        "description": "识别完成后保留原剪贴板，或把本次结果留在剪贴板中。",
+        "description": "尽量恢复原剪贴板，或保留本次转录。Windows 无法恢复原内容时会留下本次转录；期间新复制的内容优先保留。",
         "options": {
-          "dontModify": "不修改剪贴板",
+          "dontModify": "尽量恢复原内容",
           "copyToClipboard": "复制到剪贴板"
         }
       },

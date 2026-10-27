@@ -273,7 +273,7 @@ fn initialize_core_logic(app_handle: &AppHandle) {
             .unwrap(),
         )
         .tooltip(tray::tray_tooltip())
-        .icon_as_template(true);
+        .icon_as_template(tray::ICON_AS_TEMPLATE);
 
     // Windows notification-area convention: left click opens the app, right click
     // shows the menu. Elsewhere (macOS menu bar, Linux) the menu stays on left click.
@@ -1026,9 +1026,18 @@ pub fn run(cli_args: CliArgs) {
                     .title("轻述")
                     .inner_size(1000.0, 730.0)
                     .min_inner_size(780.0, 600.0)
+                    .center()
                     .resizable(true)
                     .maximizable(true)
                     .visible(false);
+
+            #[cfg(target_os = "windows")]
+            {
+                // Use the full PNG for the live taskbar/title-bar icon instead
+                // of relying on the ICO's first (smallest) embedded frame.
+                win_builder = win_builder
+                    .icon(Image::from_bytes(include_bytes!("../icons/128x128.png"))?)?;
+            }
 
             if let Some(data_dir) = portable::data_dir() {
                 win_builder = win_builder.data_directory(data_dir.join("webview"));

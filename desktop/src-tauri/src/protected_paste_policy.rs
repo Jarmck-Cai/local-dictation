@@ -58,7 +58,7 @@ pub(crate) fn safe_global_format(format: u32, name: Option<&str>) -> bool {
             ))
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Budget {
     formats: usize,
     bytes: usize,
@@ -764,7 +764,7 @@ mod tests {
         assert!(same_lease(42, 42, true, false));
     }
     #[test]
-    fn unknown_or_handle_based_formats_refuse_backup_instead_of_being_skipped() {
+    fn global_clone_allowlist_never_treats_unknown_or_gdi_handles_as_bytes() {
         for format in [1, 7, 8, 13, 15, 16, 17] {
             assert!(safe_global_format(format, None));
         }

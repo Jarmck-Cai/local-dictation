@@ -190,7 +190,7 @@
           },
           "paste_latest_result": {
             "name": "Paste latest result",
-            "description": "Ctrl+Shift+F9 by default. Focus the input, press and release to paste the latest final text. Preserves the clipboard, without recognition, cleanup or sending."
+            "description": "Ctrl+Shift+F9 by default. Focus the input, press and release to paste the latest final text. Restores supported clipboard content; unsupported content may be replaced. No recognition, cleanup or sending."
           }
         },
         "errors": {
@@ -353,9 +353,9 @@
       },
       "clipboardHandling": {
         "title": "Clipboard Handling",
-        "description": "Keep the original clipboard after transcription, or leave this result in the clipboard.",
+        "description": "Try to restore the original clipboard, or keep this transcript. On Windows, the transcript remains if the original content cannot be restored. Anything newly copied takes priority.",
         "options": {
-          "dontModify": "Don't Modify Clipboard",
+          "dontModify": "Try to Restore Original Content",
           "copyToClipboard": "Copy to Clipboard"
         }
       },

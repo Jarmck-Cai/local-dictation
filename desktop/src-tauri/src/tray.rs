@@ -36,6 +36,11 @@ use tauri::tray::TrayIcon;
 use tauri::{AppHandle, Manager, Theme};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
+// The mint background is part of the colored mark. macOS template rendering
+// would flatten the opaque tile and hide its interior geometry. Keep initial
+// creation and subsequent state updates on this same setting.
+pub const ICON_AS_TEMPLATE: bool = false;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayIconState {
     Idle,
@@ -199,11 +204,11 @@ pub fn get_icon_path(theme: AppTheme, state: TrayIconState, warning: bool) -> &'
         };
     }
     match (theme, state) {
-        // Dark theme uses light icons
+        // Dark taskbar uses the mint tile with a light perimeter.
         (AppTheme::Dark, TrayIconState::Idle) => "resources/tray_idle.png",
         (AppTheme::Dark, TrayIconState::Recording) => "resources/tray_recording.png",
         (AppTheme::Dark, TrayIconState::Transcribing) => "resources/tray_transcribing.png",
-        // Light theme uses dark icons
+        // Light taskbar uses the same tile with a darker perimeter.
         (AppTheme::Light, TrayIconState::Idle) => "resources/tray_idle_dark.png",
         (AppTheme::Light, TrayIconState::Recording) => "resources/tray_recording_dark.png",
         (AppTheme::Light, TrayIconState::Transcribing) => "resources/tray_transcribing_dark.png",
@@ -382,7 +387,7 @@ fn apply_on_main(app: &AppHandle) {
     let mut icon_ok = false;
     if icon_changed {
         match icon {
-            Some(image) => match tray.set_icon_with_as_template(Some(image), true) {
+            Some(image) => match tray.set_icon_with_as_template(Some(image), ICON_AS_TEMPLATE) {
                 Ok(()) => icon_ok = true,
                 Err(err) => error!("Failed to update tray icon '{}': {err}", desired.icon_path),
             },

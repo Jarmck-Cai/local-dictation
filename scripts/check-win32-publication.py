@@ -48,6 +48,7 @@ const ERROR_SUCCESS: u32 = 0;
 const UNAVAILABLE: &str = "manual_paste_unavailable";
 const PUBLISH_FAILED: &str = "manual_paste_publish_failed";
 const RENDER_FAILED: &str = "manual_paste_render_failed";
+const BACKUP_FAILED: &str = "manual_paste_backup_failed";
 const OPEN_RESTORE_TIMEOUT: Duration = Duration::from_millis(500);
 const POLL: Duration = Duration::from_millis(10);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)] struct HWND(usize);
@@ -71,6 +72,10 @@ struct SyntheticSystem {
     copy_before_begin: bool, change_before_begin: bool,
     cancelled: bool, reader_pending: bool, copy_after_injection: bool,
     cancel_after_injection: bool, injected: usize, restored: usize,
+    restore_unavailable: bool, restore_failure: bool, originally_empty: bool, marker_only: bool,
+    partial_restore: bool,
+    fail_retention: bool, cancel_on_settle: bool, fail_text_allocation: bool, text_allocations: usize,
+    failed_payload_with_markers: bool,
 }
 thread_local! { static SYSTEM: RefCell<SyntheticSystem> = RefCell::new(SyntheticSystem::default()); }
 fn reset(synthesis: bool) {
@@ -100,6 +105,7 @@ unsafe fn GetLastError() -> u32 { ERROR_SUCCESS }
 unsafe fn SetClipboardData(format: u32, handle: Option<usize>) -> Result<usize, ()> {
     SYSTEM.with(|s| {
         let mut s = s.borrow_mut();
+        if format == 13 && handle.is_some() && !s.rendering && s.fail_retention { return Err(()); }
         if !s.formats.contains(&format) { s.formats.push(format); }
         // Rendering callbacks fulfill an existing promise. Wine's Windows tests
         // also check that SetClipboardData inside WM_RENDERFORMAT keeps sequence.
@@ -120,20 +126,47 @@ unsafe fn EmptyClipboard() -> Result<(), ()> {
 }
 struct Global;
 impl Global {
+    fn from_bytes(_: &[u8]) -> Result<Self, &'static str> { Ok(Self) }
     fn transfer(self, format: u32) -> Result<(), &'static str> {
         unsafe { SetClipboardData(format, Some(1)) }.map(|_| ()).map_err(|_| PUBLISH_FAILED)
     }
 }
-struct Saved;
+struct Saved { format: u32 }
 impl Saved {
     // Allocation/snapshot restoration is an API boundary for this harness.
     // Snapshot byte ownership has its separate check-win32-snapshot.py suite.
     fn restore(&mut self) -> Result<(), &'static str> {
         SYSTEM.with(|s| {
-            let mut s = s.borrow_mut(); s.body = "synthetic-original";
-            s.formats = vec![13]; s.delayed = false; s.restored += 1;
-        }); Ok(())
+            let mut s = s.borrow_mut(); s.restored += 1;
+            if s.restore_failure && self.format == 13 { return Err(RESTORE_FAILED); }
+            s.body = "synthetic-original"; s.delayed = false;
+            if !s.formats.contains(&self.format) { s.formats.push(self.format); }
+            Ok(())
+        })
     }
+}
+struct PCWSTR(*const u16);
+unsafe fn RegisterClipboardFormatW(name: PCWSTR) -> u32 {
+    // Synthetic identity only; no native clipboard API is linked.
+    if *name.0 == 'E' as u16 { 50001 } else if *name.0.add(3) == 'I' as u16 { 50002 } else { 50003 }
+}
+fn text_memory(text: &str) -> Result<Global, &'static str> {
+    assert_eq!(text, "synthetic-transcript");
+    SYSTEM.with(|s| { let mut s = s.borrow_mut(); s.text_allocations += 1;
+        if s.fail_text_allocation && s.text_allocations == 2 { Err(BACKUP_FAILED) } else { Ok(Global) } })
+}
+fn enumerate() -> Result<Vec<u32>, &'static str> {
+    SYSTEM.with(|s| { let s = s.borrow();
+        Ok(if s.originally_empty { vec![] } else if s.restore_unavailable { vec![60001] }
+           else if s.marker_only { vec![16, 50001, 50002, 50003] } else { vec![13] }) })
+}
+fn snapshot() -> Result<Vec<Saved>, &'static str> {
+    SYSTEM.with(|s| { let s = s.borrow();
+        Ok(if s.originally_empty || s.restore_unavailable { vec![] }
+           else if s.marker_only { vec![Saved { format: 16 }, Saved { format: 50001 }] }
+           else if s.partial_restore { vec![Saved { format: 13 }, Saved { format: 50010 }] }
+           else if s.failed_payload_with_markers { vec![Saved { format: 13 }, Saved { format: 16 }, Saved { format: 50001 }] }
+           else { vec![Saved { format: 13 }] }) })
 }
 struct ClipboardLock;
 impl ClipboardLock {
@@ -141,6 +174,7 @@ impl ClipboardLock {
         SYSTEM.with(|s| {
             let mut s = s.borrow_mut();
             if s.opened.is_some() { return Err("manual_paste_clipboard_busy"); }
+            if s.injected > 0 && s.cancel_on_settle { s.cancelled = true; }
             s.opened = Some(hwnd.0); Ok(Self)
         })
     }
@@ -190,6 +224,9 @@ PREPARE = r'''
         *self.context.text.borrow_mut() = Some(Global);
         if self.copy_result { self.retained_text = Some(Global); }
         self.saved = vec![Saved];
+        if SYSTEM.with(|s| s.borrow().restore_unavailable || s.borrow().originally_empty) {
+            self.saved.clear();
+        }
         self.markers = vec![(50001, Global), (50002, Global), (50003, Global)];
         self.held = Some(ClipboardLock::open(self.window.hwnd)?);
         Ok(())
@@ -289,6 +326,85 @@ mod publication_tests {
         reset(false); SYSTEM.with(|s| s.borrow_mut().copy_after_injection = true);
         assert_eq!(transaction(true), Ok(false)); new_copy_preserved(1);
     }
+    #[test]
+    fn no_recoverable_original_payload_keeps_current_text_after_one_input() {
+        reset(true); SYSTEM.with(|s| s.borrow_mut().restore_unavailable = true);
+        assert_eq!(transaction(false), Ok(true));
+        SYSTEM.with(|s| { let s = s.borrow(); assert_eq!(s.injected, 1);
+            assert_eq!(s.body, "synthetic-transcript"); assert!(!s.delayed);
+            assert_eq!(s.restored, 0); });
+    }
+    #[test]
+    fn originally_empty_clipboard_is_restored_to_empty() {
+        reset(true); SYSTEM.with(|s| s.borrow_mut().originally_empty = true);
+        assert_eq!(transaction(false), Ok(true));
+        SYSTEM.with(|s| { let s = s.borrow(); assert_eq!(s.injected, 1);
+            assert_eq!(s.body, "empty"); assert!(s.formats.is_empty()); });
+    }
+    #[test]
+    fn failed_format_restoration_keeps_current_text_without_failing_the_input() {
+        reset(true); SYSTEM.with(|s| s.borrow_mut().restore_failure = true);
+        assert_eq!(transaction(false), Ok(true));
+        SYSTEM.with(|s| { let s = s.borrow(); assert_eq!(s.injected, 1);
+            assert_eq!(s.body, "synthetic-transcript"); assert!(!s.delayed); });
+    }
+    #[test]
+    fn no_backup_never_overwrites_a_new_user_copy() {
+        reset(true); SYSTEM.with(|s| { let mut s = s.borrow_mut();
+            s.restore_unavailable = true; s.copy_after_injection = true; });
+        assert_eq!(transaction(false), Ok(false)); new_copy_preserved(1);
+    }
+    #[test]
+    fn metadata_markers_alone_do_not_count_as_original_payload() {
+        reset(true); SYSTEM.with(|s| s.borrow_mut().marker_only = true);
+        assert_eq!(transaction(false), Ok(true));
+        SYSTEM.with(|s| { let s = s.borrow(); assert_eq!(s.injected, 1);
+            assert_eq!(s.body, "synthetic-transcript"); assert_eq!(s.restored, 0); });
+    }
+    #[test]
+    fn restored_original_html_and_failed_original_text_never_mix_with_current_text() {
+        reset(true); SYSTEM.with(|s| { let mut s = s.borrow_mut();
+            s.restore_failure = true; s.partial_restore = true; });
+        assert_eq!(transaction(false), Ok(true));
+        SYSTEM.with(|s| { let s = s.borrow(); assert_eq!(s.injected, 1);
+            assert_eq!(s.body, "synthetic-original"); assert_eq!(s.formats, vec![50010]);
+            assert!(!s.delayed); assert_eq!(s.restored, 2); });
+    }
+    #[test]
+    fn restored_markers_do_not_mask_failure_of_every_original_payload() {
+        reset(true); SYSTEM.with(|s| { let mut s = s.borrow_mut();
+            s.restore_failure = true; s.failed_payload_with_markers = true; });
+        assert_eq!(transaction(false), Ok(true));
+        SYSTEM.with(|s| { let s = s.borrow(); assert_eq!(s.body, "synthetic-transcript");
+            assert_eq!(s.formats, vec![13]); assert_eq!(s.injected, 1); });
+    }
+    #[test]
+    fn failed_fallback_text_publication_is_a_real_system_error_without_retry() {
+        reset(true); SYSTEM.with(|s| { let mut s = s.borrow_mut();
+            s.restore_unavailable = true; s.fail_retention = true; });
+        assert_eq!(transaction(false), Err(RESTORE_FAILED.into()));
+        SYSTEM.with(|s| assert_eq!(s.borrow().injected, 1));
+    }
+    #[test]
+    fn fallback_text_allocation_failure_precedes_the_first_clipboard_write() {
+        reset(true); SYSTEM.with(|s| s.borrow_mut().fail_text_allocation = true);
+        assert_eq!(transaction(false), Err(BACKUP_FAILED.into()));
+        SYSTEM.with(|s| { let s = s.borrow(); assert_eq!(s.injected, 0);
+            assert_eq!(s.body, "synthetic-original"); assert_eq!(s.sequence, 10); });
+    }
+    #[test]
+    fn cancellation_at_settlement_restores_original_instead_of_copy_preference() {
+        reset(true); SYSTEM.with(|s| s.borrow_mut().cancel_on_settle = true);
+        assert_eq!(transaction(true), Err(policy::CANCELLED.into())); original_restored(1);
+    }
+    #[test]
+    fn cancellation_without_recoverable_payload_still_settles_real_text_and_reports_cancelled() {
+        reset(true); SYSTEM.with(|s| { let mut s = s.borrow_mut();
+            s.restore_unavailable = true; s.cancel_on_settle = true; });
+        assert_eq!(transaction(false), Err(policy::CANCELLED.into()));
+        SYSTEM.with(|s| { let s = s.borrow(); assert_eq!(s.body, "synthetic-transcript");
+            assert!(!s.delayed); assert_eq!(s.injected, 1); });
+    }
 }
 '''
 
@@ -307,7 +423,9 @@ def main() -> int:
     bodies["settle"] = function(settlement, "settle")
     definitions = {name: declaration(source, name) for name in ["Context", "WinClipboard"]}
     policy = (ROOT / "desktop/src-tauri/src/protected_paste_policy.rs").as_posix()
-    provider = PREPARE + "\n".join(bodies[name] for name in ["publish", "begin_injection", "observe", "elapsed", "pause"])
+    prepare = function(source, "prepare") if not args.baseline else PREPARE.replace("vec![Saved]", "vec![Saved { format: 13 }]")
+    bodies["prepare"] = prepare
+    provider = prepare + "\n".join(bodies[name] for name in ["publish", "begin_injection", "observe", "elapsed", "pause"])
     provider += '''
     fn restore(&mut self) -> Result<(), &'static str> { WinClipboard::settle(self, false, &|| false) }
     fn retain_text(&mut self) -> Result<(), &'static str> { WinClipboard::settle(self, true, &|| false) }

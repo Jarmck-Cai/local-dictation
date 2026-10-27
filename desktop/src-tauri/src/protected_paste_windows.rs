@@ -1,7 +1,8 @@
 //! Win32 implementation. All mutation is scoped to one calling worker thread.
-//! Unknown formats are refused: no best-effort snapshot that silently loses data.
+//! Backup is best effort; ownership and source-consistency checks remain strict.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -34,7 +35,6 @@ use super::policy::{self, Budget, Observation, Provider, MAX_FORMATS, RESTORE_FA
 const UNICODE_TEXT: u32 = 13;
 const BITMAP_FORMAT: u32 = 2;
 const BACKUP_FAILED: &str = "manual_paste_backup_failed";
-const UNSUPPORTED_FORMAT: &str = "manual_paste_unsupported_format";
 const UNAVAILABLE: &str = "manual_paste_unavailable";
 const BUSY: &str = "manual_paste_clipboard_busy";
 const PUBLISH_FAILED: &str = "manual_paste_publish_failed";
@@ -317,6 +317,7 @@ impl Drop for Window {
 
 fn enumerate() -> Result<Vec<u32>, &'static str> {
     let mut result = Vec::new();
+    let mut seen = HashSet::new();
     result
         .try_reserve_exact(MAX_FORMATS)
         .map_err(|_| BACKUP_FAILED)?;
@@ -332,9 +333,16 @@ fn enumerate() -> Result<Vec<u32>, &'static str> {
                 return Ok(result);
             }
         }
-        if result.len() >= MAX_FORMATS || result.contains(&format) {
-            return Err(policy::LIMIT_EXCEEDED);
+        // The 64-format budget limits copied resources, not format metadata.
+        // Clipboard IDs fit in 16 bits; reject malformed/cyclic enumeration.
+        if format > u16::MAX as u32 {
+            return Err(BACKUP_FAILED);
         }
+        seen.try_reserve(1).map_err(|_| BACKUP_FAILED)?;
+        if !seen.insert(format) {
+            return Err(BACKUP_FAILED);
+        }
+        result.try_reserve(1).map_err(|_| BACKUP_FAILED)?;
         result.push(format);
     }
 }
@@ -374,78 +382,96 @@ fn global_matches_snapshot(
     }
 }
 
+/// Called only for known storage kinds, while the original clipboard is locked.
+fn snapshot_format(format: u32, budget: &mut Budget) -> Result<Saved, &'static str> {
+    // A failed allocation/read must not spend the budget for later formats.
+    let mut next_budget = *budget;
+    let source = unsafe { GetClipboardData(format) }.map_err(|_| BACKUP_FAILED)?;
+    let data = if format == BITMAP_FORMAT {
+        unsafe {
+            let mut bitmap = BITMAP::default();
+            if GetObjectW(
+                HGDIOBJ(source.0),
+                size_of::<BITMAP>() as i32,
+                Some((&mut bitmap as *mut BITMAP).cast()),
+            ) != size_of::<BITMAP>() as i32
+            {
+                return Err(BACKUP_FAILED);
+            }
+            // CopyImage may produce a 32bpp DIB section. Charge the worst
+            // case before allocation, plus a bounded header/palette allowance.
+            let bytes = policy::bitmap_bytes(
+                bitmap.bmWidth,
+                bitmap.bmHeight,
+                bitmap.bmWidthBytes,
+                bitmap.bmPlanes,
+                bitmap.bmBitsPixel,
+            )?;
+            next_budget.add(bytes)?;
+            let copy = CopyImage(source, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION)
+                .map_err(|_| BACKUP_FAILED)?;
+            if copy == source {
+                return Err(BACKUP_FAILED);
+            }
+            SavedData::Bitmap(Bitmap(copy))
+        }
+    } else {
+        unsafe {
+            let source_global = HGLOBAL(source.0);
+            let bytes = GlobalSize(source_global);
+            if bytes == 0 {
+                return Err(BACKUP_FAILED);
+            }
+            next_budget.add(bytes)?;
+            let copy = Global::allocate(bytes)?;
+            {
+                let src = MemoryLock::new(source_global)?;
+                let dest = MemoryLock::new(copy.0)?;
+                std::ptr::copy_nonoverlapping(src.ptr, dest.ptr, bytes);
+            }
+            SavedData::Global(copy, bytes)
+        }
+    };
+    *budget = next_budget;
+    Ok(Saved {
+        format,
+        data: Some(data),
+        source,
+    })
+}
+
 fn snapshot() -> Result<Vec<Saved>, &'static str> {
     let formats = enumerate()?;
-    // Validate every kind before asking providers to render anything.
-    if formats
-        .iter()
-        .any(|&format| format != BITMAP_FORMAT && !safe_global_format(format))
-    {
-        return Err(UNSUPPORTED_FORMAT);
-    }
     let mut result = Vec::new();
     result
-        .try_reserve_exact(formats.len())
+        .try_reserve_exact(formats.len().min(MAX_FORMATS))
         .map_err(|_| BACKUP_FAILED)?;
     let mut budget = Budget::default();
     for &format in &formats {
-        let source = unsafe { GetClipboardData(format) }.map_err(|_| BACKUP_FAILED)?;
-        let data = if format == BITMAP_FORMAT {
-            unsafe {
-                let mut bitmap = BITMAP::default();
-                if GetObjectW(
-                    HGDIOBJ(source.0),
-                    size_of::<BITMAP>() as i32,
-                    Some((&mut bitmap as *mut BITMAP).cast()),
-                ) != size_of::<BITMAP>() as i32
-                {
-                    return Err(BACKUP_FAILED);
-                }
-                // CopyImage may produce a 32bpp DIB section. Charge the worst
-                // case before allocation, plus a bounded header/palette allowance.
-                let bytes = policy::bitmap_bytes(
-                    bitmap.bmWidth,
-                    bitmap.bmHeight,
-                    bitmap.bmWidthBytes,
-                    bitmap.bmPlanes,
-                    bitmap.bmBitsPixel,
-                )?;
-                budget.add(bytes)?;
-                let copy = CopyImage(source, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION)
-                    .map_err(|_| BACKUP_FAILED)?;
-                if copy == source {
-                    return Err(BACKUP_FAILED);
-                }
-                SavedData::Bitmap(Bitmap(copy))
-            }
-        } else {
-            unsafe {
-                let source_global = HGLOBAL(source.0);
-                let bytes = GlobalSize(source_global);
-                if bytes == 0 {
-                    return Err(BACKUP_FAILED);
-                }
-                budget.add(bytes)?;
-                let copy = Global::allocate(bytes)?;
-                {
-                    let src = MemoryLock::new(source_global)?;
-                    let dest = MemoryLock::new(copy.0)?;
-                    std::ptr::copy_nonoverlapping(src.ptr, dest.ptr, bytes);
-                }
-                SavedData::Global(copy, bytes)
-            }
-        };
-        result.push(Saved {
-            format,
-            data: Some(data),
-            source,
-        });
+        // Never reinterpret unknown handles as HGLOBAL memory. Unsupported,
+        // unreadable and over-budget individual formats are deliberately skipped.
+        if format != BITMAP_FORMAT && !safe_global_format(format) {
+            continue;
+        }
+        if let Ok(saved) = snapshot_format(format, &mut budget) {
+            result.push(saved);
+        }
     }
-    for saved in &result {
-        let current = unsafe { GetClipboardData(saved.format) }.map_err(|_| BACKUP_FAILED)?;
+    let mut verified = Vec::new();
+    verified
+        .try_reserve_exact(result.len())
+        .map_err(|_| BACKUP_FAILED)?;
+    for saved in result {
+        let Ok(current) = (unsafe { GetClipboardData(saved.format) }) else {
+            continue;
+        };
         let unchanged = match saved.data.as_ref() {
             Some(SavedData::Global(global, bytes)) => {
-                global_matches_snapshot(global, *bytes, HGLOBAL(current.0))?
+                let Ok(unchanged) = global_matches_snapshot(global, *bytes, HGLOBAL(current.0))
+                else {
+                    continue;
+                };
+                unchanged
             }
             // Bitmap handling is unchanged; no byte-memory assumptions for GDI handles.
             Some(SavedData::Bitmap(_)) => current == saved.source,
@@ -454,13 +480,14 @@ fn snapshot() -> Result<Vec<Saved>, &'static str> {
         if !unchanged {
             return Err(BACKUP_FAILED);
         }
+        verified.push(saved);
     }
     // A delayed provider can add/change formats while it renders under our lock.
     // Check after the final retrieval too, before any clipboard mutation.
     if enumerate()? != formats {
         return Err(BACKUP_FAILED);
     }
-    Ok(result)
+    Ok(verified)
 }
 
 fn text_memory(text: &str) -> Result<Global, &'static str> {
@@ -490,14 +517,15 @@ struct WinClipboard {
     context: Box<Context>,
     held: Option<ClipboardLock>,
     saved: Vec<Saved>,
+    restore_snapshot: bool,
     markers: Vec<(u32, Global)>,
+    marker_formats: [u32; 3],
     mutated: bool,
     began: Instant,
-    copy_result: bool,
     retained_text: Option<Global>,
 }
 impl WinClipboard {
-    fn new(copy_result: bool) -> Result<Self, &'static str> {
+    fn new(_copy_result: bool) -> Result<Self, &'static str> {
         let context = Box::<Context>::default();
         let window = Window::create(&context)?;
         Ok(Self {
@@ -505,10 +533,11 @@ impl WinClipboard {
             context,
             held: None,
             saved: Vec::new(),
+            restore_snapshot: false,
             markers: Vec::new(),
+            marker_formats: [0; 3],
             mutated: false,
             began: Instant::now(),
-            copy_result,
             retained_text: None,
         })
     }
@@ -530,9 +559,9 @@ impl WinClipboard {
 impl Provider for WinClipboard {
     fn prepare(&mut self, text: &str) -> Result<(), &'static str> {
         *self.context.text.borrow_mut() = Some(text_memory(text)?);
-        if self.copy_result {
-            self.retained_text = Some(text_memory(text)?);
-        }
+        // Also needed when no original payload can be saved, or a later restore
+        // fails. Allocate before EmptyClipboard, never after destroying data.
+        self.retained_text = Some(text_memory(text)?);
         // Allocate every restoration and marker resource before the first mutation.
         self.markers
             .try_reserve_exact(3)
@@ -550,9 +579,17 @@ impl Provider for WinClipboard {
             self.markers
                 .push((format, Global::from_bytes(&value.to_le_bytes())?));
         }
+        self.marker_formats = std::array::from_fn(|index| self.markers[index].0);
         self.held = Some(ClipboardLock::open(self.window.hwnd)?);
         self.current_sequence()?;
+        let originally_empty = enumerate()?.is_empty();
         self.saved = snapshot()?;
+        // Locale and privacy markers alone are not recoverable user content.
+        self.restore_snapshot = originally_empty
+            || self
+                .saved
+                .iter()
+                .any(|saved| saved.format != 16 && !self.marker_formats.contains(&saved.format));
         // Intentionally keep this same lock through publication: user copies
         // cannot slip between the complete backup and EmptyClipboard.
         Ok(())
@@ -683,7 +720,7 @@ impl WinClipboard {
             lock.close().map_err(|_| RESTORE_FAILED)?;
             return policy::settlement_result(cancelled);
         }
-        if action == policy::SettlementAction::RetainResult {
+        if action == policy::SettlementAction::RetainResult || !self.restore_snapshot {
             let retained = self.retained_text.take().ok_or(RESTORE_FAILED)?;
             self.empty().map_err(|_| RESTORE_FAILED)?;
             self.context.expected_sequence.set(self.current_sequence()?);
@@ -696,7 +733,7 @@ impl WinClipboard {
                 return policy::settlement_result(cancelled);
             }
             // Publication failed after EmptyClipboard. Keep the same lock and
-            // restore the complete snapshot before reporting the failure.
+            // restore whatever was saved before reporting a real system failure.
             for saved in &mut self.saved {
                 let _ = saved.restore();
             }
@@ -705,19 +742,31 @@ impl WinClipboard {
             return Err(RESTORE_FAILED);
         }
         self.empty().map_err(|_| RESTORE_FAILED)?;
-        let mut failed = false;
+        let mut restored_payload = false;
         for saved in &mut self.saved {
-            if saved.restore().is_err() {
-                failed = true;
+            if saved.restore().is_ok()
+                && saved.format != 16
+                && !self.marker_formats.contains(&saved.format)
+            {
+                restored_payload = true;
             }
         }
+        if !self.saved.is_empty() && !restored_payload {
+            // Partial original content is useful and remains internally
+            // consistent: never mix it with the current transcript. Only when
+            // every payload restore failed do we replace it with current text.
+            // No second paste chord is sent in either case.
+            let retained = self.retained_text.take().ok_or(RESTORE_FAILED)?;
+            self.empty().map_err(|_| RESTORE_FAILED)?;
+            self.context.expected_sequence.set(self.current_sequence()?);
+            retained
+                .transfer(UNICODE_TEXT)
+                .map_err(|_| RESTORE_FAILED)?;
+        }
+        self.context.text.borrow_mut().take();
         self.mutated = false;
         lock.close().map_err(|_| RESTORE_FAILED)?;
-        if failed {
-            Err(RESTORE_FAILED)
-        } else {
-            policy::settlement_result(cancelled)
-        }
+        policy::settlement_result(cancelled)
     }
 }
 impl Drop for WinClipboard {

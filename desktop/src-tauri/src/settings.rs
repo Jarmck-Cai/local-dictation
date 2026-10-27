@@ -1347,7 +1347,7 @@ mod tests {
         );
         assert_eq!(settings.hold_threshold_ms, default_hold_threshold_ms());
         assert!(!settings.audio_feedback);
-        assert!(settings.filler_word_removal_enabled);
+        assert!(!settings.filler_word_removal_enabled);
         // Bindings default to empty; the load path merges the real defaults in.
         assert!(settings.bindings.is_empty());
     }
@@ -1466,7 +1466,7 @@ mod tests {
         assert_eq!(settings.bindings["transcribe"].current_binding, "f13");
         assert_eq!(settings.log_level, LogLevel::Debug);
         assert_eq!(settings.sound_theme, SoundTheme::Pop);
-        assert!(settings.filler_word_removal_enabled);
+        assert!(!settings.filler_word_removal_enabled);
         assert_eq!(settings.vad_backend, VadBackend::Silero);
 
         // The 0.1 integer device index is cleared once for transcribe.cpp 0.2.
@@ -1594,9 +1594,9 @@ mod tests {
 
     #[cfg(not(target_os = "linux"))]
     #[test]
-    fn default_overlay_style_is_live_when_overlay_defaults_on() {
+    fn default_overlay_style_uses_the_compact_recording_indicator() {
         let settings = get_default_settings();
-        assert_eq!(settings.overlay_style, OverlayStyle::Live);
+        assert_eq!(settings.overlay_style, OverlayStyle::Minimal);
     }
 
     #[test]
@@ -1700,15 +1700,12 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_activation_defaults_to_hold_or_toggle_without_legacy_key() {
+    fn shortcut_activation_defaults_to_push_to_talk_without_legacy_key() {
         let mut settings = get_default_settings();
         let raw = serde_json::json!({ "selected_model": "" });
 
         apply_settings_migrations(&mut settings, &raw);
-        assert_eq!(
-            settings.shortcut_activation,
-            ShortcutActivation::HoldOrToggle
-        );
+        assert_eq!(settings.shortcut_activation, ShortcutActivation::PushToTalk);
     }
 
     #[test]
