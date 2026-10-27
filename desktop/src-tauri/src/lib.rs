@@ -17,10 +17,12 @@ mod helpers;
 mod input;
 mod llm_client;
 mod managers;
+mod manual_paste;
 mod memory;
 mod overlay;
 mod paste_tx;
 pub mod portable;
+mod protected_paste;
 mod retention;
 mod secure_input;
 mod settings;
@@ -681,6 +683,7 @@ pub fn run(cli_args: CliArgs) {
             vocabulary::get_vocabulary_correction_snapshot,
             vocabulary::submit_correction_sample,
             clipboard::copy_latest_result,
+            manual_paste::get_manual_paste_binding_conflict,
             overlay::dismiss_overlay_error,
             shortcut::change_binding,
             shortcut::reset_binding,

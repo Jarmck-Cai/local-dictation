@@ -112,6 +112,42 @@ function App() {
       if (copied) toast.success(t("dictation.history.copied"));
       else toast.error(t("dictation.history.copyLatestFailed"));
     });
+    void register<{ outcome: string; error_code?: string }>(
+      "dictation-manual-paste",
+      ({ outcome, error_code }) => {
+        const outcomes = new Set([
+          "read_observed",
+          "input_sent",
+          "busy",
+          "no_result",
+          "cancelled",
+          "keys_held",
+          "unavailable",
+          "history_failed",
+          "unsupported",
+          "failed",
+          "binding_conflict",
+          "keyboard_unavailable",
+          "release_to_retry",
+        ]);
+        const key = outcomes.has(outcome) ? outcome : "failed";
+        const message =
+          key === "failed" &&
+          error_code &&
+          /^manual_paste_[a-z_]{1,48}$/.test(error_code)
+            ? t(`dictation.manualPaste.errors.${error_code}`, {
+                defaultValue: t("dictation.manualPaste.failed"),
+              })
+            : t(`dictation.manualPaste.${key}`);
+        if (
+          key === "read_observed" ||
+          key === "input_sent" ||
+          key === "cancelled"
+        )
+          toast.info(message);
+        else toast.error(message);
+      },
+    );
     void register<ModelStateEvent>("model-state-changed", (event) => {
       if (event.event_type === "loading_failed")
         toast.error(t("dictation.model.actionFailed"));

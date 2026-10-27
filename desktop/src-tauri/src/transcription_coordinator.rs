@@ -2,7 +2,8 @@ use crate::actions::ACTION_MAP;
 use crate::managers::audio::AudioRecordingManager;
 use crate::settings::ShortcutActivation;
 use log::{debug, error, warn};
-use std::sync::mpsc::{self, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -171,8 +172,18 @@ enum Effect {
 /// Commands processed sequentially by the coordinator thread.
 enum Command {
     Input(InputEvent),
-    Cancel { recording_was_active: bool },
+    Cancel {
+        recording_was_active: bool,
+    },
     ProcessingFinished,
+    TryBeginManualPaste {
+        expires: Instant,
+        active: Arc<AtomicBool>,
+        response: Sender<Result<ManualPastePermit, ManualPasteRejection>>,
+    },
+    ManualPasteFinished {
+        id: u64,
+    },
 }
 
 /// Decide whether a key-up should be deferred (so auto-repeat can cancel it)
@@ -225,9 +236,35 @@ struct CoordinatorState {
     pending_press: Option<PendingPress>,
     recording_deadline: Option<Instant>,
     recording_hotkey: Option<String>,
+    manual_paste: Option<(u64, Arc<AtomicBool>)>,
+    next_manual_paste_id: u64,
 }
 
 impl CoordinatorState {
+    fn try_begin_manual_paste(
+        &mut self,
+        now: Instant,
+        expires: Instant,
+        cancelled: Arc<AtomicBool>,
+    ) -> Option<u64> {
+        if now >= expires || self.stage != Stage::Idle {
+            return None;
+        }
+        self.next_manual_paste_id = self.next_manual_paste_id.wrapping_add(1);
+        let id = self.next_manual_paste_id;
+        self.stage = Stage::Processing;
+        self.manual_paste = Some((id, cancelled));
+        Some(id)
+    }
+
+    fn on_manual_paste_finished(&mut self, id: u64) -> Option<Effect> {
+        if self.manual_paste.as_ref().map(|(active, _)| *active) != Some(id) {
+            return None;
+        }
+        self.manual_paste = None;
+        self.on_processing_finished()
+    }
+
     fn on_recording_limit(&mut self, now: Instant) -> Option<Effect> {
         if !self
             .recording_deadline
@@ -259,6 +296,8 @@ impl CoordinatorState {
             pending_press: None,
             recording_deadline: None,
             recording_hotkey: None,
+            manual_paste: None,
+            next_manual_paste_id: 0,
         }
     }
 
@@ -486,6 +525,9 @@ impl CoordinatorState {
     }
 
     fn on_cancel(&mut self, recording_was_active: bool) {
+        if let Some((_, cancelled)) = &self.manual_paste {
+            cancelled.store(true, Ordering::Release);
+        }
         self.pending_release = None;
         // An explicit cancel abandons any remembered start too — the user
         // asked for silence, not a deferred recording.
@@ -502,6 +544,11 @@ impl CoordinatorState {
     }
 
     fn on_processing_finished(&mut self) -> Option<Effect> {
+        // An untagged completion belongs to the automatic transcription pipeline.
+        // Only the matching manual guard may release a manual transaction.
+        if self.manual_paste.is_some() {
+            return None;
+        }
         self.stage = Stage::Idle;
         self.hold = None;
         let pending = self.pending_press.take()?;
@@ -575,6 +622,67 @@ pub struct TranscriptionCoordinator {
     tx: Sender<Command>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ManualPasteRejection {
+    Busy,
+    Unavailable,
+}
+
+/// A bounded request; dropping its receiver also drops any unconsumed permit.
+pub struct ManualPasteRequest {
+    rx: Receiver<Result<ManualPastePermit, ManualPasteRejection>>,
+    active: Arc<AtomicBool>,
+    expires: Instant,
+}
+
+impl ManualPasteRequest {
+    pub fn wait(self) -> Result<ManualPastePermit, ManualPasteRejection> {
+        let remaining = self.expires.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(ManualPasteRejection::Unavailable);
+        }
+        self.rx
+            .recv_timeout(remaining)
+            .unwrap_or(Err(ManualPasteRejection::Unavailable))
+    }
+}
+
+impl Drop for ManualPasteRequest {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
+/// Owns the serial output slot until all clipboard restoration has returned.
+/// It is deliberately not Clone: a stale completion cannot release a new slot.
+pub struct ManualPastePermit {
+    id: u64,
+    cancelled: Arc<AtomicBool>,
+    tx: Sender<Command>,
+    app: AppHandle,
+}
+
+impl ManualPastePermit {
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for ManualPastePermit {
+    fn drop(&mut self) {
+        // Clear the old lifecycle before the finish command may start a queued
+        // recording and register its own Escape shortcut.
+        crate::shortcut::unregister_cancel_shortcut(&self.app);
+        if self
+            .tx
+            .send(Command::ManualPasteFinished { id: self.id })
+            .is_err()
+        {
+            warn!("Manual paste completion channel closed");
+        }
+    }
+}
+
 pub fn is_transcribe_binding(id: &str) -> bool {
     id == "transcribe" || id == "transcribe_with_post_process"
 }
@@ -582,6 +690,7 @@ pub fn is_transcribe_binding(id: &str) -> bool {
 impl TranscriptionCoordinator {
     pub fn new(app: AppHandle) -> Self {
         let (tx, rx) = mpsc::channel();
+        let worker_tx = tx.clone();
 
         thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -647,6 +756,41 @@ impl TranscriptionCoordinator {
                         } => state.on_cancel(recording_was_active),
                         Command::ProcessingFinished => {
                             if let Some(effect) = state.on_processing_finished() {
+                                run_effect(&app, &mut state, effect);
+                            }
+                        }
+                        Command::TryBeginManualPaste {
+                            expires,
+                            active,
+                            response,
+                        } => {
+                            let now = Instant::now();
+                            // A request abandoned by its bounded receiver cannot later
+                            // claim Processing. The state transition also checks expiry.
+                            if !active.load(Ordering::Acquire) || now >= expires {
+                                let _ = response.send(Err(ManualPasteRejection::Unavailable));
+                                continue;
+                            }
+                            let cancelled = Arc::new(AtomicBool::new(false));
+                            let Some(id) =
+                                state.try_begin_manual_paste(now, expires, Arc::clone(&cancelled))
+                            else {
+                                let _ = response.send(Err(ManualPasteRejection::Busy));
+                                continue;
+                            };
+                            crate::shortcut::register_cancel_shortcut(&app);
+                            let permit = ManualPastePermit {
+                                id,
+                                cancelled,
+                                tx: worker_tx.clone(),
+                                app: app.clone(),
+                            };
+                            // If the receiver timed out in the meantime, SendError
+                            // drops the permit and schedules its matching completion.
+                            let _ = response.send(Ok(permit));
+                        }
+                        Command::ManualPasteFinished { id } => {
+                            if let Some(effect) = state.on_manual_paste_finished(id) {
                                 run_effect(&app, &mut state, effect);
                             }
                         }
@@ -720,6 +864,26 @@ impl TranscriptionCoordinator {
         }
     }
 
+    /// Enqueue at the physical key-down, so a busy press cannot become a
+    /// successful request merely because its worker starts after the drain.
+    pub fn request_manual_paste(&self) -> Result<ManualPasteRequest, ManualPasteRejection> {
+        let (response, rx) = mpsc::channel();
+        let active = Arc::new(AtomicBool::new(true));
+        let expires = Instant::now() + Duration::from_millis(500);
+        self.tx
+            .send(Command::TryBeginManualPaste {
+                expires,
+                active: Arc::clone(&active),
+                response,
+            })
+            .map_err(|_| ManualPasteRejection::Unavailable)?;
+        Ok(ManualPasteRequest {
+            rx,
+            active,
+            expires,
+        })
+    }
+
     pub fn notify_cancel(&self, recording_was_active: bool) {
         if self
             .tx
@@ -783,6 +947,117 @@ fn stop(app: &AppHandle, binding_id: &str, hotkey_string: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_paste_claims_idle_until_its_own_finish() {
+        let mut state = CoordinatorState::new();
+        let now = Instant::now();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let id = state
+            .try_begin_manual_paste(now, now + ms(500), cancelled)
+            .expect("idle must grant manual paste");
+        assert_eq!(state.stage, Stage::Processing);
+        assert!(state.on_manual_paste_finished(id).is_none());
+        assert_eq!(state.stage, Stage::Idle);
+    }
+
+    #[test]
+    fn recording_and_processing_reject_manual_paste_without_queuing() {
+        let mut state = CoordinatorState::new();
+        let now = Instant::now();
+        state.begin_recording("transcribe".into(), "f8".into(), now, false);
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        assert!(state
+            .try_begin_manual_paste(now, now + ms(500), Arc::clone(&cancelled))
+            .is_none());
+        state.begin_processing("transcribe".into(), "f8".into());
+        assert!(state
+            .try_begin_manual_paste(now, now + ms(500), cancelled)
+            .is_none());
+        state.on_processing_finished();
+        assert_eq!(state.stage, Stage::Idle);
+        assert!(state.pending_press.is_none());
+    }
+
+    #[test]
+    fn expired_manual_request_cannot_claim_processing_late() {
+        let mut state = CoordinatorState::new();
+        let now = Instant::now();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        assert!(state.try_begin_manual_paste(now, now, cancelled).is_none());
+        assert_eq!(state.stage, Stage::Idle);
+    }
+
+    #[test]
+    fn stale_automatic_finish_does_not_release_manual_paste() {
+        let mut state = CoordinatorState::new();
+        let now = Instant::now();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let id = state
+            .try_begin_manual_paste(now, now + ms(500), cancelled)
+            .unwrap();
+        assert!(state.on_processing_finished().is_none());
+        assert_eq!(state.stage, Stage::Processing);
+        state.on_manual_paste_finished(id);
+        assert_eq!(state.stage, Stage::Idle);
+    }
+
+    #[test]
+    fn stale_manual_finish_cannot_release_the_next_manual_or_recording() {
+        let mut state = CoordinatorState::new();
+        let now = Instant::now();
+        let token = || Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first = state
+            .try_begin_manual_paste(now, now + ms(500), token())
+            .unwrap();
+        state.on_manual_paste_finished(first);
+        let second = state
+            .try_begin_manual_paste(now, now + ms(500), token())
+            .unwrap();
+        state.on_manual_paste_finished(first);
+        assert_eq!(state.stage, Stage::Processing);
+        state.on_manual_paste_finished(second);
+        state.begin_recording("transcribe".into(), "f8".into(), now, false);
+        state.on_manual_paste_finished(second);
+        assert_eq!(state.stage, Stage::Recording("transcribe".into()));
+    }
+
+    #[test]
+    fn manual_cancel_remains_busy_until_clipboard_restoration_finishes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut state = CoordinatorState::new();
+        let now = Instant::now();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let id = state
+            .try_begin_manual_paste(now, now + ms(500), Arc::clone(&cancelled))
+            .unwrap();
+        state.on_cancel(false);
+        assert!(cancelled.load(Ordering::Acquire));
+        assert_eq!(state.stage, Stage::Processing);
+        let token = Arc::new(AtomicBool::new(false));
+        assert!(state
+            .try_begin_manual_paste(now, now + ms(500), token)
+            .is_none());
+        state.on_manual_paste_finished(id);
+        assert_eq!(state.stage, Stage::Idle);
+    }
+
+    #[test]
+    fn recording_waits_for_manual_paste_restoration_before_starting() {
+        let mut state = CoordinatorState::new();
+        let now = Instant::now();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let id = state
+            .try_begin_manual_paste(now, now + ms(500), cancelled)
+            .unwrap();
+        assert!(state.on_input(ptt_input(true), now + ms(100)).is_none());
+        assert_eq!(state.stage, Stage::Processing);
+        assert!(matches!(
+            state.on_manual_paste_finished(id),
+            Some(Effect::Start { .. })
+        ));
+        assert_eq!(state.stage, Stage::Recording("transcribe".into()));
+    }
 
     #[test]
     fn recording_limit_stops_once_and_late_release_cannot_stop_new_session() {

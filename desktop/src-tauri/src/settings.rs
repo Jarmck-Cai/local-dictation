@@ -1,3 +1,6 @@
+#[path = "shortcut/binding_defaults.rs"]
+mod binding_defaults;
+
 use log::{debug, warn};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -940,6 +943,17 @@ pub fn get_default_settings() -> AppSettings {
     );
 
     bindings.insert(
+        "paste_latest_result".to_string(),
+        ShortcutBinding {
+            id: "paste_latest_result".to_string(),
+            name: "Paste latest result".to_string(),
+            description: "Paste the latest completed result after releasing the shortcut, without reprocessing or sending.".to_string(),
+            default_binding: "ctrl+shift+f9".to_string(),
+            current_binding: "ctrl+shift+f9".to_string(),
+        },
+    );
+
+    bindings.insert(
         "toggle_cloud".to_string(),
         ShortcutBinding {
             id: "toggle_cloud".to_string(),
@@ -1077,13 +1091,10 @@ pub fn get_settings(app: &AppHandle) -> AppSettings {
             updated = true;
         }
 
-        // Merge in any bindings added since this store was written.
-        for (key, value) in get_default_settings().bindings {
-            if let std::collections::hash_map::Entry::Vacant(entry) = settings.bindings.entry(key) {
-                debug!("Adding missing binding: {}", entry.key());
-                entry.insert(value);
-                updated = true;
-            }
+        // Preserve stored user choices, adding only bindings introduced later.
+        if binding_defaults::merge_missing(&mut settings.bindings, get_default_settings().bindings)
+        {
+            updated = true;
         }
 
         if updated {

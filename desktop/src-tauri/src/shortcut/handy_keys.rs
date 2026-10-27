@@ -216,10 +216,11 @@ impl HandyKeysState {
         hotkey_to_binding: &mut HashMap<HotkeyId, (String, String)>,
         binding_id: &str,
     ) -> Result<(), String> {
-        if let Some(id) = binding_to_hotkey.remove(binding_id) {
+        if let Some(id) = binding_to_hotkey.get(binding_id).copied() {
             manager
                 .unregister(id)
                 .map_err(|e| format!("Failed to unregister hotkey: {}", e))?;
+            binding_to_hotkey.remove(binding_id);
             hotkey_to_binding.remove(&id);
             debug!("Unregistered handy-keys shortcut: {}", binding_id);
         }
@@ -444,7 +445,9 @@ pub fn init_shortcuts(app: &AppHandle) -> Result<(), String> {
             .cloned()
             .unwrap_or(default_binding);
 
-        if let Err(e) = state.register(&binding) {
+        if let Err(e) = crate::manual_paste::ensure_binding_available(app, &binding)
+            .and_then(|_| state.register(&binding))
+        {
             error!(
                 "Failed to register handy-keys shortcut {} during init: {}",
                 id, e
@@ -459,6 +462,7 @@ pub fn init_shortcuts(app: &AppHandle) -> Result<(), String> {
 
 /// Register a shortcut
 pub fn register_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<(), String> {
+    crate::manual_paste::ensure_binding_available(app, &binding)?;
     let state = app
         .try_state::<HandyKeysState>()
         .ok_or("HandyKeysState not initialized")?;

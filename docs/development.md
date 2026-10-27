@@ -10,6 +10,8 @@
 
 纯文档改动核对链接和内容；程序改动执行相应离线测试、前端检查或 Rust 检查。正式桌面交付需构建并核对产物。已有检查通过后，仅在新改动或未解决问题需要时扩大验证；真人试录、基准或付费 API 调用按已确认范围执行。
 
+手动补贴的离线回归入口为 `python scripts/check-manual-paste.py` 和 `python scripts/check-protected-paste.py`，需要 Rust 编译器。检查使用生产状态与策略代码及合成数据，不操作系统剪贴板、不发出键盘输入、不调用模型。它们覆盖单次手势、忙时拒绝、按键释放、绑定升级及冲突、剪贴板恢复与并发复制；不能据此宣称目标应用已成功落字。原生构建和应用兼容性验证另行记录。
+
 ## 正式交付
 
 用户可见功能或修复形成交付时，统一更新 `desktop/package.json`、`desktop/src-tauri/Cargo.toml`、`Cargo.lock` 中本包版本及 `tauri.conf.json`，并更新 README 和 `docs/releases.md`。检查通过后提交，建立不可变的 `vX.Y.Z` 标签，并推送提交与标签。后续修复使用新版本号。

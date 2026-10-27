@@ -43,6 +43,10 @@ pub fn handle_shortcut_event(
         }
         return;
     }
+    if binding_id == "paste_latest_result" {
+        crate::manual_paste::handle_shortcut(app, is_pressed);
+        return;
+    }
     if binding_id == "copy_latest_result" {
         if is_pressed {
             let copied = crate::clipboard::copy_latest_result(app.clone(), app.state()).is_ok();

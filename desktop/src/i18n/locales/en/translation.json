@@ -187,6 +187,10 @@
           "toggle_cloud": {
             "name": "Pause / resume cloud cleanup",
             "description": "Ctrl+Alt+F8 by default. Skip cloud cleanup while keeping local recognition. Click to change."
+          },
+          "paste_latest_result": {
+            "name": "Paste latest result",
+            "description": "Ctrl+Shift+F9 by default. Focus the input, press and release to paste the latest final text. Preserves the clipboard, without recognition, cleanup or sending."
           }
         },
         "errors": {
@@ -989,6 +993,37 @@
       "label": "Start when signing in to Windows",
       "description": "Runs independently of Codex and starts in the tray at sign-in. Closing settings keeps it running; use the tray menu to quit.",
       "failed": "Could not confirm or change the login setting. Try again; it will not be shown as successfully enabled."
+    },
+    "manualPaste": {
+      "read_observed": "Paste was requested. Please check the input field.",
+      "input_sent": "Paste was requested, but insertion is unconfirmed. Check before repeating.",
+      "busy": "Recording, processing or input is still active. Try again after it finishes.",
+      "no_result": "There is no completed result to paste.",
+      "cancelled": "Paste cancelled. Input already sent cannot be recalled.",
+      "keys_held": "Keys are still held. No paste was made; release them and try again.",
+      "unavailable": "Manual paste is unavailable. Results remain in history.",
+      "history_failed": "Could not read the latest result. No paste was made.",
+      "unsupported": "Protected manual paste is unavailable on this platform.",
+      "keyboard_unavailable": "Could not confirm key release. No paste was made; return to the normal desktop and try again.",
+      "release_to_retry": "Release all keys, then press the manual-paste shortcut again.",
+      "failed": "Paste could not finish. Check the input field; the result remains in history.",
+      "binding_conflict": "This combination conflicts with an existing shortcut, which was preserved. Change the manual-paste shortcut before using it.",
+      "bindingCheckFailed": "Could not confirm the manual-paste shortcut status. Reopen settings to check.",
+      "errors": {
+        "manual_paste_cancelled": "Paste cancelled. Input already sent cannot be recalled.",
+        "manual_paste_injection_failed": "Input could not finish. Check the field; it will not be retried automatically.",
+        "manual_paste_restore_failed": "The original clipboard could not be fully restored. Check it; the result remains in history.",
+        "manual_paste_backup_too_large": "The clipboard exceeds the safe backup size. No paste was made.",
+        "manual_paste_backup_failed": "Could not safely save the clipboard. No paste was made.",
+        "manual_paste_unsupported_format": "The clipboard has a format that cannot be restored safely. No paste was made.",
+        "manual_paste_clipboard_busy": "The clipboard is busy. No paste was made; try again shortly.",
+        "manual_paste_clipboard_changed": "Newly copied content was preserved. Please check the input field.",
+        "manual_paste_publish_failed": "Could not prepare paste data. Check the input; no automatic retry.",
+        "manual_paste_render_failed": "Could not provide complete paste data. Check the input; no automatic retry.",
+        "manual_paste_unavailable": "Protected paste is unavailable. The result remains in history.",
+        "manual_paste_invalid_text": "No valid text is available to paste.",
+        "manual_paste_unsupported_method": "The configured input method does not support manual paste. The result remains available in history."
+      }
     }
   }
 }

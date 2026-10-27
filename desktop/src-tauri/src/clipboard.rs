@@ -903,6 +903,42 @@ pub fn copy_latest_result(
     write_text_to_clipboard(&app, &text)
 }
 
+/// Explicit manual recovery only. Wait for restoration before releasing the
+/// coordinator lease; automatic clipboard-copy preferences never apply here.
+pub(crate) fn paste_latest_preserving_clipboard(
+    text: String,
+    app: AppHandle,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<bool, String> {
+    let settings = get_settings(&app);
+    let text = normalize_output(&text);
+    if text.is_empty() {
+        return Err("manual_paste_invalid_text".into());
+    }
+    let text = if settings.append_trailing_space {
+        format!("{text} ")
+    } else {
+        text
+    };
+    // A user explicitly requested recovery even if automatic pasting is off.
+    let method = match settings.paste_method {
+        PasteMethod::None => PasteMethod::CtrlV,
+        PasteMethod::CtrlV | PasteMethod::CtrlShiftV | PasteMethod::ShiftInsert => {
+            settings.paste_method
+        }
+        _ => return Err("manual_paste_unsupported_method".into()),
+    };
+    crate::protected_paste::run(
+        &text,
+        || {
+            with_enigo(&app, |enigo| {
+                crate::manual_paste::send_paste_chord(enigo, method, &is_cancelled)
+            })
+        },
+        &is_cancelled,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

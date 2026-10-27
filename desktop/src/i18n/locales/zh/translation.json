@@ -207,6 +207,10 @@
           "toggle_cloud": {
             "name": "暂停／恢复云端整理",
             "description": "默认 Ctrl+Alt+F8。跳过云端整理，继续使用本地识别。点击可修改。"
+          },
+          "paste_latest_result": {
+            "name": "补贴最近结果",
+            "description": "默认 Ctrl+Shift+F9。点回输入框，按下并松开后补贴最近终稿；保留原剪贴板，不重新识别或整理，不自动发送。"
           }
         },
         "errors": {
@@ -989,6 +993,37 @@
       "label": "登录 Windows 后自动启动",
       "description": "独立于 Codex，在当前用户登录后启动到托盘。关闭设置窗口仍在后台运行，从托盘退出才结束。",
       "failed": "无法确认或更改登录启动设置，请重试；不会显示为已成功开启。"
+    },
+    "manualPaste": {
+      "read_observed": "补贴操作已发起，请检查输入框。",
+      "input_sent": "已发起补贴，未能确认输入框是否收到；请检查，避免重复输入。",
+      "busy": "当前仍在录音、处理或输入，请结束后再补贴。",
+      "no_result": "还没有可补贴的已完成结果。",
+      "cancelled": "已取消补贴；已发送的输入无法撤回。",
+      "keys_held": "按键尚未完全松开，本次未补贴。请松开后重试。",
+      "unavailable": "补贴暂时不可用，结果仍保留在历史中。",
+      "history_failed": "无法读取最近结果，本次未补贴。",
+      "unsupported": "当前平台不支持保护式补贴。",
+      "keyboard_unavailable": "无法确认按键已释放，本次未补贴。请回到普通桌面后重试。",
+      "release_to_retry": "请先松开所有按键，再重新按一次补贴快捷键。",
+      "failed": "补贴未能完成，结果仍保留；请检查输入框。",
+      "binding_conflict": "补贴组合键与已有快捷键冲突，已优先保留旧快捷键。请修改补贴快捷键后使用。",
+      "bindingCheckFailed": "暂时无法确认补贴快捷键状态，请重新打开设置查看。",
+      "errors": {
+        "manual_paste_cancelled": "已取消补贴；已发送的输入无法撤回。",
+        "manual_paste_injection_failed": "输入动作未能完成，请检查输入框；不会自动重试。",
+        "manual_paste_restore_failed": "未能完整恢复原剪贴板，请检查剪贴板；补贴结果仍在历史中。",
+        "manual_paste_backup_too_large": "原剪贴板内容超出安全备份大小，本次未补贴。",
+        "manual_paste_backup_failed": "无法安全保存原剪贴板，本次未补贴。",
+        "manual_paste_unsupported_format": "原剪贴板包含无法安全恢复的格式，本次未补贴。",
+        "manual_paste_clipboard_busy": "剪贴板正被占用，本次未补贴，请稍后再试。",
+        "manual_paste_clipboard_changed": "检测到新的复制内容，已保留新内容；请检查输入框。",
+        "manual_paste_publish_failed": "无法准备补贴内容，请检查输入框；不会自动重试。",
+        "manual_paste_render_failed": "补贴数据未能完整提供，请检查输入框；不会自动重试。",
+        "manual_paste_unavailable": "保护式补贴暂时不可用，结果仍在历史中。",
+        "manual_paste_invalid_text": "没有可补贴的有效正文。",
+        "manual_paste_unsupported_method": "当前配置的输入方式不支持补贴，正文仍可在历史中取用。"
+      }
     }
   }
 }

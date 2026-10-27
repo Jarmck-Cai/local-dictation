@@ -9,6 +9,7 @@ import { SenseVoiceModel } from "../SenseVoiceModel";
 import { HistorySettings } from "../history/HistorySettings";
 import { LatestDictationTiming } from "../DictationTiming";
 import { AutostartToggle } from "../AutostartToggle";
+import { ManualPasteShortcut } from "../ManualPasteShortcut";
 
 export const GeneralSettings = () => {
   const { t } = useTranslation();
@@ -27,6 +28,7 @@ export const GeneralSettings = () => {
         />
         <ShortcutInput shortcutId="cancel" grouped />
         <ShortcutInput shortcutId="copy_latest_result" grouped />
+        <ManualPasteShortcut />
         <ShortcutInput shortcutId="toggle_cloud" grouped />
         <MicrophoneSelector grouped />
         <MuteWhileRecording grouped />

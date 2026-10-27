@@ -10,6 +10,13 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use crate::settings::{self, ShortcutBinding};
 
 use super::handler::handle_shortcut_event;
+use super::registration_lifecycle::RegisteredBindings;
+use std::sync::{LazyLock, Mutex};
+
+// Only successful registrations are recorded. Settings may already have
+// changed when an old accelerator must be withdrawn.
+static REGISTERED_SHORTCUTS: LazyLock<Mutex<RegisteredBindings<Shortcut>>> =
+    LazyLock::new(|| Mutex::new(RegisteredBindings::default()));
 
 /// Initialize shortcuts using Tauri's global-shortcut plugin
 pub fn init_shortcuts(app: &AppHandle) {
@@ -75,6 +82,7 @@ pub fn validate_shortcut(raw: &str) -> Result<(), String> {
 
 /// Register a shortcut using Tauri's global-shortcut plugin
 pub fn register_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<(), String> {
+    crate::manual_paste::ensure_binding_available(app, &binding)?;
     // Validate for Tauri requirements
     if let Err(e) = validate_shortcut(&binding.current_binding) {
         warn!(
@@ -97,6 +105,9 @@ pub fn register_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<()
         }
     };
 
+    let mut registrations = REGISTERED_SHORTCUTS
+        .lock()
+        .map_err(|_| "Shortcut registration lock unavailable")?;
     // Prevent duplicate registrations that would silently shadow one another
     if app.global_shortcut().is_registered(shortcut) {
         let error_msg = format!("Shortcut '{}' is already in use", binding.current_binding);
@@ -136,33 +147,20 @@ pub fn register_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<()
             error_msg
         })?;
 
+    registrations.record(binding.id, shortcut);
     Ok(())
 }
 
 /// Unregister a shortcut from Tauri's global-shortcut plugin
 pub fn unregister_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<(), String> {
-    let shortcut = match binding.current_binding.parse::<Shortcut>() {
-        Ok(s) => s,
-        Err(e) => {
-            let error_msg = format!(
-                "Failed to parse shortcut '{}' for unregistration: {}",
-                binding.current_binding, e
-            );
-            error!("unregister_tauri_shortcut parse error: {}", error_msg);
-            return Err(error_msg);
-        }
-    };
-
-    app.global_shortcut().unregister(shortcut).map_err(|e| {
-        let error_msg = format!(
-            "Failed to unregister shortcut '{}': {}",
-            binding.current_binding, e
-        );
-        error!("unregister_tauri_shortcut error: {}", error_msg);
-        error_msg
-    })?;
-
-    Ok(())
+    REGISTERED_SHORTCUTS
+        .lock()
+        .map_err(|_| "Shortcut registration lock unavailable")?
+        .unregister(&binding.id, |actual| {
+            app.global_shortcut()
+                .unregister(*actual)
+                .map_err(|_| "Failed to unregister recorded shortcut".into())
+        })
 }
 
 #[cfg(test)]
