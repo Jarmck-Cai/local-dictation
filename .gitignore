@@ -24,6 +24,16 @@ target/
 dist/
 .DS_Store
 Thumbs.db
+# Native iOS builds, downloaded models and developer signing/service settings
+/ios/.build/
+/ios/**/.build/
+/ios/DerivedData/
+/ios/*.xcodeproj/
+/ios/Config/Developer.xcconfig
+/ios/Config/Service.plist
+/ios/Models/
+*.xcuserstate
+xcuserdata/
 /desktop/src-tauri/resources/models/*.onnx
 /desktop/src-tauri/resources/models/sense-voice-int8/
 /desktop/src-tauri/transcribe-libs/

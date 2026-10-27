@@ -1,0 +1,15 @@
+name: iOS prototype
+on:
+  push:
+    branches: [codex/ios-prototype]
+    paths: ['ios/**', '.github/workflows/ios-prototype.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  policies:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test offline and delivery policies
+        run: swift test --package-path ios/LocalDictationCore
