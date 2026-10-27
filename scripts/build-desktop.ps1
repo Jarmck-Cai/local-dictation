@@ -7,6 +7,20 @@ $ortPath = Join-Path $projectRoot '.cache\native\onnxruntime-win-x64-1.24.2\lib'
 $cmakePath = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
 if (-not (Test-Path -LiteralPath $bunPath)) { throw 'Run scripts/prepare-desktop.ps1 first (Bun missing).' }
 if (-not (Test-Path -LiteralPath (Join-Path $ortPath 'onnxruntime.dll'))) { throw 'Run scripts/prepare-desktop.ps1 first (ONNX Runtime missing).' }
+if (-not $CheckOnly) {
+    # A native build can compile without these runtime files. Fail here rather
+    # than emit an installer that cannot prepare the offline recognizer.
+    $modelChecks = @(
+        @('silero_vad_v4.onnx', 'a35ebf52fd3ce5f1469b2a36158dba761bc47b973ea3382b3186ca15b1f5af28'),
+        @('sense-voice-int8\model.int8.onnx', 'c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51'),
+        @('sense-voice-int8\tokens.txt', 'f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc')
+    )
+    foreach ($modelCheck in $modelChecks) {
+        $modelPath = Join-Path $desktopRoot ('src-tauri\resources\models\' + $modelCheck[0])
+        if (-not (Test-Path -LiteralPath $modelPath -PathType Leaf)) { throw 'Run scripts/prepare-desktop.ps1 first (bundled model resource missing).' }
+        if ((Get-FileHash -LiteralPath $modelPath -Algorithm SHA256).Hash -ne $modelCheck[1]) { throw 'Bundled model checksum mismatch; run scripts/prepare-desktop.ps1 to restore resources.' }
+    }
+}
 $env:Path = (Split-Path -Parent $bunPath) + ';' + $cmakePath + ';' + $env:Path
 $env:ORT_LIB_LOCATION = $ortPath
 $env:ORT_PREFER_DYNAMIC_LINK = '1'
