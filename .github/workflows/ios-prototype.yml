@@ -13,3 +13,34 @@ jobs:
       - uses: actions/checkout@v4
       - name: Test offline and delivery policies
         run: swift test --package-path ios/LocalDictationCore
+  native-build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install project generator
+        run: brew install xcodegen
+      - name: Generate native project
+        run: bash ios/scripts/prepare.sh
+      - name: Build app and extensions for simulator
+        run: >-
+          xcodebuild -project ios/LocalDictation.xcodeproj -scheme LocalDictation
+          -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/DerivedData/simulator
+          CODE_SIGNING_ALLOWED=NO build
+      - name: Build unsigned iPhone app and extensions
+        run: >-
+          xcodebuild -project ios/LocalDictation.xcodeproj -scheme LocalDictation
+          -destination 'generic/platform=iOS' -derivedDataPath ios/DerivedData/device
+          CODE_SIGNING_ALLOWED=NO build
+      - name: Build Personal Team offline variant
+        run: >-
+          xcodebuild -project ios/LocalDictation.xcodeproj -scheme LocalDictationOffline
+          -destination 'generic/platform=iOS' -derivedDataPath ios/DerivedData/offline
+          CODE_SIGNING_ALLOWED=NO build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-builds
+          path: |
+            ios/DerivedData/device/Build/Products/Debug-iphoneos/*.app
+            ios/DerivedData/offline/Build/Products/Debug-iphoneos/*.app
+          retention-days: 7

@@ -31,6 +31,8 @@ Thumbs.db
 /ios/*.xcodeproj/
 /ios/Config/Developer.xcconfig
 /ios/Config/Service.plist
+/ios/Config/*-Info.plist
+/ios/Config/*.entitlements
 /ios/Models/
 *.xcuserstate
 xcuserdata/

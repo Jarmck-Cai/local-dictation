@@ -1,0 +1,5 @@
+// Copy to Developer.xcconfig. The script does this automatically.
+// Full keyboard/App Group installation requires a team with App Groups capability.
+DEVELOPMENT_TEAM =
+APP_GROUP_ID = group.com.localdictation.prototype.shared
+// If your team needs unique identifiers, change product bundle IDs in project.yml too.
