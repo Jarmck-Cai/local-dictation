@@ -7,6 +7,7 @@ import LocalDictationCore
     static let shared = SessionCoordinator()
     @Published var state = SharedState()
     @Published var message = "准备离线模型后即可开始"
+    @Published private(set) var isStarting = false
     let models = ModelManager()
     private let recorder = AudioRecorder()
     private let recognizer = OfflineRecognizer()
@@ -15,6 +16,7 @@ import LocalDictationCore
     private var timer: Timer?
     private var activity: Activity<RecordingAttributes>?
     private var backgroundID: UIBackgroundTaskIdentifier = .invalid
+    private var startGeneration = UUID()
     private var store: SharedStateStore?
     var isRecording: Bool { recorder.isRecording }
     var serviceConfigured: Bool { enhancer.configured }
@@ -39,6 +41,8 @@ import LocalDictationCore
             pruneRecordings()
         } catch { message = error.localizedDescription }
         recorder.onInterrupted = { [weak self] in self?.stop() }
+        let orphanActivities = Activity<RecordingAttributes>.activities
+        Task { for old in orphanActivities { await old.end(nil, dismissalPolicy: .immediate) } }
         timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
@@ -55,8 +59,12 @@ import LocalDictationCore
     func start() async throws {
         guard let store else { throw failure("共享存储未准备好") }
         guard models.ready else { throw failure("请先下载并校验离线模型") }
-        guard !isRecording, processing == nil else { throw failure("请等待当前任务结束") }
+        guard !isStarting, !isRecording, processing == nil else { throw failure("请等待当前任务结束") }
+        isStarting = true
+        let generation = UUID(); startGeneration = generation
+        defer { if startGeneration == generation { isStarting = false } }
         let granted = await AVAudioApplication.requestRecordPermission()
+        guard startGeneration == generation else { throw CancellationError() }
         guard granted else { throw failure("请在系统设置中允许麦克风") }
         let job: DictationJob = try store.update { s in
             let context = s.context.flatMap { Date().timeIntervalSince($0.updatedAt) < 60 ? $0.fingerprint : nil }
@@ -64,10 +72,8 @@ import LocalDictationCore
             s.job = job; return job
         }
         do {
-            if !appOnly {
-                guard ActivityAuthorizationInfo().areActivitiesEnabled else { throw failure("请允许实时活动，以便随时停止录音") }
-                activity = try Activity.request(attributes: RecordingAttributes(jobID: job.id.uuidString), content: ActivityContent(state: .init(startedAt: Date()), staleDate: Date().addingTimeInterval(125)), pushType: nil)
-            }
+            guard ActivityAuthorizationInfo().areActivitiesEnabled else { throw failure("请允许实时活动，以便随时停止录音") }
+            activity = try Activity.request(attributes: RecordingAttributes(jobID: job.id.uuidString), content: ActivityContent(state: .init(startedAt: Date()), staleDate: Date().addingTimeInterval(125)), pushType: nil)
             try recorder.start(at: recordings.appendingPathComponent(job.audioName))
             message = "正在录音，按动作按钮或停止按钮结束（最长 120 秒）"
         } catch {
@@ -85,6 +91,7 @@ import LocalDictationCore
         beginProcessing(id: id, file: file)
     }
     func cancel() {
+        startGeneration = UUID(); isStarting = false
         if let id = state.job?.id { try? store?.update { $0.cancel(id: id) } }
         _ = recorder.stop(); processing?.cancel(); enhancer.cancel()
         Task { await endActivity() }
@@ -104,6 +111,14 @@ import LocalDictationCore
         try? store?.update { $0.job = nil; $0.context = nil }
         for url in (try? FileManager.default.contentsOfDirectory(at: recordings, includingPropertiesForKeys: nil)) ?? [] { try? FileManager.default.removeItem(at: url) }
         reload(); message = "本机录音和文字已清除"
+    }
+    func claimForAppValidation() -> String? {
+        guard appOnly, let id = state.job?.id else { return nil }
+        do {
+            let text = try store?.update { $0.claim(id: id, context: nil, manual: true) }
+            if text != nil { try store?.update { if $0.job?.id == id { $0.job?.phase = .delivered } } }
+            reload(); return text
+        } catch { message = error.localizedDescription; return nil }
     }
     private func beginProcessing(id: UUID, file: URL) {
         do {
@@ -156,8 +171,6 @@ import LocalDictationCore
     private func endActivity() async {
         let current = activity; activity = nil
         await current?.end(nil, dismissalPolicy: .immediate)
-        // Clear orphan recording activities after process restart too.
-        for other in Activity<RecordingAttributes>.activities { await other.end(nil, dismissalPolicy: .immediate) }
     }
     private func endBackground() {
         if backgroundID != .invalid { UIApplication.shared.endBackgroundTask(backgroundID); backgroundID = .invalid }

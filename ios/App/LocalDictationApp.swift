@@ -21,7 +21,7 @@ struct DictationView: View {
                             if session.isRecording { session.stop() }
                             else { Task { do { try await session.start() } catch { self.error = error.localizedDescription } } }
                         }
-                        .disabled(!session.models.ready || session.state.job?.phase == .processing)
+                        .disabled(!session.models.ready || session.isStarting || session.state.job?.phase == .processing)
                         Spacer()
                         Button("取消", role: .cancel) { session.cancel() }
                     }
@@ -49,20 +49,24 @@ struct DictationView: View {
                 }
                 Section("安装后验证") {
                     if session.appOnly {
-                        Text("这是普通 Apple ID 可签名的应用内版本。先验证中英混说和按钮录音；跨应用落字需安装完整版本及 App Groups 签名。")
+                        Text("这是普通 Apple ID 可签名的应用内版本。识别完成后会自动追加到本页验证框；跨应用落字需安装完整版本及 App Groups 签名。")
+                        Text("动作按钮或辅助触控可设置为快捷指令“开始或停止轻听写”。冷启动录音会打开本应用，再按一次停止。此版本结果只写入本页。")
                     } else {
                         Text("1. 设置 → 通用 → 键盘 → 添加“轻听写”，并允许完全访问（用于本机共享文字）。")
                         Text("2. 动作按钮设置为快捷指令“开始或停止轻听写”；辅助触控也可配置运行这个快捷指令。")
                         Text("3. 在目标输入框切换到轻听写键盘，再按动作按钮开始。再次按下停止，手动返回原输入框，文字会插入一次。")
                         Text("输入框发生变化或无法确认位置时，改为点击“插入本次文字”。安全密码框、部分电话键盘或禁止第三方键盘的应用不支持。")
                     }
-                    TextField("可在这里试用键盘落字", text: $scratch, axis: .vertical)
+                    TextField(session.appOnly ? "应用内自动落字验证框" : "可在这里试用键盘落字", text: $scratch, axis: .vertical)
                     Text("模型约 242 MB，首次下载需要网络，之后识别可开飞行模式。录音最多 120 秒，超过一天的录音在打开应用时清理；可随时清除全部本机内容。")
                         .font(.footnote).foregroundStyle(.secondary)
                     Button("清除本机录音和本次文字", role: .destructive) { session.clear() }
                 }
             }
             .navigationTitle("轻听写")
+            .onChange(of: session.state.job?.phase) { _, phase in
+                if phase == .ready, session.appOnly, let text = session.claimForAppValidation() { scratch += text }
+            }
             .alert("允许自动联网增强？", isPresented: $consentDialog) {
                 Button("允许，以后自动判断") { session.setConsent(true) }
                 Button("保持离线", role: .cancel) {}

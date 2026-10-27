@@ -37,6 +37,10 @@ jobs:
           xcodebuild -project ios/LocalDictation.xcodeproj -scheme LocalDictationOffline
           -destination 'generic/platform=iOS' -derivedDataPath ios/DerivedData/offline
           CODE_SIGNING_ALLOWED=NO build
+      - name: Verify embedded service configuration
+        run: |
+          test -f ios/DerivedData/device/Build/Products/Debug-iphoneos/LocalDictation.app/Service.plist
+          test -f ios/DerivedData/offline/Build/Products/Debug-iphoneos/LocalDictationOffline.app/Service.plist
       - uses: actions/upload-artifact@v4
         with:
           name: ios-unsigned-builds

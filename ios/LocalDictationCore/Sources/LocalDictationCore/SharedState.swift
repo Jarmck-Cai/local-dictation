@@ -36,7 +36,10 @@ public struct SharedState: Codable, Sendable {
     public mutating func setConsent(_ allowed: Bool) {
         cloudAllowed = allowed; consentRevision += 1
         // A revoked enhanced result which has not been delivered reverts to raw.
-        if !allowed, job?.phase == .ready { job?.text = job?.raw ?? "" }
+        if !allowed, job?.phase == .ready {
+            let raw = job?.raw ?? ""
+            job?.text = raw
+        }
     }
     public mutating func cancel(id: UUID) {
         guard job?.id == id else { return }

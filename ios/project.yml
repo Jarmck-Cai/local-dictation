@@ -27,16 +27,17 @@ targets:
     type: application
     platform: iOS
     sources:
-      - path: App
-        excludes: [Intents.swift]
+      - App
       - Shared
-    resources: [Config/Service.plist]
+      - path: Config/Service.plist
+        buildPhase: resources
     info:
       path: Config/Offline-Info.plist
       properties:
         CFBundleDisplayName: 轻听写离线验证
         NSMicrophoneUsageDescription: 按下按钮时录制语音，在手机离线转为文字。
         UIBackgroundModes: [audio]
+        NSSupportsLiveActivities: true
         UILaunchScreen: {}
         LDAppOnly: true
     settings:
@@ -47,14 +48,15 @@ targets:
       - package: LocalDictationCore
       - package: SherpaOnnx
         product: sherpa-onnx
+      - target: DictationActivityOffline
   LocalDictation:
     type: application
     platform: iOS
     sources:
       - App
       - Shared
-    resources:
-      - Config/Service.plist
+      - path: Config/Service.plist
+        buildPhase: resources
     info:
       path: Config/App-Info.plist
       properties:
@@ -100,6 +102,22 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.localdictation.prototype.keyboard
+    dependencies:
+      - package: LocalDictationCore
+  DictationActivityOffline:
+    type: app-extension
+    platform: iOS
+    sources: [Activity, Shared/RecordingAttributes.swift, Shared/StopDictationIntent.swift, Shared/SharedEnvironment.swift]
+    info:
+      path: Config/ActivityOffline-Info.plist
+      properties:
+        CFBundleDisplayName: 轻听写录音
+        LDAppOnly: true
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.localdictation.prototype.offline.activity
     dependencies:
       - package: LocalDictationCore
   DictationActivity:

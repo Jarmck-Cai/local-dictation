@@ -48,9 +48,10 @@ final class KeyboardViewController: UIInputViewController {
     }
     private var fingerprint: String? {
         // documentIdentifier + cursor surroundings: fail closed if iOS hides context.
-        guard let before = textDocumentProxy.documentContextBeforeInput,
-              let after = textDocumentProxy.documentContextAfterInput else { return nil }
-        let value = textDocumentProxy.documentIdentifier.uuidString + "\u{0}" + before + "\u{0}" + after
+        let before = textDocumentProxy.documentContextBeforeInput
+        let after = textDocumentProxy.documentContextAfterInput
+        guard before != nil || after != nil || !textDocumentProxy.hasText else { return nil }
+        let value = textDocumentProxy.documentIdentifier.uuidString + "\u{0}" + (before ?? "") + "\u{0}" + (after ?? "")
         return SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
     }
     private func publishContext() {
