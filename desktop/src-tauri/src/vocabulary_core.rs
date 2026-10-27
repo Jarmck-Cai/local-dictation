@@ -11,9 +11,76 @@ pub struct Proposal {
 
 #[derive(Clone, Debug)]
 pub struct Rule {
+    pub id: i64,
     pub term: String,
     pub aliases: Vec<String>,
     pub context: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CorrectionHit {
+    pub rule_index: usize,
+    pub term_id: i64,
+    pub term: String,
+    pub from: String,
+    pub count: u32,
+}
+
+pub struct AppliedRules {
+    pub text: String,
+    pub hits: Vec<CorrectionHit>,
+}
+
+/// Only bounded term/alias fragments are retained, never the transcript body.
+#[derive(Default)]
+pub struct RecentCorrections {
+    pub hits: Vec<CorrectionHit>,
+    pub recorded_at_ms: Option<u64>,
+}
+
+impl RecentCorrections {
+    pub fn record(&mut self, mut hits: Vec<CorrectionHit>) {
+        hits.truncate(64);
+        self.hits = hits;
+        self.recorded_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64);
+    }
+}
+
+/// Validate explicitly edited rules with the same conservative alias policy.
+pub fn validate_rule(rule: &Rule) -> Result<(), &'static str> {
+    let allowed = |c: char| c.is_alphanumeric() || c == ' ' || "_./+-#".contains(c);
+    if rule.term.is_empty() || rule.term.chars().count() > 64 || !rule.term.chars().all(allowed) {
+        return Err("vocabulary_term_invalid");
+    }
+    if rule.context.as_ref().is_some_and(|context| {
+        !(2..=24).contains(&context.chars().count())
+            || !context
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == ' ' || "_+-".contains(c))
+    }) {
+        return Err("vocabulary_context_invalid");
+    }
+    if rule.aliases.len() > 20 {
+        return Err("vocabulary_alias_limit");
+    }
+    for (index, alias) in rule.aliases.iter().enumerate() {
+        if !alias.chars().all(allowed)
+            || !safe_alias(alias, &rule.term, rule.context.as_deref())
+            || alias.eq_ignore_ascii_case(&rule.term)
+        {
+            return Err("vocabulary_alias_invalid");
+        }
+        if rule.aliases[..index]
+            .iter()
+            .any(|other| other.eq_ignore_ascii_case(alias))
+        {
+            return Err("vocabulary_alias_duplicate");
+        }
+    }
+    Ok(())
 }
 
 pub const MAX_SAMPLE_CHARS: usize = 8_000;
@@ -514,9 +581,14 @@ fn contextual_match_at(text: &str, alias: &str, context: Option<&str>, index: us
     matches_at(text, alias, index) && context_matches_at(text, context, index, index + alias.len())
 }
 
+#[cfg(test)]
 pub fn apply_rules(text: &str, rules: &[Rule]) -> String {
-    let mut replacements: Vec<(usize, usize, &str)> = Vec::new();
-    for rule in rules {
+    apply_rules_with_hits(text, rules).text
+}
+
+pub fn apply_rules_with_hits(text: &str, rules: &[Rule]) -> AppliedRules {
+    let mut replacements: Vec<(usize, usize, &str, usize)> = Vec::new();
+    for (rule_index, rule) in rules.iter().enumerate() {
         for alias in rule
             .aliases
             .iter()
@@ -526,15 +598,16 @@ pub fn apply_rules(text: &str, rules: &[Rule]) -> String {
         {
             for (index, _) in text.char_indices() {
                 if contextual_match_at(text, alias, rule.context.as_deref(), index) {
-                    replacements.push((index, index + alias.len(), &rule.term));
+                    replacements.push((index, index + alias.len(), &rule.term, rule_index));
                 }
             }
         }
     }
     replacements.sort_by(|a, b| a.0.cmp(&b.0).then((b.1 - b.0).cmp(&(a.1 - a.0))));
     let mut result = String::with_capacity(text.len());
+    let mut hits: Vec<CorrectionHit> = Vec::new();
     let mut consumed = 0;
-    for &(start, end, term) in &replacements {
+    for &(start, end, term, rule_index) in &replacements {
         if start < consumed
             || replacements
                 .iter()
@@ -544,10 +617,27 @@ pub fn apply_rules(text: &str, rules: &[Rule]) -> String {
         }
         result.push_str(&text[consumed..start]);
         result.push_str(term);
+        let from = &text[start..end];
+        if from != term {
+            if let Some(hit) = hits
+                .iter_mut()
+                .find(|hit| hit.rule_index == rule_index && hit.from == from)
+            {
+                hit.count = hit.count.saturating_add(1);
+            } else {
+                hits.push(CorrectionHit {
+                    rule_index,
+                    term_id: rules[rule_index].id,
+                    term: term.to_owned(),
+                    from: from.to_owned(),
+                    count: 1,
+                });
+            }
+        }
         consumed = end;
     }
     result.push_str(&text[consumed..]);
-    result
+    AppliedRules { text: result, hits }
 }
 
 pub fn relevant_terms(text: &str, rules: &[Rule]) -> Vec<String> {
@@ -580,6 +670,7 @@ mod tests {
 
     fn rule(term: &str, alias: &str, context: Option<&str>) -> Rule {
         Rule {
+            id: 0,
             term: term.into(),
             aliases: vec![alias.into()],
             context: context.map(str::to_owned),
@@ -856,5 +947,71 @@ mod tests {
             vec!["Claude", "Codex"]
         );
         assert!(relevant_terms("克劳德今天到了", &rules).is_empty());
+    }
+
+    #[test]
+    fn hits_include_only_confirmed_replacements_that_changed_the_original() {
+        let rules = [
+            rule("Claude", "克劳德", Some("终端")),
+            rule("Codex", "code x", None),
+        ];
+        let result = apply_rules_with_hits("终端打开克劳德和克劳德，然后使用Codex", &rules);
+        assert_eq!(result.text, "终端打开Claude和Claude，然后使用Codex");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].rule_index, 0);
+        assert_eq!(result.hits[0].term_id, 0);
+        assert_eq!(result.hits[0].from, "克劳德");
+        assert_eq!(result.hits[0].count, 2);
+        assert!(apply_rules_with_hits("在终端打开Claude", &rules)
+            .hits
+            .is_empty());
+        assert_eq!(relevant_terms("在终端打开Claude", &rules), vec!["Claude"]);
+    }
+
+    #[test]
+    fn ambiguous_overlapping_and_unanchored_matches_do_not_report_phantom_hits() {
+        let rules = [
+            rule("Claude", "Cloud", None),
+            rule("Cloudflare", "Cloud", None),
+        ];
+        assert!(apply_rules_with_hits("Cloud", &rules).hits.is_empty());
+        let rules = [
+            rule("Claude Code", "Cloud Code", None),
+            rule("Codex", "Code", None),
+        ];
+        let result = apply_rules_with_hits("Cloud Code", &rules);
+        assert_eq!(result.text, "Claude Code");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].term, "Claude Code");
+        assert!(
+            apply_rules_with_hits("克劳德。终端", &[rule("Claude", "克劳德", Some("终端"))])
+                .hits
+                .is_empty()
+        );
+        assert!(
+            apply_rules_with_hits("decode xyz", &[rule("Codex", "code x", None)])
+                .hits
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn newer_dictation_replaces_recent_hits_including_a_no_hit_result() {
+        let rules = [rule("Codex", "code x", None)];
+        let mut recent = RecentCorrections::default();
+        assert!(recent.hits.is_empty());
+        recent.record(apply_rules_with_hits("code x", &rules).hits);
+        assert_eq!(recent.hits.len(), 1);
+        recent.record(apply_rules_with_hits("nothing changed", &rules).hits);
+        assert!(recent.hits.is_empty());
+        assert!(RecentCorrections::default().hits.is_empty());
+    }
+
+    #[test]
+    fn recent_hit_storage_is_bounded_without_retaining_a_body() {
+        let hits = apply_rules_with_hits("code x", &[rule("Codex", "code x", None)]).hits;
+        let mut recent = RecentCorrections::default();
+        recent.record(vec![hits[0].clone(); 100]);
+        assert_eq!(recent.hits.len(), 64);
     }
 }

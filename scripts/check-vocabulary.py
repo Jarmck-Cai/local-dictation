@@ -5,6 +5,8 @@ import subprocess
 root = Path(__file__).resolve().parents[1]
 deps = root / "desktop/src-tauri/target/debug/deps"
 rusqlite = next(deps.glob("librusqlite-*.rlib"))
+rusqlite_migration = next(deps.glob("librusqlite_migration-*.rlib"))
+(root / "outputs").mkdir(exist_ok=True)
 fixture = root / "outputs/vocabulary-check-harness.rs"
 fixture.write_text(
     f'#[path = "{(root / "desktop/src-tauri/src/vocabulary_core.rs").as_posix()}"] mod core;\n'
@@ -12,5 +14,13 @@ fixture.write_text(
     encoding="utf-8",
 )
 executable = root / "outputs/vocabulary-checks.exe"
-subprocess.run(["rustc", "--edition=2021", "--test", str(fixture), "--extern", f"rusqlite={rusqlite}", "-L", f"dependency={deps}", "-o", str(executable)], check=True)
+subprocess.run(
+    [
+        "rustc", "--edition=2021", "--test", str(fixture),
+        "--extern", f"rusqlite={rusqlite}",
+        "--extern", f"rusqlite_migration={rusqlite_migration}",
+        "-L", f"dependency={deps}", "-o", str(executable),
+    ],
+    check=True,
+)
 subprocess.run([str(executable)], check=True)

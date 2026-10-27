@@ -864,14 +864,38 @@
       "accept": "Confirm",
       "reject": "Dismiss",
       "learned": "Confirmed vocabulary",
-      "learnedHint": "These terms remain after source history expires. Remove any term to stop applying it.",
+      "learnedHint": "Confirmed terms remain after source history expires. Edit or disable them here; disabled terms are excluded from local correction and cloud hints.",
       "noLearned": "No learned terms yet.",
       "aliases": "Recognized variants: {{aliases}}",
       "separator": ", ",
       "delete": "Remove",
       "refresh": "Refresh",
       "loadFailed": "Vocabulary could not be read. Please refresh.",
-      "changeFailed": "Vocabulary could not be changed. Please refresh and retry."
+      "changeFailed": "Vocabulary could not be changed. Please refresh and retry.",
+      "edit": "Edit",
+      "save": "Save",
+      "cancel": "Cancel",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "enable": "Enable",
+      "disable": "Disable",
+      "editTerm": "Term",
+      "editAliases": "Aliases (one per line, optional)",
+      "editContext": "Nearby context (optional)",
+      "editHint": "Term: up to 64 characters, or 40 with aliases. Up to 20 aliases, 24 characters each. Context: 2–24 characters in the same clause; Chinese aliases require context. Clear aliases to stop replacing those aliases.",
+      "recentCorrections": "Latest local corrections",
+      "recentCorrectionsHint": "Only actual local replacements from this dictation are shown. Starting another dictation clears them; closing the app discards them. Related cloud hint terms are not correction hits.",
+      "noRecentCorrections": "No local correction hits for the current dictation.",
+      "correctionHit": "{{from}} → {{term}} · replacements: {{count}}",
+      "errors": {
+        "vocabulary_term_invalid": "Enter a term of 1–64 characters using letters, numbers, spaces, or _./+-#.",
+        "vocabulary_context_invalid": "Context must be 2–24 characters using letters, numbers, spaces, or _+-, without punctuation or line breaks.",
+        "vocabulary_alias_invalid": "Each alias must be a safe technical correction of up to 24 characters. Chinese aliases require context; numbers, negations and common words cannot be replaced.",
+        "vocabulary_alias_duplicate": "Remove duplicate aliases (letter case is ignored).",
+        "vocabulary_alias_limit": "Use at most 20 aliases per term.",
+        "vocabulary_term_duplicate": "This term and context already exist. Edit the existing entry.",
+        "vocabulary_alias_ambiguous": "This term or alias conflicts with another learned entry, including disabled entries. Change the conflicting source or remove the other entry."
+      }
     },
     "settingsFailed": "App settings could not be read.",
     "cloud": {
@@ -918,10 +942,36 @@
         "paste_failed": "Insertion failed; copy from history",
         "no_audio": "No audio captured",
         "empty": "No text recognized",
-        "unknown": "Local transcript retained or processing incomplete"
+        "unknown": "Local transcript retained or processing incomplete",
+        "cleanup_response_too_large": "Cleanup response too large; local transcript used",
+        "cleanup_storage_unavailable": "Cleanup settings unavailable; local transcript used",
+        "claude_key_unavailable": "Cloud credentials unavailable; local transcript used",
+        "missing_claude_api_key": "Cloud credentials missing; local transcript used",
+        "cloud_state_unavailable": "Cloud state unavailable; local transcript used"
       },
       "cleanupFallback": "Cleanup fallback: {{reason}}",
-      "cleanupFallbackUnknown": "Cleanup did not finish; local transcript retained"
+      "cleanupFallbackUnknown": "Cleanup did not finish; local transcript retained",
+      "summaryTitle": "Recent processing statistics",
+      "summaryScope": "Last 7 days · {{count}} retained records · up to 300. Fallback counts can overlap other results.",
+      "counts": {
+        "completed": "Insertion completed",
+        "fallbacks": "Cloud fallback",
+        "cancelled": "Cancelled",
+        "noAudio": "No audio",
+        "unconfirmed": "Other incomplete"
+      },
+      "medianTitle": "Median of {{count}} completed samples",
+      "smallSample": "Fewer than 5 completed samples; these values are only an early reference.",
+      "noCompletedSamples": "No confirmed completed insertion samples yet. Cancelled, silent and incomplete attempts are excluded from median waits.",
+      "fallbackTitle": "Cloud fallback reasons",
+      "reasonCount": "{{reason}} · {{count}}",
+      "slowerTitle": "Longest completed waits (up to 3)",
+      "slowerRecord": "{{date}} · {{value}}",
+      "insertionUnconfirmed": "No confirmed insertion",
+      "sampledMemory": "Memory at processing boundaries (maximum)",
+      "processCpu": "Process CPU time during processing",
+      "mebibytes": "{{value}} MiB",
+      "resourceNote": "Current Windows process only, read at processing boundaries after recording release. Memory is the largest sampled working set, not a true peak. CPU is process time during this interval, may include concurrent work, and is not whole-system usage. No continuous sampling."
     },
     "correction": {
       "title": "Provide a corrected sample",
@@ -934,6 +984,11 @@
       "privacy": "Only this text is submitted locally. No clipboard reading, cloud sample upload, or automatic insertion. The sample follows its text history retention.",
       "saved": "Sample saved locally. Review pending vocabulary below. Large rewrites may produce no correction suggestions.",
       "failed": "The sample could not be saved. Check that the record still exists, then retry."
+    },
+    "startup": {
+      "label": "Start when signing in to Windows",
+      "description": "Runs independently of Codex and starts in the tray at sign-in. Closing settings keeps it running; use the tray menu to quit.",
+      "failed": "Could not confirm or change the login setting. Try again; it will not be shown as successfully enabled."
     }
   }
 }

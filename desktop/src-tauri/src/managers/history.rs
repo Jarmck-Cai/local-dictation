@@ -32,6 +32,7 @@ static MIGRATIONS: &[M] = &[
     M::up("ALTER TABLE transcription_history ADD COLUMN post_process_prompt TEXT;"),
     M::up("ALTER TABLE transcription_history ADD COLUMN post_process_requested BOOLEAN NOT NULL DEFAULT 0;"),
     M::up(crate::vocabulary::SCHEMA),
+    M::up(crate::vocabulary::MANAGEMENT_SCHEMA),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]

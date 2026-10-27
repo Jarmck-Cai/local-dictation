@@ -43,6 +43,10 @@ WHEN OLD.transcription_text IS NOT NEW.transcription_text OR OLD.post_processed_
 END;
 "#;
 
+// Keep the original migration unchanged for existing 0.1.2/0.1.3 databases.
+pub const MANAGEMENT_SCHEMA: &str =
+    "ALTER TABLE vocabulary_terms ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT 1 CHECK(enabled IN (0,1));";
+
 #[derive(Debug)]
 pub struct Candidate {
     pub id: i64,
@@ -51,6 +55,7 @@ pub struct Candidate {
 #[derive(Debug)]
 pub struct Term {
     pub id: i64,
+    pub enabled: bool,
     pub rule: Rule,
 }
 #[derive(Debug, Default)]
@@ -69,7 +74,7 @@ fn option(value: String) -> Option<String> {
 
 pub fn terms(conn: &Connection) -> Result<Vec<Term>> {
     let mut statement = conn
-        .prepare("SELECT id, term, context FROM vocabulary_terms ORDER BY id")
+        .prepare("SELECT id, term, context, enabled FROM vocabulary_terms ORDER BY id")
         .map_err(storage)?;
     let mut alias_query = conn
         .prepare("SELECT alias FROM vocabulary_aliases WHERE term_id=?1 ORDER BY alias")
@@ -80,12 +85,13 @@ pub fn terms(conn: &Connection) -> Result<Vec<Term>> {
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
             ))
         })
         .map_err(storage)?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, term, context) = row.map_err(storage)?;
+        let (id, term, context, enabled) = row.map_err(storage)?;
         let aliases = alias_query
             .query_map([id], |row| row.get(0))
             .map_err(storage)?
@@ -93,7 +99,9 @@ pub fn terms(conn: &Connection) -> Result<Vec<Term>> {
             .map_err(storage)?;
         out.push(Term {
             id,
+            enabled,
             rule: Rule {
+                id,
                 term,
                 aliases,
                 context: option(context),
@@ -101,6 +109,112 @@ pub fn terms(conn: &Connection) -> Result<Vec<Term>> {
         });
     }
     Ok(out)
+}
+
+pub fn active_terms(conn: &Connection) -> Result<Vec<Term>> {
+    Ok(terms(conn)?
+        .into_iter()
+        .filter(|term| term.enabled)
+        .collect())
+}
+
+fn normalized_rule(id: i64, term: &str, aliases: &[String], context: Option<&str>) -> Rule {
+    Rule {
+        id,
+        term: term.trim().to_owned(),
+        aliases: aliases
+            .iter()
+            .map(|alias| alias.trim().to_owned())
+            .collect(),
+        context: context
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    }
+}
+
+fn validate_conflicts(conn: &Connection, rule: &Rule) -> Result<()> {
+    super::core::validate_rule(rule)?;
+    for existing in terms(conn)?.into_iter().filter(|entry| entry.id != rule.id) {
+        if existing.rule.term.eq_ignore_ascii_case(&rule.term) {
+            if existing
+                .rule
+                .context
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                == rule.context.as_deref().map(str::to_ascii_lowercase)
+            {
+                return Err("vocabulary_term_duplicate");
+            }
+            continue;
+        }
+        // Reject conflicting sources even when currently disabled: enabling a
+        // rule later must not silently make another rule ambiguous.
+        if rule
+            .aliases
+            .iter()
+            .chain(std::iter::once(&rule.term))
+            .any(|source| {
+                existing
+                    .rule
+                    .aliases
+                    .iter()
+                    .chain(std::iter::once(&existing.rule.term))
+                    .any(|other| source.eq_ignore_ascii_case(other))
+            })
+        {
+            return Err("vocabulary_alias_ambiguous");
+        }
+    }
+    Ok(())
+}
+
+pub fn update_term(
+    conn: &mut Connection,
+    id: i64,
+    term: &str,
+    aliases: &[String],
+    context: Option<&str>,
+) -> Result<()> {
+    let transaction = conn.transaction().map_err(storage)?;
+    if !terms(&transaction)?.iter().any(|entry| entry.id == id) {
+        return Err("vocabulary_term_missing");
+    }
+    let rule = normalized_rule(id, term, aliases, context);
+    validate_conflicts(&transaction, &rule)?;
+    transaction
+        .execute(
+            "UPDATE vocabulary_terms SET term=?2,context=?3 WHERE id=?1",
+            params![id, rule.term, rule.context.as_deref().unwrap_or("")],
+        )
+        .map_err(storage)?;
+    transaction
+        .execute("DELETE FROM vocabulary_aliases WHERE term_id=?1", [id])
+        .map_err(storage)?;
+    for alias in rule.aliases {
+        transaction
+            .execute(
+                "INSERT INTO vocabulary_aliases(term_id,alias) VALUES(?1,?2)",
+                params![id, alias],
+            )
+            .map_err(storage)?;
+    }
+    transaction.commit().map_err(storage)
+}
+
+pub fn set_enabled(conn: &mut Connection, id: i64, enabled: bool) -> Result<()> {
+    let transaction = conn.transaction().map_err(storage)?;
+    if transaction
+        .execute(
+            "UPDATE vocabulary_terms SET enabled=?2 WHERE id=?1",
+            params![id, enabled],
+        )
+        .map_err(storage)?
+        == 0
+    {
+        return Err("vocabulary_term_missing");
+    }
+    transaction.commit().map_err(storage)
 }
 
 pub fn view(conn: &Connection) -> Result<View> {
@@ -187,6 +301,17 @@ pub fn review(conn: &mut Connection, id: i64, accept: bool) -> Result<()> {
         if existing.is_none() && count >= 500 {
             return Err("vocabulary_term_limit");
         }
+        let existing_id = existing.unwrap_or(-1);
+        let mut aliases = terms(&transaction)?
+            .into_iter()
+            .find(|entry| entry.id == existing_id)
+            .map(|entry| entry.rule.aliases)
+            .unwrap_or_default();
+        if !alias.is_empty() && !aliases.iter().any(|value| value == &alias) {
+            aliases.push(alias.clone());
+        }
+        let rule = normalized_rule(existing_id, &term, &aliases, Some(&context));
+        validate_conflicts(&transaction, &rule)?;
         transaction.execute("INSERT INTO vocabulary_terms(term,context) VALUES(?1,?2) ON CONFLICT(term,context) DO NOTHING", params![term, context]).map_err(storage)?;
         if !alias.is_empty() {
             transaction.execute("INSERT OR IGNORE INTO vocabulary_aliases(term_id,alias) SELECT id,?3 FROM vocabulary_terms WHERE term=?1 AND context=?2", params![term, context, alias]).map_err(storage)?;
@@ -243,7 +368,276 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE transcription_history (id INTEGER PRIMARY KEY, transcription_text TEXT NOT NULL, post_processed_text TEXT, saved BOOLEAN DEFAULT 0); INSERT INTO transcription_history VALUES (1,'在终端打开克劳德 Code',NULL,0),(2,'使用Claude Code',NULL,1);").unwrap();
         conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch(MANAGEMENT_SCHEMA).unwrap();
         conn
+    }
+    fn confirm(conn: &mut Connection, proposal: Proposal) -> i64 {
+        observe(conn, 1, &[proposal]).unwrap();
+        let id = view(conn).unwrap().candidates[0].id;
+        review(conn, id, true).unwrap();
+        view(conn).unwrap().entries.last().unwrap().id
+    }
+
+    #[test]
+    fn upgrade_enables_existing_terms_and_preserves_history_samples_and_aliases() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE transcription_history (id INTEGER PRIMARY KEY, transcription_text TEXT, post_processed_text TEXT); INSERT INTO transcription_history VALUES(7,'synthetic history',NULL);").unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch("INSERT INTO vocabulary_terms(id,term,context) VALUES(9,'Claude','终端'); INSERT INTO vocabulary_aliases VALUES(9,'克劳德'); INSERT INTO vocabulary_samples VALUES(7,'synthetic corrected',123);").unwrap();
+        conn.execute_batch(MANAGEMENT_SCHEMA).unwrap();
+        let entries = terms(&conn).unwrap();
+        assert_eq!(entries[0].id, 9);
+        assert!(entries[0].enabled);
+        assert_eq!(entries[0].rule.aliases, vec!["克劳德"]);
+        assert_eq!(
+            conn.query_row(
+                "SELECT transcription_text FROM transcription_history WHERE id=7",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "synthetic history"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT corrected_text FROM vocabulary_samples WHERE history_id=7",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "synthetic corrected"
+        );
+    }
+
+    #[test]
+    fn migration_tracking_upgrades_old_schema_once_and_new_installs_match() {
+        use rusqlite_migration::{Migrations, M};
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE transcription_history(id INTEGER PRIMARY KEY,transcription_text TEXT,post_processed_text TEXT);"),
+            M::up(SCHEMA),
+            M::up(MANAGEMENT_SCHEMA),
+        ]);
+        for old_version in [false, true] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            if old_version {
+                migrations.to_version(&mut conn, 2).unwrap();
+                conn.execute("INSERT INTO vocabulary_terms(term) VALUES('Claude')", [])
+                    .unwrap();
+            }
+            migrations.to_latest(&mut conn).unwrap();
+            migrations.to_latest(&mut conn).unwrap();
+            if !old_version {
+                conn.execute("INSERT INTO vocabulary_terms(term) VALUES('Claude')", [])
+                    .unwrap();
+            }
+            assert!(terms(&conn).unwrap()[0].enabled);
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                3
+            );
+        }
+    }
+
+    #[test]
+    fn editing_replaces_the_whole_rule_and_preserves_enabled_state() {
+        let mut conn = connection();
+        let id = confirm(&mut conn, proposal());
+        set_enabled(&mut conn, id, false).unwrap();
+        update_term(
+            &mut conn,
+            id,
+            " Codex ",
+            &[" code x ".into()],
+            Some(" 项目 "),
+        )
+        .unwrap();
+        let entry = view(&conn).unwrap().entries.remove(0);
+        assert_eq!(entry.rule.term, "Codex");
+        assert_eq!(entry.rule.aliases, vec!["code x"]);
+        assert_eq!(entry.rule.context.as_deref(), Some("项目"));
+        assert!(!entry.enabled);
+        assert_eq!(
+            super::super::core::apply_rules("项目 code x", &[entry.rule]),
+            "项目 Codex"
+        );
+        update_term(&mut conn, id, "Codex", &[], None).unwrap();
+        set_enabled(&mut conn, id, true).unwrap();
+        let entry = view(&conn).unwrap().entries.remove(0);
+        assert!(entry.rule.aliases.is_empty());
+        assert!(entry.rule.context.is_none());
+        assert_eq!(
+            super::super::core::apply_rules("项目 code x", &[entry.rule]),
+            "项目 code x"
+        );
+    }
+
+    #[test]
+    fn disabled_terms_are_visible_but_neither_correct_nor_become_cloud_hints() {
+        let mut conn = connection();
+        let id = confirm(&mut conn, proposal());
+        set_enabled(&mut conn, id, false).unwrap();
+        assert_eq!(view(&conn).unwrap().entries.len(), 1);
+        let rules = active_terms(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.rule)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            super::super::core::apply_rules("在终端打开克劳德", &rules),
+            "在终端打开克劳德"
+        );
+        assert!(super::super::core::relevant_terms("在终端打开Claude", &rules).is_empty());
+        set_enabled(&mut conn, id, true).unwrap();
+        assert_eq!(active_terms(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn invalid_edits_leave_the_old_rule_intact() {
+        let mut conn = connection();
+        let id = confirm(&mut conn, proposal());
+        for (term, aliases, context, error) in [
+            (" ", vec!["claud".into()], None, "vocabulary_term_invalid"),
+            ("Codex", vec![" ".into()], None, "vocabulary_alias_invalid"),
+            (
+                "Codex",
+                vec!["codex".into()],
+                None,
+                "vocabulary_alias_invalid",
+            ),
+            (
+                "Codex",
+                vec!["code x".into(), "CODE X".into()],
+                None,
+                "vocabulary_alias_duplicate",
+            ),
+            (
+                "Codex",
+                vec!["克劳德".into()],
+                None,
+                "vocabulary_alias_invalid",
+            ),
+            (
+                "Codex",
+                vec!["code x".into()],
+                Some("。项目"),
+                "vocabulary_context_invalid",
+            ),
+        ] {
+            assert_eq!(
+                update_term(&mut conn, id, term, &aliases, context),
+                Err(error)
+            );
+            let entry = view(&conn).unwrap().entries.remove(0);
+            assert_eq!(entry.rule.term, "Claude");
+            assert_eq!(entry.rule.aliases, vec!["克劳德"]);
+            assert_eq!(entry.rule.context.as_deref(), Some("终端"));
+        }
+        assert_eq!(
+            update_term(&mut conn, id, &"X".repeat(65), &[], None),
+            Err("vocabulary_term_invalid")
+        );
+        assert_eq!(
+            update_term(&mut conn, id, "Codex", &["x".repeat(25)], None),
+            Err("vocabulary_alias_invalid")
+        );
+        assert_eq!(
+            update_term(&mut conn, id, "Codex", &[], Some(&"中".repeat(25))),
+            Err("vocabulary_context_invalid")
+        );
+        assert_eq!(
+            update_term(&mut conn, id, "Codex", &vec!["claud".into(); 21], None),
+            Err("vocabulary_alias_limit")
+        );
+    }
+
+    #[test]
+    fn duplicate_terms_and_ambiguous_aliases_cannot_be_saved_or_confirmed() {
+        let mut conn = connection();
+        let first = confirm(&mut conn, proposal());
+        let second = confirm(
+            &mut conn,
+            Proposal {
+                term: "Codex".into(),
+                replacement_from: Some("code x".into()),
+                context: None,
+                source: "asr_correction".into(),
+                occurrences: 1,
+            },
+        );
+        assert_eq!(
+            update_term(&mut conn, second, "claude", &[], Some("终端")),
+            Err("vocabulary_term_duplicate")
+        );
+        assert_eq!(
+            update_term(&mut conn, second, "Codex", &["克劳德".into()], Some("终端")),
+            Err("vocabulary_alias_ambiguous")
+        );
+        assert_eq!(
+            update_term(&mut conn, second, "Codex", &["CLAUDE".into()], None),
+            Err("vocabulary_alias_ambiguous")
+        );
+        let mut conflict = proposal();
+        conflict.term = "Cloudflare".into();
+        observe(&mut conn, 2, &[conflict]).unwrap();
+        let candidate = view(&conn).unwrap().candidates[0].id;
+        assert_eq!(
+            review(&mut conn, candidate, true),
+            Err("vocabulary_alias_ambiguous")
+        );
+        assert_eq!(view(&conn).unwrap().candidates[0].id, candidate);
+        assert_eq!(view(&conn).unwrap().entries[0].id, first);
+    }
+
+    #[test]
+    fn storage_failure_rolls_back_term_aliases_and_enabled_flag() {
+        let mut conn = connection();
+        let id = confirm(&mut conn, proposal());
+        conn.execute_batch("CREATE TRIGGER reject_new_alias BEFORE INSERT ON vocabulary_aliases BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").unwrap();
+        assert_eq!(
+            update_term(&mut conn, id, "Codex", &["code x".into()], None),
+            Err("vocabulary_storage_unavailable")
+        );
+        let entry = view(&conn).unwrap().entries.remove(0);
+        assert_eq!(entry.rule.term, "Claude");
+        assert_eq!(entry.rule.aliases, vec!["克劳德"]);
+        assert!(entry.enabled);
+        assert_eq!(
+            update_term(&mut conn, 99, "Codex", &[], None),
+            Err("vocabulary_term_missing")
+        );
+        assert_eq!(
+            set_enabled(&mut conn, 99, false),
+            Err("vocabulary_term_missing")
+        );
+    }
+
+    #[test]
+    fn enabled_change_failure_preserves_previous_value() {
+        let mut conn = connection();
+        let id = confirm(&mut conn, proposal());
+        conn.execute_batch("CREATE TRIGGER reject_enabled_change BEFORE UPDATE OF enabled ON vocabulary_terms BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").unwrap();
+        assert_eq!(
+            set_enabled(&mut conn, id, false),
+            Err("vocabulary_storage_unavailable")
+        );
+        assert!(view(&conn).unwrap().entries[0].enabled);
+    }
+
+    #[test]
+    fn confirming_a_new_alias_keeps_an_existing_disabled_term_disabled() {
+        let mut conn = connection();
+        let id = confirm(&mut conn, proposal());
+        set_enabled(&mut conn, id, false).unwrap();
+        let mut next = proposal();
+        next.replacement_from = Some("claud".into());
+        observe(&mut conn, 2, &[next]).unwrap();
+        let candidate = view(&conn).unwrap().candidates[0].id;
+        review(&mut conn, candidate, true).unwrap();
+        let entry = view(&conn).unwrap().entries.remove(0);
+        assert_eq!(entry.id, id);
+        assert!(!entry.enabled);
+        assert_eq!(entry.rule.aliases, vec!["claud", "克劳德"]);
     }
     fn proposal() -> Proposal {
         Proposal {

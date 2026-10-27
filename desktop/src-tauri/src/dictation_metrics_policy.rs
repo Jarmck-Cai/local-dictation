@@ -16,6 +16,22 @@ pub fn retained_indices(timestamps: &[u64], now_ms: u64) -> Vec<usize> {
     indices
 }
 
+pub fn stopped_without_audio_outcome(cancelled: bool) -> &'static str {
+    if cancelled {
+        "cancelled"
+    } else {
+        "no_audio"
+    }
+}
+
+pub fn claim_recording_cancel<T>(recording_active: bool, session: &mut Option<T>) -> Option<T> {
+    if recording_active {
+        session.take()
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,5 +54,25 @@ mod tests {
         assert_eq!(kept.len(), MAX_RECORDS);
         assert_eq!(kept.first(), Some(&499));
         assert_eq!(kept.last(), Some(&200));
+    }
+
+    #[test]
+    fn cancellation_during_recording_stop_is_not_counted_as_silence() {
+        assert_eq!(stopped_without_audio_outcome(true), "cancelled");
+        assert_eq!(stopped_without_audio_outcome(false), "no_audio");
+    }
+
+    #[test]
+    fn recording_cancel_is_claimed_once_and_idle_cancel_cannot_consume_a_session() {
+        let mut session = Some("claude");
+        assert_eq!(claim_recording_cancel(false, &mut session), None);
+        assert_eq!(session, Some("claude"));
+        assert_eq!(claim_recording_cancel(true, &mut session), Some("claude"));
+        assert_eq!(
+            session, None,
+            "a tombstone prevents a simultaneous stop from creating another row"
+        );
+        assert_eq!(claim_recording_cancel(true, &mut session), None);
+        assert_eq!(claim_recording_cancel(false, &mut session), None);
     }
 }

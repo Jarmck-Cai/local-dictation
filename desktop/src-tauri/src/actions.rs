@@ -62,7 +62,8 @@ pub trait ShortcutAction: Send + Sync {
 // Both legacy shortcut names use the selected dictation cleanup mode.
 struct TranscribeAction;
 
-static CLEANUP_SESSIONS: Lazy<Mutex<HashMap<String, CleanupSession>>> =
+// None is a recording cancellation tombstone, consumed by a racing stop().
+static CLEANUP_SESSIONS: Lazy<Mutex<HashMap<String, Option<CleanupSession>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 async fn complete_unless_cancelled<F, C>(operation: F, is_cancelled: C) -> Option<F::Output>
@@ -239,12 +240,13 @@ impl ShortcutAction for TranscribeAction {
         // the microphone; never re-read them in the async transcription path.
         let cleanup_session = dictation_cleanup::capture_session(app);
         if let Ok(mut sessions) = CLEANUP_SESSIONS.lock() {
-            sessions.insert(binding_id.clone(), cleanup_session);
+            sessions.insert(binding_id.clone(), Some(cleanup_session));
         }
         let mut recording_error: Option<String> = None;
         let recording_start_time = Instant::now();
         match rm.try_start_recording(&binding_id, vad_policy) {
             Ok(readiness) => {
+                crate::vocabulary::clear_recent_corrections(app);
                 debug!(
                     "Recording request accepted in {:?}; waiting for first microphone samples",
                     recording_start_time.elapsed()
@@ -336,6 +338,23 @@ impl ShortcutAction for TranscribeAction {
     }
 
     fn stop(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
+        // Capture before claiming the session: once it is claimed, Esc can
+        // cancel from another callback before the processing task is spawned.
+        let cancel_generation = app
+            .state::<Arc<AudioRecordingManager>>()
+            .cancel_generation();
+        // Claim the recording before changing its UI. Cancellation drops the
+        // credential-bearing session and leaves a tombstone, so a release that
+        // races with Esc cannot produce a second cancellation/no-audio record.
+        let cleanup_session = match CLEANUP_SESSIONS
+            .lock()
+            .ok()
+            .and_then(|mut sessions| sessions.remove(binding_id))
+        {
+            Some(Some(session)) => session,
+            Some(None) => return,
+            None => CleanupSession::unavailable(),
+        };
         // Prevent a slow microphone from emitting a ready event or start chime
         // after the user has already requested stop.
         app.state::<Arc<AudioRecordingManager>>()
@@ -364,18 +383,11 @@ impl ShortcutAction for TranscribeAction {
             show_transcribing_overlay(app);
         }
 
-        let binding_id = binding_id.to_string(); // Clone binding_id for the async task
-                                                 // A missing snapshot fails closed to raw text, rather than loading new
-                                                 // settings that may now authorize a different provider.
-        let cleanup_session = CLEANUP_SESSIONS
-            .lock()
-            .ok()
-            .and_then(|mut sessions| sessions.remove(&binding_id))
-            .unwrap_or_else(CleanupSession::unavailable);
+        let binding_id = binding_id.to_string();
         let post_process = cleanup_session.is_enabled();
-        let cancel_generation = rm.cancel_generation();
         let mut timing =
             crate::dictation_metrics::DictationTiming::new(cleanup_session.mode_name());
+        timing.begin_resources();
 
         tauri::async_runtime::spawn(async move {
             let guard = Arc::new(FinishGuard(ah.clone(), Arc::clone(&tm)));
@@ -446,6 +458,7 @@ impl ShortcutAction for TranscribeAction {
                         Err(err) => Err(err),
                     };
                     timing.asr_ms = crate::dictation_metrics::elapsed_ms(transcription_time);
+                    timing.snapshot_resources("asr");
 
                     // Await WAV save and verify
                     let wav_saved = match wav_handle.await {
@@ -513,6 +526,7 @@ impl ShortcutAction for TranscribeAction {
                                 set_tray_state(&ah, TrayIconState::Idle);
                                 return;
                             };
+                            timing.snapshot_resources("cleanup");
 
                             if rm.was_cancelled_since(cancel_generation) {
                                 debug!("Transcription operation cancelled before paste");
@@ -659,7 +673,10 @@ impl ShortcutAction for TranscribeAction {
                 }
             } else {
                 debug!("No samples retrieved from recording stop");
-                timing.outcome = "no_audio".into();
+                timing.outcome = crate::dictation_metrics::stopped_without_audio_outcome(
+                    rm.was_cancelled_since(cancel_generation),
+                )
+                .into();
                 timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
                 crate::dictation_metrics::record(&ah, timing);
                 // Tear down any streaming worker so its channel doesn't leak.
@@ -677,14 +694,50 @@ impl ShortcutAction for TranscribeAction {
 }
 
 // Cancel Action
+/// Discard unclaimed credentials on any cancellation, keeping tombstones so a
+/// racing release cannot turn a cancelled recording into a fresh operation.
+pub fn discard_pending_cleanup_sessions() {
+    if let Ok(mut sessions) = CLEANUP_SESSIONS.lock() {
+        for session in sessions.values_mut() {
+            *session = None;
+        }
+    }
+}
+
 struct CancelAction;
 
 impl ShortcutAction for CancelAction {
     fn start(&self, app: &AppHandle, _binding_id: &str, _shortcut_str: &str) {
-        if let Ok(mut sessions) = CLEANUP_SESSIONS.lock() {
-            sessions.clear();
-        }
+        // stop() takes the session before beginning processing. Only a session
+        // still owned by an active recording needs its own cancellation row;
+        // the processing task records its cancellation otherwise.
+        let recording_modes = CLEANUP_SESSIONS
+            .lock()
+            .map(|mut sessions| {
+                let active = app.state::<Arc<AudioRecordingManager>>().is_recording();
+                let modes: Vec<_> = sessions
+                    .values_mut()
+                    .filter_map(|session| {
+                        crate::dictation_metrics::claim_recording_cancel(active, session)
+                            .map(|session| session.mode_name())
+                    })
+                    .collect();
+                if !active {
+                    // Keep cancellation tombstones until stop/new start consumes
+                    // them. A repeated Esc must not revive a racing stop.
+                    for session in sessions.values_mut() {
+                        *session = None;
+                    }
+                }
+                modes
+            })
+            .unwrap_or_default();
         utils::cancel_current_operation(app);
+        for mode in recording_modes {
+            let mut timing = crate::dictation_metrics::DictationTiming::new(mode);
+            timing.outcome = "cancelled".into();
+            crate::dictation_metrics::record(app, timing);
+        }
     }
 
     fn stop(&self, _app: &AppHandle, _binding_id: &str, _shortcut_str: &str) {
@@ -736,6 +789,15 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
     );
     map
 });
+
+/// Share the shortcut cancellation lifecycle with explicit user UI/CLI actions.
+pub fn cancel_user_operation(app: &AppHandle) {
+    if let Some(action) = ACTION_MAP.get("cancel") {
+        action.start(app, "cancel", "");
+    } else {
+        utils::cancel_current_operation(app);
+    }
+}
 
 #[cfg(test)]
 mod tests {

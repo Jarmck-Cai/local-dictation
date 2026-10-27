@@ -9,7 +9,56 @@
 //! appear under "Open at Login" with the app's name and icon.
 
 use tauri::AppHandle;
+#[cfg(not(target_os = "windows"))]
 use tauri_plugin_autostart::ManagerExt;
+#[cfg(target_os = "windows")]
+#[path = "autostart_windows.rs"]
+mod windows;
+
+pub fn set_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if macos::login_item_api_available() {
+        macos::remove_plugin_launch_agent(app);
+        return macos::set_login_item(enabled);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app;
+        windows::set_enabled(enabled, true)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let manager = app.autolaunch();
+        if enabled {
+            manager.enable()
+        } else if manager.is_enabled().map_err(|_| "autostart_unavailable")? {
+            manager.disable()
+        } else {
+            return Ok(());
+        }
+        .map_err(|_| "autostart_unavailable".into())
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn get_autostart_status(app: AppHandle) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    if macos::login_item_api_available() {
+        return Ok(macos::is_login_item_enabled());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app;
+        windows::is_enabled()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        app.autolaunch()
+            .is_enabled()
+            .map_err(|_| "autostart_unavailable".into())
+    }
+}
 
 /// Apply the user's autostart preference using the best mechanism for the
 /// current platform.
@@ -19,10 +68,25 @@ use tauri_plugin_autostart::ManagerExt;
 /// startup. This mirrors the pre-existing behavior of ignoring
 /// enable()/disable() results.
 pub fn apply_autostart(app: &AppHandle, enabled: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app;
+        if windows::set_enabled(enabled, false).is_err() {
+            log::warn!("Could not synchronize current-user login setting");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    apply_plugin_autostart(app, enabled);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_plugin_autostart(app: &AppHandle, enabled: bool) {
     #[cfg(target_os = "macos")]
     if macos::login_item_api_available() {
         macos::remove_plugin_launch_agent(app);
-        macos::set_login_item(enabled);
+        if macos::set_login_item(enabled).is_err() {
+            log::warn!("Could not synchronize the login item");
+        }
         return;
     }
 
@@ -60,31 +124,36 @@ mod macos {
     /// Register or unregister the app as a login item, skipping the call when
     /// the service is already in the requested state (unregistering a
     /// never-registered service returns an error on every launch otherwise).
-    pub fn set_login_item(enabled: bool) {
+    pub fn is_login_item_enabled() -> bool {
+        unsafe { SMAppService::mainAppService().status() == SMAppServiceStatus::Enabled }
+    }
+
+    pub fn set_login_item(enabled: bool) -> Result<(), String> {
         let service = unsafe { SMAppService::mainAppService() };
         let status = unsafe { service.status() };
 
         if enabled {
             if status == SMAppServiceStatus::Enabled {
-                return;
+                return Ok(());
             }
             match unsafe { service.registerAndReturnError() } {
                 Ok(()) => log::info!("Registered login item via SMAppService"),
                 // Fails in dev (no signed app bundle) and when the user has
                 // switched the item off in System Settings, which apps are
                 // not allowed to override.
-                Err(e) => log::warn!("Failed to register login item: {}", e),
+                Err(_) => return Err("autostart_unavailable".into()),
             }
         } else {
             if status == SMAppServiceStatus::NotRegistered || status == SMAppServiceStatus::NotFound
             {
-                return;
+                return Ok(());
             }
             match unsafe { service.unregisterAndReturnError() } {
                 Ok(()) => log::info!("Unregistered login item via SMAppService"),
-                Err(e) => log::warn!("Failed to unregister login item: {}", e),
+                Err(_) => return Err("autostart_unavailable".into()),
             }
         }
+        Ok(())
     }
 
     /// Remove the launch agent plist that tauri-plugin-autostart (via the

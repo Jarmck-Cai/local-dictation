@@ -29,6 +29,20 @@ try {
         throw "Cannot register cleanup for an installation path containing '%' because Task Scheduler expands environment variables; no task was registered."
     }
     $executable = Join-Path $installDir 'local-dictation.exe'
+    if ($Mode -eq 'Uninstall') {
+        # Runs after the cancellable uninstall phase. Login cleanup is independent
+        # of Task Scheduler availability and only touches this installation.
+        $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        $loginValues = $null
+        try { $loginValues = Get-ItemProperty -LiteralPath $runKey -ErrorAction Stop }
+        catch [System.Management.Automation.ItemNotFoundException] { }
+        $loginProperty = if ($null -ne $loginValues) { $loginValues.PSObject.Properties['Local Dictation'] } else { $null }
+        $loginCommand = if ($null -ne $loginProperty) { $loginProperty.Value } else { $null }
+        $ownedCommands = @(('"' + $executable + '" --start-hidden'), ('"' + $executable + '"'), $executable)
+        if ($loginCommand -is [string] -and $ownedCommands -contains $loginCommand.Trim()) {
+            Remove-ItemProperty -LiteralPath $runKey -Name 'Local Dictation' -ErrorAction Stop
+        }
+    }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $sid = $identity.User.Value
     $hasher = [Security.Cryptography.SHA256]::Create()

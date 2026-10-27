@@ -333,10 +333,8 @@ fn initialize_core_logic(app_handle: &AppHandle) {
                 }
             }
             "cancel" => {
-                use crate::utils::cancel_current_operation;
-
                 // Use centralized cancellation that handles all operations
-                cancel_current_operation(app);
+                crate::actions::cancel_user_operation(app);
             }
             "quit" => {
                 app.exit(0);
@@ -678,6 +676,9 @@ pub fn run(cli_args: CliArgs) {
             vocabulary::get_vocabulary,
             vocabulary::review_vocabulary_candidate,
             vocabulary::delete_learned_term,
+            vocabulary::update_learned_term,
+            vocabulary::set_learned_term_enabled,
+            vocabulary::get_vocabulary_correction_snapshot,
             vocabulary::submit_correction_sample,
             clipboard::copy_latest_result,
             overlay::dismiss_overlay_error,
@@ -691,6 +692,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_theme_setting,
             shortcut::change_start_hidden_setting,
             shortcut::change_autostart_setting,
+            autostart::get_autostart_status,
             shortcut::change_translate_to_english_setting,
             shortcut::change_selected_language_setting,
             shortcut::change_overlay_position_setting,
@@ -892,7 +894,9 @@ pub fn run(cli_args: CliArgs) {
             } else if args.iter().any(|a| a == "--toggle-post-process") {
                 signal_handle::send_transcription_input(app, "transcribe_with_post_process", "CLI");
             } else if args.iter().any(|a| a == "--cancel") {
-                crate::utils::cancel_current_operation(app);
+                crate::actions::cancel_user_operation(app);
+            } else if args.iter().any(|a| a == "--start-hidden") {
+                // A login launch must not raise an already-running tray instance.
             } else {
                 // A second process was launched without remote-control flags
                 // (e.g. the binary run from a shell). On macOS, relaunching the
@@ -919,7 +923,7 @@ pub fn run(cli_args: CliArgs) {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
-            Some(vec![]),
+            Some(vec!["--start-hidden"]),
         ))
         .manage(cli_args.clone())
         .setup(move |app| {

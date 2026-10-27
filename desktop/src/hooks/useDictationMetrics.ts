@@ -20,7 +20,7 @@ export function useDictationMetrics() {
           ({ payload }) => {
             if (disposed) return;
             if (!snapshotReady) updates.set(payload.id, payload);
-            setMetrics((previous) => mergeTiming(previous, payload));
+            setMetrics((previous) => mergeTiming(previous, payload, 300));
             setFailed(false);
           },
         );
@@ -33,7 +33,7 @@ export function useDictationMetrics() {
         // Events received while fetching are newer than the snapshot for that id.
         setMetrics(
           [...updates.values()].reduce(
-            (items, item) => mergeTiming(items, item),
+            (items, item) => mergeTiming(items, item, 300),
             snapshot,
           ),
         );

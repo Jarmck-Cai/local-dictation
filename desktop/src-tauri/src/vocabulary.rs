@@ -7,9 +7,47 @@ mod store;
 use crate::managers::history::HistoryEntry;
 use rusqlite::Connection;
 use serde::Serialize;
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter};
 
 pub(crate) const SCHEMA: &str = store::SCHEMA;
+pub(crate) const MANAGEMENT_SCHEMA: &str = store::MANAGEMENT_SCHEMA;
+
+// A fresh application process starts empty. No transcript body is retained.
+static RECENT_CORRECTIONS: Mutex<core::RecentCorrections> = Mutex::new(core::RecentCorrections {
+    hits: Vec::new(),
+    recorded_at_ms: None,
+});
+
+#[derive(Clone, Debug, Serialize, specta::Type)]
+pub struct VocabularyCorrectionHit {
+    pub term_id: i64,
+    pub term: String,
+    pub from: String,
+    pub count: u32,
+}
+
+#[derive(Clone, Debug, Serialize, specta::Type)]
+pub struct VocabularyCorrectionSnapshot {
+    pub recorded_at_ms: Option<u64>,
+    pub hits: Vec<VocabularyCorrectionHit>,
+}
+
+fn correction_snapshot(recent: &core::RecentCorrections) -> VocabularyCorrectionSnapshot {
+    VocabularyCorrectionSnapshot {
+        recorded_at_ms: recent.recorded_at_ms,
+        hits: recent
+            .hits
+            .iter()
+            .map(|hit| VocabularyCorrectionHit {
+                term_id: hit.term_id,
+                term: hit.term.clone(),
+                from: hit.from.clone(),
+                count: hit.count,
+            })
+            .collect(),
+    }
+}
 
 #[derive(Clone, Debug, Serialize, specta::Type)]
 pub struct VocabularyCandidate {
@@ -27,6 +65,7 @@ pub struct VocabularyTerm {
     pub term: String,
     pub aliases: Vec<String>,
     pub context: Option<String>,
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize, specta::Type)]
@@ -58,6 +97,7 @@ impl From<store::View> for VocabularyView {
                     term: entry.rule.term,
                     aliases: entry.rule.aliases,
                     context: entry.rule.context,
+                    enabled: entry.enabled,
                 })
                 .collect(),
         }
@@ -133,6 +173,57 @@ pub async fn delete_learned_term(app: AppHandle, id: i64) -> Result<VocabularyVi
 
 #[tauri::command]
 #[specta::specta]
+pub async fn update_learned_term(
+    app: AppHandle,
+    id: i64,
+    term: String,
+    aliases: Vec<String>,
+    context: Option<String>,
+) -> Result<VocabularyView, String> {
+    command(
+        app,
+        move |connection| store::update_term(connection, id, &term, &aliases, context.as_deref()),
+        true,
+    )
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_learned_term_enabled(
+    app: AppHandle,
+    id: i64,
+    enabled: bool,
+) -> Result<VocabularyView, String> {
+    command(
+        app,
+        move |connection| store::set_enabled(connection, id, enabled),
+        true,
+    )
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn get_vocabulary_correction_snapshot() -> Result<VocabularyCorrectionSnapshot, String> {
+    let recent = RECENT_CORRECTIONS
+        .lock()
+        .map_err(|_| "vocabulary_unavailable".to_owned())?;
+    Ok(correction_snapshot(&recent))
+}
+
+/// Clear at the start of a dictation, including attempts that never reach ASR.
+pub fn clear_recent_corrections(app: &AppHandle) {
+    if let Ok(mut recent) = RECENT_CORRECTIONS.lock() {
+        *recent = core::RecentCorrections::default();
+        let snapshot = correction_snapshot(&recent);
+        drop(recent);
+        let _ = app.emit("vocabulary-correction-updated", snapshot);
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn submit_correction_sample(
     app: AppHandle,
     history_id: i64,
@@ -164,7 +255,7 @@ fn confirmed_rules(app: &AppHandle) -> Vec<core::Rule> {
         let transaction = connection
             .transaction()
             .map_err(|_| "vocabulary_storage_unavailable")?;
-        let rules = store::terms(&transaction)?
+        let rules = store::active_terms(&transaction)?
             .into_iter()
             .map(|term| term.rule)
             .collect();
@@ -179,7 +270,16 @@ fn confirmed_rules(app: &AppHandle) -> Vec<core::Rule> {
 /// Apply only confirmed, nonambiguous aliases to the original text, once.
 /// A storage failure preserves the complete local transcript.
 pub fn apply_confirmed(app: &AppHandle, raw: &str) -> String {
-    core::apply_rules(raw, &confirmed_rules(app))
+    let result = core::apply_rules_with_hits(raw, &confirmed_rules(app));
+    // Replacing the snapshot even for no hits prevents stale corrections from
+    // being attributed to a later dictation. Storage failure follows this path too.
+    if let Ok(mut recent) = RECENT_CORRECTIONS.lock() {
+        recent.record(result.hits);
+        let snapshot = correction_snapshot(&recent);
+        drop(recent);
+        let _ = app.emit("vocabulary-correction-updated", snapshot);
+    }
+    result.text
 }
 
 /// Return only confirmed vocabulary matching this transcript or a contextual alias.

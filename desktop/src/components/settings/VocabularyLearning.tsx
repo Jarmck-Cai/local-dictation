@@ -7,10 +7,22 @@ import {
   notifyVocabularyChanged,
   VOCABULARY_REFRESH,
   type VocabularyView,
+  type VocabularyCorrectionSnapshot,
 } from "@/lib/dictationApi";
 import { SnapshotGuard } from "@/lib/dictationState";
 import { Button } from "../ui/Button";
 import { SettingsGroup } from "../ui/SettingsGroup";
+import { LearnedTermRow } from "./LearnedTermRow";
+
+const validationErrors = new Set([
+  "vocabulary_term_invalid",
+  "vocabulary_context_invalid",
+  "vocabulary_alias_invalid",
+  "vocabulary_alias_duplicate",
+  "vocabulary_alias_limit",
+  "vocabulary_term_duplicate",
+  "vocabulary_alias_ambiguous",
+]);
 
 export const VocabularyReview = ({
   view,
@@ -32,16 +44,24 @@ export const VocabularyReview = ({
 
   const mutate = async (operation: () => Promise<VocabularyView>) => {
     const guard = guardRef.current;
-    if (!guard || !guard.isAlive() || busy) return;
+    if (!guard || !guard.isAlive() || busy) return false;
     const request = guard.begin();
     setBusy(true);
     try {
       const next = await operation();
       if (guard.isCurrent(request)) onChange(next);
       notifyVocabularyChanged();
-    } catch {
+      return true;
+    } catch (error) {
       if (guard.isCurrent(request))
-        toast.error(t("dictation.vocabulary.changeFailed"));
+        toast.error(
+          t(
+            typeof error === "string" && validationErrors.has(error)
+              ? `dictation.vocabulary.errors.${error}`
+              : "dictation.vocabulary.changeFailed",
+          ),
+        );
+      return false;
     } finally {
       if (guard.isAlive()) setBusy(false);
     }
@@ -142,40 +162,25 @@ export const VocabularyReview = ({
           ) : (
             <ul className="space-y-2">
               {view.entries.map((entry) => (
-                <li
+                <LearnedTermRow
                   key={entry.id}
-                  className="flex items-start justify-between gap-3 p-2 rounded-lg bg-mid-gray/5"
-                >
-                  <div className="text-sm select-text break-words">
-                    <p>{entry.term}</p>
-                    {entry.aliases.length > 0 && (
-                      <p className="text-xs text-text/55 mt-1">
-                        {t("dictation.vocabulary.aliases", {
-                          aliases: entry.aliases.join(
-                            t("dictation.vocabulary.separator"),
-                          ),
-                        })}
-                      </p>
-                    )}
-                    {entry.context && (
-                      <p className="text-xs text-text/55 mt-1">
-                        {t("dictation.vocabulary.context", {
-                          context: entry.context,
-                        })}
-                      </p>
-                    )}
-                  </div>
-                  <Button
-                    size="sm"
-                    variant="danger-ghost"
-                    disabled={busy}
-                    onClick={() =>
-                      mutate(() => dictationApi.deleteLearnedTerm(entry.id))
-                    }
-                  >
-                    {t("dictation.vocabulary.delete")}
-                  </Button>
-                </li>
+                  entry={entry}
+                  busy={busy}
+                  onSave={(edit) =>
+                    mutate(() => dictationApi.updateLearnedTerm(entry.id, edit))
+                  }
+                  onToggle={() =>
+                    void mutate(() =>
+                      dictationApi.setLearnedTermEnabled(
+                        entry.id,
+                        !entry.enabled,
+                      ),
+                    )
+                  }
+                  onDelete={() =>
+                    void mutate(() => dictationApi.deleteLearnedTerm(entry.id))
+                  }
+                />
               ))}
             </ul>
           )}
@@ -188,6 +193,8 @@ export const VocabularyReview = ({
 export const VocabularyLearning = () => {
   const { t } = useTranslation();
   const [view, setView] = useState<VocabularyView | null>(null);
+  const [corrections, setCorrections] =
+    useState<VocabularyCorrectionSnapshot | null>(null);
   const [failed, setFailed] = useState(false);
   const guardRef = useRef<SnapshotGuard>();
   const load = useCallback(async () => {
@@ -195,9 +202,13 @@ export const VocabularyLearning = () => {
     if (!guard || !guard.isAlive()) return;
     const request = guard.begin();
     try {
-      const next = await dictationApi.getVocabulary();
+      const [next, snapshot] = await Promise.all([
+        dictationApi.getVocabulary(),
+        dictationApi.getVocabularyCorrectionSnapshot(),
+      ]);
       if (guard.isCurrent(request)) {
         setView(next);
+        setCorrections(snapshot);
         setFailed(false);
       }
     } catch {
@@ -208,16 +219,35 @@ export const VocabularyLearning = () => {
   useEffect(() => {
     const guard = new SnapshotGuard();
     guardRef.current = guard;
-    let unlisten: UnlistenFn | undefined;
+    const unlisteners: UnlistenFn[] = [];
     const refresh = () => void load();
+    const keepListener = (unlisten: UnlistenFn) => {
+      if (!guard.isAlive()) {
+        unlisten();
+        return false;
+      }
+      unlisteners.push(unlisten);
+      return true;
+    };
     window.addEventListener(VOCABULARY_REFRESH, refresh);
     void (async () => {
       try {
-        unlisten = await listen("vocabulary-updated", refresh);
-        if (!guard.isAlive()) {
-          unlisten();
+        if (!keepListener(await listen("vocabulary-updated", refresh))) return;
+        if (
+          !keepListener(
+            await listen<VocabularyCorrectionSnapshot>(
+              "vocabulary-correction-updated",
+              ({ payload }) => {
+                if (!guard.isAlive()) return;
+                // Clear old hits immediately even if the database is busy.
+                guard.invalidate();
+                setCorrections(payload);
+                void load();
+              },
+            ),
+          )
+        )
           return;
-        }
       } catch {
         // A manually refreshable snapshot is still useful if event registration fails.
       }
@@ -225,7 +255,7 @@ export const VocabularyLearning = () => {
     })();
     return () => {
       guard.dispose();
-      unlisten?.();
+      unlisteners.forEach((unlisten) => unlisten());
       window.removeEventListener(VOCABULARY_REFRESH, refresh);
     };
   }, [load]);
@@ -250,13 +280,40 @@ export const VocabularyLearning = () => {
           </p>
         )}
         {view ? (
-          <VocabularyReview
-            view={view}
-            onChange={(next) => {
-              guardRef.current?.invalidate();
-              setView(next);
-            }}
-          />
+          <>
+            <div className="rounded-lg border border-mid-gray/15 p-3 space-y-2">
+              <h3 className="text-sm font-medium">
+                {t("dictation.vocabulary.recentCorrections")}
+              </h3>
+              <p className="text-xs text-text/55">
+                {t("dictation.vocabulary.recentCorrectionsHint")}
+              </p>
+              {corrections?.hits.length ? (
+                <ul className="space-y-1 text-sm select-text break-words">
+                  {corrections.hits.map((hit) => (
+                    <li key={`${hit.term_id}:${hit.from}`}>
+                      {t("dictation.vocabulary.correctionHit", {
+                        from: hit.from,
+                        term: hit.term,
+                        count: hit.count,
+                      })}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-text/55">
+                  {t("dictation.vocabulary.noRecentCorrections")}
+                </p>
+              )}
+            </div>
+            <VocabularyReview
+              view={view}
+              onChange={(next) => {
+                guardRef.current?.invalidate();
+                setView(next);
+              }}
+            />
+          </>
         ) : (
           !failed && (
             <p className="text-sm text-text/55">{t("common.loading")}</p>

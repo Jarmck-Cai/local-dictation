@@ -4,8 +4,8 @@
 
 LangString LocalDictationCleanupInstallFailure 1033 "The daily audio cleanup task could not be configured. Local Dictation will still clean expired audio when opened and while running. See installation details for the error."
 LangString LocalDictationCleanupInstallFailure 2052 "无法配置每天录音清理任务。Local Dictation 仍会在启动和运行时清理过期录音。错误原因见安装详情。"
-LangString LocalDictationCleanupUninstallFailure 1033 "The audio cleanup task could not be removed. See uninstall details for the error. Only a task owned by this user and installation can be removed."
-LangString LocalDictationCleanupUninstallFailure 2052 "无法移除录音清理任务。错误原因见卸载详情；卸载程序只会移除属于当前用户和本安装目录的任务。"
+LangString LocalDictationCleanupUninstallFailure 1033 "Audio cleanup or login startup settings could not be removed. See uninstall details. Only entries owned by this user and installation can be removed."
+LangString LocalDictationCleanupUninstallFailure 2052 "无法移除录音清理或登录启动设置。错误原因见卸载详情；只会移除属于当前用户和本安装目录的项目。"
 
 ; ExecToStack starts PowerShell without a console window. -File binds the path
 ; as data: never use -Command, cmd.exe, or source interpolation for $INSTDIR.

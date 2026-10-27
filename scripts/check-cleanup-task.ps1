@@ -13,6 +13,25 @@ $global:CleanupTaskCheckState.RegisterCalls = @()
 $global:CleanupTaskCheckState.RemoveCalls = @()
 $global:CleanupTaskCheckState.Failure = ''
 $global:CleanupTaskCheckState.Passed = 0
+$global:CleanupTaskCheckState.LoginCommand = $null
+$global:CleanupTaskCheckState.LoginRemoveCalls = 0
+
+# Registry operations are simulated too; no actual login settings are read.
+function Get-ItemProperty {
+    [CmdletBinding()]
+    param([string]$LiteralPath)
+    if ($LiteralPath -cne 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run') { throw 'Unexpected login registry lookup' }
+    if ($global:CleanupTaskCheckState.Failure -eq 'RegistryRead') { throw 'Simulated registry access failure' }
+    if ($null -eq $global:CleanupTaskCheckState.LoginCommand) { return [pscustomobject]@{} }
+    return [pscustomobject]@{'Local Dictation'=$global:CleanupTaskCheckState.LoginCommand}
+}
+function Remove-ItemProperty {
+    [CmdletBinding()]
+    param([string]$LiteralPath, [string]$Name)
+    if ($LiteralPath -cne 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -or $Name -cne 'Local Dictation') { throw 'Unexpected login registry mutation' }
+    $global:CleanupTaskCheckState.LoginCommand = $null
+    $global:CleanupTaskCheckState.LoginRemoveCalls++
+}
 
 function Assert-Check([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -343,6 +362,43 @@ try {
         Assert-Check ($global:CleanupTaskCheckState.RegisterCalls.Count -eq $registerCount) 'Task registered without its executable'
     }
 
+    Check 'uninstall removes only the matching installation login command' {
+        $loginInstall = New-Fixture 'login-entry'
+        $loginExe = Join-Path $loginInstall 'local-dictation.exe'
+        $global:CleanupTaskCheckState.LoginCommand = '"' + $loginExe + '" --start-hidden'
+        Invoke-Fixture $loginInstall 'Uninstall'
+        Assert-Check ($null -eq $global:CleanupTaskCheckState.LoginCommand) 'Owned login command was retained'
+    }
+    Check 'uninstall preserves another installation and extra command arguments' {
+        $loginInstall = New-Fixture 'login-foreign'
+        foreach ($foreignCommand in @('"C:\Other\local-dictation.exe" --start-hidden', ('"' + (Join-Path $loginInstall 'local-dictation.exe') + '" --cleanup-only'))) {
+            $global:CleanupTaskCheckState.LoginCommand = $foreignCommand
+            $before = $global:CleanupTaskCheckState.LoginRemoveCalls
+            Invoke-Fixture $loginInstall 'Uninstall'
+            Assert-Check ($global:CleanupTaskCheckState.LoginRemoveCalls -eq $before) 'Foreign login entry was modified'
+        }
+        $global:CleanupTaskCheckState.LoginCommand = $null
+    }
+    Check 'uninstall is idempotent without login registration' {
+        $loginInstall = New-Fixture 'login-absent'
+        $before = $global:CleanupTaskCheckState.LoginRemoveCalls
+        Invoke-Fixture $loginInstall 'Uninstall'
+        Assert-Check ($global:CleanupTaskCheckState.LoginRemoveCalls -eq $before) 'Missing login entry was treated as registered'
+    }
+    Check 'uninstall reports login registry read failures' {
+        $loginInstall = New-Fixture 'login-denied'
+        $global:CleanupTaskCheckState.Failure = 'RegistryRead'
+        try { Invoke-Fixture $loginInstall 'Uninstall' 1 }
+        finally { $global:CleanupTaskCheckState.Failure = '' }
+    }
+    Check 'login removal does not depend on the scheduler service' {
+        $loginInstall = New-Fixture 'login-scheduler-down'
+        $global:CleanupTaskCheckState.LoginCommand = '"' + (Join-Path $loginInstall 'local-dictation.exe') + '" --start-hidden'
+        $global:CleanupTaskCheckState.Failure = 'lookup'
+        try { Invoke-Fixture $loginInstall 'Uninstall' 1 }
+        finally { $global:CleanupTaskCheckState.Failure = '' }
+        Assert-Check ($null -eq $global:CleanupTaskCheckState.LoginCommand) 'Task lookup failure prevented independent login removal'
+    }
     Check 'NSIS hooks compile with install and uninstall entry points' {
         Assert-Check (Test-Path -LiteralPath $hooks -PathType Leaf) 'Missing installer hooks'
         if (-not $MakeNsis) { $MakeNsis = Join-Path $env:LOCALAPPDATA 'tauri\NSIS\makensis.exe' }

@@ -864,14 +864,38 @@
       "accept": "确认加入",
       "reject": "忽略",
       "learned": "已确认词库",
-      "learnedHint": "原始历史过期后，确认词条仍然保留。删除后停止应用该词条。",
+      "learnedHint": "原始历史过期后，确认词条仍然保留。可在此编辑或停用；停用后不参与本地纠正，也不作为云端提示词。",
       "noLearned": "还没有学习确认的词条。",
       "aliases": "识别变体：{{aliases}}",
       "separator": "、",
       "delete": "删除",
       "refresh": "刷新",
       "loadFailed": "无法读取词库，请刷新重试。",
-      "changeFailed": "词库更改未完成，请刷新后重试。"
+      "changeFailed": "词库更改未完成，请刷新后重试。",
+      "edit": "编辑",
+      "save": "保存",
+      "cancel": "取消",
+      "enabled": "已启用",
+      "disabled": "已停用",
+      "enable": "启用",
+      "disable": "停用",
+      "editTerm": "术语",
+      "editAliases": "别名（每行一个，可留空）",
+      "editContext": "附近上下文（可留空）",
+      "editHint": "术语最多64字符，带别名时最多40字符；最多20个别名，每个最多24字符。上下文为同一句内附近的2–24字符，中文别名必须有上下文。清空别名后不再替换这些别名。",
+      "recentCorrections": "最近本地纠正",
+      "recentCorrectionsHint": "仅显示本次听写真正发生的本地替换。开始下一次听写后清空，关闭软件后不保留；相关云端提示词不计为纠正命中。",
+      "noRecentCorrections": "暂无本次听写的本地纠正命中。",
+      "correctionHit": "{{from}} → {{term}} · 替换{{count}}次",
+      "errors": {
+        "vocabulary_term_invalid": "请输入1–64字符的术语，仅使用文字、数字、空格或 _./+-#。",
+        "vocabulary_context_invalid": "上下文须为2–24字符，仅使用文字、数字、空格或 _+-，不能包含标点或换行。",
+        "vocabulary_alias_invalid": "别名须为可安全纠正的技术词，最多24字符。中文别名需要上下文，不能替换数字、否定词或普通用词。",
+        "vocabulary_alias_duplicate": "请移除重复别名（英文字母不区分大小写）。",
+        "vocabulary_alias_limit": "每个术语最多保留20个别名。",
+        "vocabulary_term_duplicate": "已有相同术语和上下文，请编辑现有词条。",
+        "vocabulary_alias_ambiguous": "术语或别名与其他已学习词条冲突，停用词条也计入检查。请修改冲突的写法或删除另一词条。"
+      }
     },
     "settingsFailed": "无法读取应用设置。",
     "cloud": {
@@ -918,10 +942,36 @@
         "paste_failed": "自动输入未完成，可从历史复制",
         "no_audio": "未捕获到音频",
         "empty": "未识别到文字",
-        "unknown": "保留本地转录，或处理未完成"
+        "unknown": "保留本地转录，或处理未完成",
+        "cleanup_response_too_large": "整理响应过大，使用本地转录",
+        "cleanup_storage_unavailable": "整理设置无法读取，使用本地转录",
+        "claude_key_unavailable": "云端凭据无法读取，使用本地转录",
+        "missing_claude_api_key": "未配置云端凭据，使用本地转录",
+        "cloud_state_unavailable": "云端状态无法读取，使用本地转录"
       },
       "cleanupFallback": "整理回退：{{reason}}",
-      "cleanupFallbackUnknown": "整理未完成，保留本地转录"
+      "cleanupFallbackUnknown": "整理未完成，保留本地转录",
+      "summaryTitle": "近期运行统计",
+      "summaryScope": "最近 7 天 · 保留 {{count}} 条 · 最多 300 条。回退计数可与其他结果重叠。",
+      "counts": {
+        "completed": "输入完成",
+        "fallbacks": "云端回退",
+        "cancelled": "已取消",
+        "noAudio": "无音频",
+        "unconfirmed": "其他未完成"
+      },
+      "medianTitle": "{{count}} 条完成样本的中位耗时",
+      "smallSample": "完成样本少于 5 条，目前仅供初步参考。",
+      "noCompletedSamples": "暂无可确认输入完成的样本。取消、无音频和未完成记录不计入中位等待。",
+      "fallbackTitle": "云端回退原因",
+      "reasonCount": "{{reason}} · {{count}} 次",
+      "slowerTitle": "完成记录中等待最长的 3 条",
+      "slowerRecord": "{{date}} · {{value}}",
+      "insertionUnconfirmed": "无可确认的落字记录",
+      "sampledMemory": "处理边界内存（读数最大值）",
+      "processCpu": "处理期间进程 CPU 用时",
+      "mebibytes": "{{value}} MiB",
+      "resourceNote": "仅在松键后的处理边界读取 Windows 当前进程。内存为边界读数中的最大工作集，并非真实峰值；CPU 为本进程在此期间的累计用时，可能包含其他并行任务，不是整机占用率。没有持续采样。"
     },
     "correction": {
       "title": "提交修改稿作为样本",
@@ -934,6 +984,11 @@
       "privacy": "仅接收你粘贴的文字，不读取剪贴板，不把样本发往云端，也不会重新输入。样本随对应文字历史清理。",
       "saved": "样本已保存在本机，可在下方审阅待确认词条。大幅改写可能不会生成纠错建议。",
       "failed": "未能保存样本，请确认这条历史仍然存在后重试。"
+    },
+    "startup": {
+      "label": "登录 Windows 后自动启动",
+      "description": "独立于 Codex，在当前用户登录后启动到托盘。关闭设置窗口仍在后台运行，从托盘退出才结束。",
+      "failed": "无法确认或更改登录启动设置，请重试；不会显示为已成功开启。"
     }
   }
 }

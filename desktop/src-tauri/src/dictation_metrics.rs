@@ -3,6 +3,11 @@
 #[path = "dictation_metrics_policy.rs"]
 mod policy;
 
+#[path = "dictation_resources.rs"]
+mod resources;
+
+pub(crate) use policy::{claim_recording_cancel, stopped_without_audio_outcome};
+
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -18,6 +23,13 @@ const FILE_NAME: &str = "dictation-timings.json";
 const MAX_BYTES: u64 = 512 * 1024;
 
 #[derive(Clone, Serialize, Deserialize, specta::Type)]
+pub struct DictationResourceSnapshot {
+    pub stage: String,
+    pub working_set_bytes: Option<u64>,
+    pub process_cpu_ms: Option<u64>,
+}
+
+#[derive(Clone, Serialize, Deserialize, specta::Type)]
 pub struct DictationTiming {
     pub id: String,
     pub history_id: Option<i64>,
@@ -31,6 +43,8 @@ pub struct DictationTiming {
     pub outcome: String,
     #[serde(default)]
     pub cleanup_reason: Option<String>,
+    #[serde(default)]
+    pub resource_snapshots: Option<Vec<DictationResourceSnapshot>>,
 }
 
 pub fn now_ms() -> u64 {
@@ -59,6 +73,36 @@ impl DictationTiming {
             mode: mode.into(),
             outcome: "pending".into(),
             cleanup_reason: None,
+            resource_snapshots: None,
+        }
+    }
+
+    /// Called once when recording is released. Recording-only cancellations do
+    /// not have a processing interval and therefore carry no resource samples.
+    pub fn begin_resources(&mut self) {
+        if let Some(reading) = resources::read_current_process() {
+            self.resource_snapshots = Some(vec![DictationResourceSnapshot {
+                stage: "started".into(),
+                working_set_bytes: reading.working_set_bytes,
+                process_cpu_ms: reading.process_cpu_ms,
+            }]);
+        }
+    }
+
+    pub fn snapshot_resources(&mut self, stage: &str) {
+        let Some(snapshots) = self.resource_snapshots.as_mut() else {
+            return;
+        };
+        // Bound metadata even if a future caller accidentally repeats a stage.
+        if snapshots.len() >= 4 || snapshots.iter().any(|snapshot| snapshot.stage == stage) {
+            return;
+        }
+        if let Some(reading) = resources::read_current_process() {
+            snapshots.push(DictationResourceSnapshot {
+                stage: stage.into(),
+                working_set_bytes: reading.working_set_bytes,
+                process_cpu_ms: reading.process_cpu_ms,
+            });
         }
     }
 }
@@ -123,7 +167,8 @@ pub fn get_dictation_metrics(app: AppHandle) -> Result<Vec<DictationTiming>, Str
 
 /// Persistence and event delivery happen off the text injection path. Durations
 /// are captured before enqueueing, so disk/UI scheduling does not inflate them.
-pub fn record(app: &AppHandle, timing: DictationTiming) {
+pub fn record(app: &AppHandle, mut timing: DictationTiming) {
+    timing.snapshot_resources("finished");
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let persist = || -> Result<(), String> {
@@ -193,5 +238,14 @@ mod tests {
         let stored = serde_json::to_value(timing).unwrap();
         assert_eq!(stored["outcome"], "paste_failed");
         assert_eq!(stored["cleanup_reason"], "cleanup_timeout");
+    }
+
+    #[test]
+    fn old_metadata_without_resource_fields_remains_readable() {
+        let mut json = serde_json::to_value(DictationTiming::new("off")).unwrap();
+        json.as_object_mut().unwrap().remove("resource_snapshots");
+        let timing: DictationTiming = serde_json::from_value(json).unwrap();
+        assert!(timing.resource_snapshots.is_none());
+        assert_eq!(timing.mode, "off");
     }
 }

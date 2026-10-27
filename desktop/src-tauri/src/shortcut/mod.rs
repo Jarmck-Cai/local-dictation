@@ -791,12 +791,11 @@ pub fn change_start_hidden_setting(app: AppHandle, enabled: bool) -> Result<(), 
 #[tauri::command]
 #[specta::specta]
 pub fn change_autostart_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    // Persist only after the current-user login entry was applied successfully.
+    crate::autostart::set_autostart(&app, enabled)?;
     let mut settings = settings::get_settings(&app);
     settings.autostart_enabled = enabled;
     settings::write_settings(&app, settings);
-
-    // Apply the autostart setting immediately
-    crate::autostart::apply_autostart(&app, enabled);
 
     // Notify frontend
     let _ = app.emit(

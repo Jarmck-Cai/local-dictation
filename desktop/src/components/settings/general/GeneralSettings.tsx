@@ -8,6 +8,7 @@ import { DictationStatus } from "../DictationStatus";
 import { SenseVoiceModel } from "../SenseVoiceModel";
 import { HistorySettings } from "../history/HistorySettings";
 import { LatestDictationTiming } from "../DictationTiming";
+import { AutostartToggle } from "../AutostartToggle";
 
 export const GeneralSettings = () => {
   const { t } = useTranslation();
@@ -29,6 +30,7 @@ export const GeneralSettings = () => {
         <ShortcutInput shortcutId="toggle_cloud" grouped />
         <MicrophoneSelector grouped />
         <MuteWhileRecording grouped />
+        <AutostartToggle descriptionMode="inline" grouped />
       </SettingsGroup>
       <p className="px-4 text-xs text-text/50">{t("dictation.retention")}</p>
     </div>
