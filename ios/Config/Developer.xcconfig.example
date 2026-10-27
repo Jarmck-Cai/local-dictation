@@ -1,6 +1,0 @@
-// Copy to Developer.xcconfig. The script does this automatically.
-// Full keyboard/App Group installation requires a team with App Groups capability.
-DEVELOPMENT_TEAM =
-APP_BUNDLE_PREFIX = com.localdictation.prototype
-APP_GROUP_ID = group.com.localdictation.prototype.shared
-// Set APP_BUNDLE_PREFIX to a unique reverse-domain prefix for your team.

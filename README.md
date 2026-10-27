@@ -37,7 +37,7 @@ Windows 通用语音输入工具。本地 SenseVoice INT8 识别中英混合语�
 
 ## 开发状态
 
-iPhone 16 原型在 `ios/` 独立开发，包含离线中英混说、按钮启停与轻量键盘桥接。普通 Apple ID 可先安装应用内验证版；跨应用落字需要 App Groups 签名。安装和限制见 [iPhone 原型说明](ios/README.md)。此原型尚待真机验收，不属于 Windows 0.1.4 发布内容。
+iPhone 项目已迁移至独立仓库 [local-dictation-ios](https://github.com/Jarmck-Cai/local-dictation-ios)，单独管理源码、构建、测试和版本。Mac 安装步骤见该仓库的 README；本仓库继续管理 Windows 产品。
 
 0.1.4 增加登录启动、近期统计、资源快照及词库管理。实际识别质量、松键到屏幕落字时间及不同应用的输入兼容性仍需日常反馈，旧 Python 测量不能代表桌面端表现。资源数值仅来自当前进程的处理边界，内存不是连续采样峰值，CPU时间不是整机占用率。词库提取及整理护栏使用规则，无法保证发现所有术语或避免每次语义改写。
 

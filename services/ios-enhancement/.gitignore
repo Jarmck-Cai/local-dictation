@@ -1,5 +1,0 @@
-/.wrangler/
-/private-state/
-/wrangler.private.toml
-/.dev.vars
-/.dev.vars.*
