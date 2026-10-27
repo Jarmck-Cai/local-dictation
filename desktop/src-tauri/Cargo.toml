@@ -1,6 +1,6 @@
 [package]
 name = "handy"
-version = "0.1.7"
+version = "0.1.8"
 description = "Qingshu - Windows voice input"
 authors = ["cjpais"]
 edition = "2021"

@@ -1,12 +1,12 @@
 # Windows 内测版使用说明
 
-版本：轻述 0.1.7。基于固定 Handy v0.9.8，源码与许可在 `desktop/`。安装目录、开始菜单及程序文件仍沿用 Local Dictation，便于保留数据升级。
+版本：轻述 0.1.8。基于固定 Handy v0.9.8，源码与许可在 `desktop/`。安装目录、开始菜单及程序文件仍沿用 Local Dictation，便于保留数据升级。
 
 ## 开始使用
 
 安装后可从开始菜单的 Local Dictation 或桌面快捷方式启动。源码工作区也提供 `run-desktop.cmd`：依次查找项目内的 `installed/Local Dictation/`、当前用户默认安装目录，以及 `outputs/desktop/Local Dictation/` 中的程序。
 
-安装包为 `outputs/desktop/Local Dictation_0.1.7_x64-setup.exe`。同目录可能保留旧版，请按版本号选择。免安装目录中的 DLL 与 `resources` 必须和程序一起保留。
+安装包为 `outputs/desktop/Local Dictation_0.1.8_x64-setup.exe`。同目录可能保留旧版，请按版本号选择。免安装目录中的 DLL 与 `resources` 必须和程序一起保留。
 
 程序有托盘图标。关闭设置窗口后仍留在托盘；从托盘菜单退出才完全结束。首次启动会从附带资源准备本地模型并预加载，界面显示准备状态。
 

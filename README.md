@@ -4,7 +4,7 @@ Windows 通用语音输入工具。本地 SenseVoice INT8 识别中英混合语�
 
 按住 **F8** 说话，松键后将结果一次粘贴到当前光标位置，由使用者自行发送。适用于编辑器、终端、聊天等普通输入场景，无需按应用安装插件。
 
-当前版本 **0.1.7**，属于 Windows 内测版。基于 [Handy v0.9.8](https://github.com/cjpais/Handy/releases/tag/v0.9.8) 改造，桌面端使用 Tauri 2、Rust 和 React，运行不依赖 Python。来源与许可见 [UPSTREAM.md](desktop/UPSTREAM.md) 和 [LICENSE](LICENSE)。
+当前版本 **0.1.8**，属于 Windows 内测版。基于 [Handy v0.9.8](https://github.com/cjpais/Handy/releases/tag/v0.9.8) 改造，桌面端使用 Tauri 2、Rust 和 React，运行不依赖 Python。来源与许可见 [UPSTREAM.md](desktop/UPSTREAM.md) 和 [LICENSE](LICENSE)。
 
 ## 功能
 
@@ -42,6 +42,6 @@ Windows 通用语音输入工具。本地 SenseVoice INT8 识别中英混合语�
 
 ## 开发状态
 
-0.1.7 修复Windows合成文本句柄变化被误判为剪贴板备份失败的兼容性回归，并完善失败补救窗口。保留“轻述”紧凑界面及原安装、数据身份。观察到读取不能证明目标已显示文字，实际识别质量、松键到屏幕落字时间及不同应用的输入兼容性仍需日常反馈。资源数值仅来自当前进程的处理边界，内存不是连续采样峰值，CPU时间不是整机占用率。词库提取及整理护栏使用规则，无法保证发现所有术语或避免每次语义改写。
+0.1.8 修复Windows发布文本完成时正常增加的剪贴板版本号被误判为外部复制、从而在发键前中止输入的问题。保留“轻述”紧凑界面、失败补救窗口及原安装、数据身份。观察到读取不能证明目标已显示文字，实际识别质量、松键到屏幕落字时间及不同应用的输入兼容性仍需日常反馈。资源数值仅来自当前进程的处理边界，内存不是连续采样峰值，CPU时间不是整机占用率。词库提取及整理护栏使用规则，无法保证发现所有术语或避免每次语义改写。
 
 [版本记录](docs/releases.md) · [开发与推送流程](docs/development.md)

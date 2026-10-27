@@ -579,6 +579,11 @@ impl Provider for WinClipboard {
         }
         self.context.expected_sequence.set(self.current_sequence()?);
         self.held.take().ok_or(PUBLISH_FAILED)?.close()?;
+        // CloseClipboard can synthesize text formats and advance the sequence.
+        // The lease must describe the completed publication, not its open write
+        // phase. begin_injection still checks this sequence AND our unique owner
+        // under the next clipboard lock, so a newer user's copy is refused.
+        self.context.expected_sequence.set(self.current_sequence()?);
         self.began = Instant::now();
         Ok(())
     }
