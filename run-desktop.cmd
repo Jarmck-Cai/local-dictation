@@ -7,4 +7,6 @@ if not exist "%app%" (
   pause
   exit /b 1
 )
-start "" "%app%"
+rem Delegate launch to the Windows desktop shell, including when this script
+rem is invoked by a development tool whose child processes end with that tool.
+"%SystemRoot%\explorer.exe" "%app%"
