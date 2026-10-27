@@ -1,0 +1,37 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Local models, recordings and runtime data
+/models/
+/recordings/
+/data/
+/logs/
+/work/
+/outputs/
+
+# Common development artifacts; refine once the stack is selected
+.venv/
+.cache/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+node_modules/
+target/
+/bin/
+/obj/
+dist/
+.DS_Store
+Thumbs.db
+/desktop/src-tauri/resources/models/*.onnx
+/desktop/src-tauri/resources/models/sense-voice-int8/
+/desktop/src-tauri/transcribe-libs/
+/installed/
+
+# Private handoff, trial transcripts and local design history
+/docs/*
+!/docs/desktop-usage.md
+!/docs/validation.md
+!/docs/development.md
+!/docs/releases.md
