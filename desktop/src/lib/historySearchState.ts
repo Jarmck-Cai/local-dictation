@@ -1,4 +1,5 @@
 import type { HistoryEntry, HistoryUpdatePayload } from "../bindings";
+import type { VocabularyView } from "./dictationApi";
 import type {
   HistorySearchPage,
   HistorySearchRequest,
@@ -8,6 +9,7 @@ export interface CorrectionDraft {
   text: string;
   lastSubmitted: string | null;
   submitting?: boolean;
+  review?: VocabularyView;
 }
 
 export interface HistorySearchSnapshot {
@@ -53,6 +55,7 @@ export class HistorySearchState {
   private active = false;
   private dirty = false;
   private deleted = new Set<number>();
+  private reviewRequests = new Map<number, number>();
   private disposed = false;
 
   constructor(
@@ -191,6 +194,7 @@ export class HistorySearchState {
     }
     if (event.action === "deleted") {
       this.deleted.add(event.id);
+      this.reviewRequests.delete(event.id);
       const drafts = new Map(this.snapshot.drafts);
       drafts.delete(event.id);
       this.publish({
@@ -211,6 +215,7 @@ export class HistorySearchState {
     if (this.deleted.has(id)) return;
     const drafts = new Map(this.snapshot.drafts);
     drafts.set(id, {
+      ...drafts.get(id),
       text,
       lastSubmitted: drafts.get(id)?.lastSubmitted ?? null,
       submitting: drafts.get(id)?.submitting ?? false,
@@ -218,13 +223,15 @@ export class HistorySearchState {
     this.publish({ drafts });
   }
 
-  markSubmitted(id: number, sample: string): void {
+  markSubmitted(id: number, sample: string, review?: VocabularyView): void {
     if (this.deleted.has(id)) return;
+    this.reviewRequests.set(id, (this.reviewRequests.get(id) ?? 0) + 1);
     const drafts = new Map(this.snapshot.drafts);
     drafts.set(id, {
       ...drafts.get(id),
       text: drafts.get(id)?.text ?? "",
       lastSubmitted: sample,
+      review: review ?? drafts.get(id)?.review,
     });
     this.publish({ drafts });
   }
@@ -239,6 +246,40 @@ export class HistorySearchState {
       submitting,
     });
     this.publish({ drafts });
+  }
+
+  setReview(id: number, review: VocabularyView): void {
+    if (this.deleted.has(id)) return;
+    this.reviewRequests.set(id, (this.reviewRequests.get(id) ?? 0) + 1);
+    const drafts = new Map(this.snapshot.drafts);
+    drafts.set(id, {
+      text: "",
+      lastSubmitted: null,
+      ...drafts.get(id),
+      review,
+    });
+    this.publish({ drafts });
+  }
+
+  async refreshReview(
+    id: number,
+    fetchReview: () => Promise<VocabularyView>,
+  ): Promise<void> {
+    if (
+      this.disposed ||
+      this.deleted.has(id) ||
+      !this.snapshot.drafts.get(id)?.review
+    )
+      return;
+    const request = (this.reviewRequests.get(id) ?? 0) + 1;
+    this.reviewRequests.set(id, request);
+    try {
+      const review = await fetchReview();
+      if (!this.disposed && this.reviewRequests.get(id) === request)
+        this.setReview(id, review);
+    } catch {
+      // Keep the last successful result; a remount or vocabulary event retries.
+    }
   }
 
   toggleExpanded(id: number): void {

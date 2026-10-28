@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import {
   dictationApi,
   notifyVocabularyChanged,
+  VOCABULARY_REFRESH,
   type VocabularyView,
 } from "@/lib/dictationApi";
 import { SnapshotGuard } from "@/lib/dictationState";
@@ -16,8 +17,10 @@ interface CorrectionSampleProps {
   historyId: number;
   draft: CorrectionDraft | undefined;
   onTextChange: (text: string) => void;
-  onSubmitted: (sample: string) => void;
+  onSubmitted: (sample: string, review: VocabularyView) => void;
   onSubmittingChange: (submitting: boolean) => void;
+  onReviewChange: (review: VocabularyView) => void;
+  onReviewRefresh: () => void;
 }
 
 export const CorrectionSample = (props: CorrectionSampleProps) => {
@@ -30,13 +33,18 @@ const CorrectionSampleForm = ({
   onTextChange,
   onSubmitted,
   onSubmittingChange,
+  onReviewChange,
+  onReviewRefresh,
 }: CorrectionSampleProps) => {
   const { t } = useTranslation();
   const text = draft?.text ?? "";
   const lastSubmitted = draft?.lastSubmitted ?? null;
   const busy = draft?.submitting ?? false;
   const [failed, setFailed] = useState(false);
-  const [view, setView] = useState<VocabularyView | null>(null);
+  const view = draft?.review ?? null;
+  const refreshReviewRef = useRef(onReviewRefresh);
+  refreshReviewRef.current = onReviewRefresh;
+  const hasReview = view !== null;
   const guardRef = useRef<SnapshotGuard>();
   const characterCount = Array.from(text.trim()).length;
 
@@ -45,6 +53,15 @@ const CorrectionSampleForm = ({
     guardRef.current = guard;
     return () => guard.dispose();
   }, [historyId]);
+
+  useEffect(() => {
+    if (!hasReview) return;
+    // A candidate action may finish while this record is on another page.
+    const refresh = () => refreshReviewRef.current();
+    refresh();
+    window.addEventListener(VOCABULARY_REFRESH, refresh);
+    return () => window.removeEventListener(VOCABULARY_REFRESH, refresh);
+  }, [historyId, hasReview]);
 
   const submit = async () => {
     const guard = guardRef.current;
@@ -61,10 +78,7 @@ const CorrectionSampleForm = ({
     setFailed(false);
     try {
       const next = await dictationApi.submitCorrection(historyId, sample);
-      onSubmitted(sample);
-      if (guard.isCurrent(request)) {
-        setView(next);
-      }
+      onSubmitted(sample, next);
       notifyVocabularyChanged();
     } catch {
       if (guard.isCurrent(request)) setFailed(true);
@@ -144,7 +158,7 @@ const CorrectionSampleForm = ({
           </p>
           <VocabularyReview
             view={view}
-            onChange={setView}
+            onChange={onReviewChange}
             showEntries={false}
           />
         </div>

@@ -209,6 +209,56 @@ assert.equal(
   "edited while searching",
   "late submission ack cannot overwrite a newer draft",
 );
+const review = {
+  candidates: [
+    {
+      id: 91,
+      term: "SyntheticTerm",
+      replacement_from: null,
+      context: null,
+      source: "correction",
+      occurrences: 1,
+    },
+  ],
+  entries: [],
+};
+emptyPage.markSubmitted(31, "submitted sample", review);
+await emptyPage.refresh();
+assert.equal(
+  emptyPage.snapshot.drafts.get(31)?.review?.candidates[0].id,
+  91,
+  "submitted candidates survive list remounts",
+);
+emptyPage.setReview(31, { candidates: [], entries: [] });
+await emptyPage.setActive(false);
+await emptyPage.setActive(true);
+assert.equal(
+  emptyPage.snapshot.drafts.get(31)?.review?.candidates.length,
+  0,
+  "candidate review changes survive remounts",
+);
+let resolveReview!: (value: typeof review) => void;
+const staleReview = emptyPage.refreshReview(
+  31,
+  () =>
+    new Promise((resolve) => {
+      resolveReview = resolve;
+    }),
+);
+emptyPage.setReview(31, { candidates: [], entries: [] });
+resolveReview(review);
+await staleReview;
+assert.equal(
+  emptyPage.snapshot.drafts.get(31)?.review?.candidates.length,
+  0,
+  "late refresh cannot undo a candidate confirmation",
+);
+await emptyPage.refreshReview(31, async () => review);
+assert.equal(
+  emptyPage.snapshot.drafts.get(31)?.review?.candidates[0].id,
+  91,
+  "a remounted form can reconcile a submission or review completed while absent",
+);
 
 const shared = [row(5), row(4)];
 const beforeUsage = summarizeUsage(shared, [], 2000).records;

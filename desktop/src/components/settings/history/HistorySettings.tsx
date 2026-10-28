@@ -13,7 +13,11 @@ import {
 import { historyFinalText } from "@/lib/usageSummary";
 import { Button } from "../../ui/Button";
 import { copyToClipboard } from "./clipboard";
-import type { DictationTiming } from "@/lib/dictationApi";
+import {
+  dictationApi,
+  type DictationTiming,
+  type VocabularyView,
+} from "@/lib/dictationApi";
 import { DictationTimingDetails } from "../DictationTiming";
 import { CorrectionSample } from "./CorrectionSample";
 import { UsageOverview } from "../UsageOverview";
@@ -184,7 +188,13 @@ export const HistorySettings = () => {
                 onToggle={() => state.toggleExpanded(entry.id)}
                 draft={search.drafts.get(entry.id)}
                 onDraftChange={(text) => state.setDraftText(entry.id, text)}
-                onSubmitted={(sample) => state.markSubmitted(entry.id, sample)}
+                onSubmitted={(sample, review) =>
+                  state.markSubmitted(entry.id, sample, review)
+                }
+                onReviewChange={(review) => state.setReview(entry.id, review)}
+                onReviewRefresh={() =>
+                  void state.refreshReview(entry.id, dictationApi.getVocabulary)
+                }
                 onSubmittingChange={(submitting) =>
                   state.setSubmitting(entry.id, submitting)
                 }
@@ -251,6 +261,8 @@ const HistoryEntryCard = ({
   onDraftChange,
   onSubmitted,
   onSubmittingChange,
+  onReviewChange,
+  onReviewRefresh,
 }: {
   entry: HistoryEntry;
   onDelete: () => Promise<void>;
@@ -259,8 +271,10 @@ const HistoryEntryCard = ({
   onToggle: () => void;
   draft: CorrectionDraft | undefined;
   onDraftChange: (text: string) => void;
-  onSubmitted: (sample: string) => void;
+  onSubmitted: (sample: string, review: VocabularyView) => void;
   onSubmittingChange: (submitting: boolean) => void;
+  onReviewChange: (review: VocabularyView) => void;
+  onReviewRefresh: () => void;
 }) => {
   const { t, i18n } = useTranslation();
   const [copied, setCopied] = useState<"final" | "raw" | null>(null);
@@ -394,6 +408,8 @@ const HistoryEntryCard = ({
             onTextChange={onDraftChange}
             onSubmitted={onSubmitted}
             onSubmittingChange={onSubmittingChange}
+            onReviewChange={onReviewChange}
+            onReviewRefresh={onReviewRefresh}
           />
         )}
         <div className="flex items-center justify-between gap-4 border-t border-mid-gray/15 pt-3">
