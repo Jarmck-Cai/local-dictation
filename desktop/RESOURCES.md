@@ -18,3 +18,6 @@
 ## 本地中文分词
 
 极简词表使用 [jieba-rs 0.11.0](https://github.com/messense/jieba-rs/tree/v0.11.0) 的默认内置词典进行本地中文分词，不启用 TF-IDF 或 TextRank。代码及词典随依赖版本固定，校验值见 Cargo.lock；MIT 许可随应用保留在 `resources/jieba-rs-LICENSE.txt`。分词仅用于词表收集，不调用网络、不参与自动替换或云端提示，也不保证发现所有专名或判断识别正确性。
+## 安装包中的第三方许可
+
+分发安装包须同时保留 `resources/THIRD-PARTY-RESOURCES.md` 及其中列出的许可。SenseVoiceSmall官方模型卡指向FunASR模型许可1.1，不能把代码仓库MIT许可当作权重许可；原模型名称、作者及固定资源出处随包保留。Silero VAD v4、ONNX Runtime 1.24.2及jieba-rs 0.11.0分别保留官方MIT文本，ONNX还保留其ThirdPartyNotices。以上为资源出处和许可文本记录，不新增模型或改变识别链路。
