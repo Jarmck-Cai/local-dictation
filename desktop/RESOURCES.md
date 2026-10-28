@@ -14,3 +14,7 @@
 配套 SenseVoice 权重与词表经本机逐字节核对，均与早先 Python/sherpa 验证所用文件一致。此前方案以压缩包152MB与权重239MB误判不同导出的文字已废止。推理运行时、VAD策略和后处理仍不同，不能把旧性能测量当作桌面程序的保证；本次仅校验文件，没有新运行识别。
 
 原生 ONNX 使用四线程共享池、一线程跨算子调度、关闭空闲自旋及遥测。Windows 构建关闭 Vulkan 和动态 Whisper 后端，仅展示 SenseVoice。
+
+## 本地中文分词
+
+极简词表使用 [jieba-rs 0.11.0](https://github.com/messense/jieba-rs/tree/v0.11.0) 的默认内置词典进行本地中文分词，不启用 TF-IDF 或 TextRank。代码及词典随依赖版本固定，校验值见 Cargo.lock；MIT 许可随应用保留在 `resources/jieba-rs-LICENSE.txt`。分词仅用于词表收集，不调用网络、不参与自动替换或云端提示，也不保证发现所有专名或判断识别正确性。
