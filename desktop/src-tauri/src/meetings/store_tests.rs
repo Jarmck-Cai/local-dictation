@@ -3,6 +3,235 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn legacy_interruption_is_upgraded_before_processing_changes_its_status() {
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    writer.append(packet(0)).unwrap();
+    writer
+        .finish(MeetingStatus::Recorded, Some(1350), None)
+        .unwrap();
+    let path = f.root.join("synthetic/manifest.json");
+    let mut old: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("capture_error");
+    old.as_object_mut().unwrap().remove("capture_complete");
+    old["status"] = serde_json::json!("interrupted");
+    old["error"] = serde_json::json!("meeting_legacy_capture_failed");
+    fs::write(path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let editor = f.store.edit("synthetic").unwrap();
+    assert_eq!(editor.manifest().capture_complete, Some(false));
+    assert_eq!(
+        editor.manifest().capture_error.as_deref(),
+        Some("meeting_legacy_capture_failed")
+    );
+    editor
+        .finish(MeetingStatus::Complete, Some(1350), None)
+        .unwrap();
+    let retried = f.store.edit("synthetic").unwrap();
+    assert_eq!(retried.manifest().capture_complete, Some(false));
+    assert_eq!(
+        retried.manifest().capture_error.as_deref(),
+        Some("meeting_legacy_capture_failed")
+    );
+}
+
+#[test]
+fn recovering_only_a_stale_processing_job_keeps_capture_complete() {
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    writer.append(packet(0)).unwrap();
+    writer
+        .finish(MeetingStatus::Recorded, Some(1350), None)
+        .unwrap();
+    f.store
+        .edit("synthetic")
+        .unwrap()
+        .finish(MeetingStatus::Processing, Some(1350), None)
+        .unwrap();
+    let recovered = f.store.recover("synthetic").unwrap();
+    assert_eq!(recovered.capture_complete, Some(true));
+    assert!(recovered.capture_error.is_none());
+    let editor = f.store.edit("synthetic").unwrap();
+    assert_eq!(editor.manifest().capture_complete, Some(true));
+    assert!(editor.manifest().capture_error.is_none());
+}
+
+#[test]
+fn recovery_marks_lost_committed_audio_even_after_a_healthy_stop() {
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    writer.append(packet(0)).unwrap();
+    writer.append(packet(1)).unwrap();
+    let complete = writer
+        .finish(MeetingStatus::Recorded, Some(2600), None)
+        .unwrap();
+    let chunk = &complete.chunks[0];
+    OpenOptions::new()
+        .write(true)
+        .open(f.root.join("synthetic").join(&chunk.file))
+        .unwrap()
+        .set_len(chunk.committed_bytes - 1)
+        .unwrap();
+    let recovered = f.store.recover("synthetic").unwrap();
+    assert_eq!(recovered.capture_complete, Some(false));
+    assert_eq!(
+        recovered.capture_error.as_deref(),
+        Some("meeting_capture_recovered")
+    );
+    assert_eq!(recovered.chunks[0].packets, 1);
+}
+
+#[test]
+fn interrupted_partial_write_stays_recoverable_after_finish() {
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    writer.append(packet(0)).unwrap();
+    let (index, file) = writer.open[0].as_mut().unwrap();
+    let committed = writer.manifest.chunks[*index].committed_bytes;
+    // Emulate a filesystem accepting part of a packet before returning I/O failure.
+    file.write_all(&[7; 17]).unwrap();
+    writer.failed = true;
+    let stopped = writer
+        .finish(
+            MeetingStatus::Interrupted,
+            Some(1350),
+            Some("meeting_io".into()),
+        )
+        .unwrap();
+    assert!(!stopped.chunks[0].finalized);
+    let recovered = f.store.recover("synthetic").unwrap();
+    assert_eq!(recovered.chunks[0].committed_bytes, committed);
+    assert_eq!(
+        fs::metadata(f.root.join("synthetic").join(&recovered.chunks[0].file))
+            .unwrap()
+            .len(),
+        committed
+    );
+}
+
+#[test]
+fn capture_failure_provenance_survives_processing_and_retry_statuses() {
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    writer.append(packet(0)).unwrap();
+    writer
+        .finish(
+            MeetingStatus::Interrupted,
+            Some(1350),
+            Some("meeting_capture_device_inactive".into()),
+        )
+        .unwrap();
+    let mut processing = f.store.edit("synthetic").unwrap();
+    processing
+        .checkpoint(MeetingStatus::Processing, Some(1350), None)
+        .unwrap();
+    let completed = processing
+        .finish(MeetingStatus::Complete, Some(1350), None)
+        .unwrap();
+    assert_eq!(
+        completed.capture_error.as_deref(),
+        Some("meeting_capture_device_inactive")
+    );
+    let retried = f
+        .store
+        .edit("synthetic")
+        .unwrap()
+        .finish(
+            MeetingStatus::Failed,
+            Some(1350),
+            Some("meeting_transcription_failed".into()),
+        )
+        .unwrap();
+    assert_eq!(retried.capture_error, completed.capture_error);
+    assert_eq!(
+        retried.error.as_deref(),
+        Some("meeting_transcription_failed")
+    );
+}
+
+#[test]
+fn recovery_preserves_the_committed_stop_boundary_before_drained_packet_end() {
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    writer.append(packet(0)).unwrap(); // Packet spans QPC100..1350.
+    writer
+        .finish(MeetingStatus::Recorded, Some(1000), None)
+        .unwrap();
+    let recovered = f.store.recover("synthetic").unwrap();
+    assert_eq!(recovered.end_qpc_100ns, Some(1000));
+    assert_eq!(recovered.chunks[0].end_qpc_100ns, 1350);
+}
+
+#[test]
+fn processing_lease_keeps_transcript_and_raw_together_until_explicit_delete() {
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    writer.append(packet(0)).unwrap();
+    let original = writer
+        .finish(MeetingStatus::Recorded, Some(1350), None)
+        .unwrap();
+    assert!(f.store.read_transcript("synthetic").unwrap().is_none());
+    let mut processing = f.store.edit("synthetic").unwrap();
+    assert_eq!(f.store.delete("synthetic"), Err("meeting_active"));
+    processing
+        .checkpoint(MeetingStatus::Processing, Some(1350), None)
+        .unwrap();
+    let document = br#"{"id":"synthetic","complete":true,"segments":[],"warnings":[]}"#;
+    processing.write_transcript(document).unwrap();
+    assert!(f
+        .store
+        .prune(original.created_at_unix_secs + 8 * 86400)
+        .unwrap()
+        .is_empty());
+    processing
+        .finish(MeetingStatus::Complete, Some(1350), None)
+        .unwrap();
+    assert_eq!(
+        f.store.read_transcript("synthetic").unwrap().unwrap(),
+        document
+    );
+    f.store.delete("synthetic").unwrap();
+    assert!(!f.root.join("synthetic").exists());
+}
+
+#[test]
+fn processing_edits_refuse_active_or_unrecovered_audio() {
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    writer.append(packet(0)).unwrap();
+    assert!(matches!(f.store.edit("synthetic"), Err("meeting_active")));
+    drop(writer);
+    assert!(matches!(
+        f.store.edit("synthetic"),
+        Err("meeting_needs_recovery")
+    ));
+    f.store.recover("synthetic").unwrap();
+    assert!(f.store.edit("synthetic").is_ok());
+}
+
+#[test]
+fn invalid_transcript_cannot_replace_the_previous_document() {
+    let f = Fixture::new();
+    f.writer()
+        .finish(MeetingStatus::Recorded, Some(100), None)
+        .unwrap();
+    let mut editor = f.store.edit("synthetic").unwrap();
+    let original = br#"{"id":"synthetic","complete":false,"segments":[]}"#;
+    editor.write_transcript(original).unwrap();
+    assert_eq!(
+        editor.write_transcript(br#"{"id":"another"}"#),
+        Err("meeting_transcript")
+    );
+    assert_eq!(
+        editor.write_transcript(b"not JSON"),
+        Err("meeting_transcript")
+    );
+    assert_eq!(
+        f.store.read_transcript("synthetic").unwrap().unwrap(),
+        original
+    );
+}
 struct Fixture {
     root: PathBuf,
     store: MeetingStore,

@@ -6,6 +6,7 @@ use std::sync::mpsc::TrySendError;
 
 const MAX_PACKET_BYTES: usize = 4 * 1024 * 1024;
 const SILENT: u32 = 2;
+const STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn parse_wave_format(bytes: &[u8]) -> Result<AudioFormat, String> {
     const INVALID: &str = "meeting_capture_format_invalid";
@@ -160,6 +161,158 @@ fn qpc_to_100ns(ticks: i64, frequency: i64) -> Result<u64, String> {
         .map_err(|_| "meeting_capture_clock_invalid".into())
 }
 
+enum StartGate {
+    Start,
+    Commit(u64),
+}
+
+enum Notice {
+    Ready,
+    Started,
+    Committed,
+    Failed(String),
+}
+
+fn coordinate_startup(
+    receiver: &std::sync::mpsc::Receiver<Notice>,
+    gates: &[std::sync::mpsc::SyncSender<StartGate>],
+    stop: &AtomicBool,
+    now: impl FnOnce() -> Result<u64, String>,
+) -> Result<u64, String> {
+    if gates.len() != 2 {
+        return Err("meeting_capture_startup_cancelled".into());
+    }
+    let wait = |accept: fn(&Notice) -> bool, timeout: &'static str| -> Result<(), String> {
+        for _ in 0..2 {
+            match receiver.recv_timeout(STARTUP_TIMEOUT) {
+                Ok(Notice::Failed(code)) => return Err(code),
+                Ok(notice) if accept(&notice) => {}
+                _ => return Err(timeout.into()),
+            }
+        }
+        if stop.load(Ordering::Acquire) {
+            return Err("meeting_capture_startup_cancelled".into());
+        }
+        Ok(())
+    };
+    wait(
+        |notice| matches!(notice, Notice::Ready),
+        "meeting_capture_initialize_timeout",
+    )?;
+    for gate in gates {
+        gate.send(StartGate::Start)
+            .map_err(|_| "meeting_capture_startup_cancelled")?;
+    }
+    wait(
+        |notice| matches!(notice, Notice::Started),
+        "meeting_capture_start_timeout",
+    )?;
+    // This interval starts only after BOTH engines are already running. Thread
+    // scheduling or slow Start calls therefore cannot invent a silent prefix.
+    let common_start = now()?;
+    if common_start == 0 {
+        return Err("meeting_capture_interval_invalid".into());
+    }
+    for gate in gates {
+        gate.send(StartGate::Commit(common_start))
+            .map_err(|_| "meeting_capture_startup_cancelled")?;
+    }
+    wait(
+        |notice| matches!(notice, Notice::Committed),
+        "meeting_capture_commit_timeout",
+    )?;
+    Ok(common_start)
+}
+
+fn complete_interval(
+    start_qpc_100ns: u64,
+    stop_qpc_100ns: Option<u64>,
+    workers: Result<(), String>,
+    sender: &CaptureSender,
+    stop: &AtomicBool,
+) -> Result<u64, String> {
+    // Commit a healthy common end only after both workers confirmed health,
+    // stopped and drained successfully. Failure and Drop never use this path.
+    workers?;
+    let end = stop_qpc_100ns.ok_or("meeting_capture_cancelled")?;
+    if start_qpc_100ns == 0 || end < start_qpc_100ns {
+        return Err("meeting_capture_interval_invalid".into());
+    }
+    for source in [Source::Microphone, Source::Remote] {
+        deliver_event(
+            sender,
+            CaptureEvent::Heartbeat {
+                source,
+                qpc_100ns: end,
+            },
+            stop,
+        )?;
+    }
+    Ok(end)
+}
+
+fn verify_health_continuity(previous: u64, observed: u64) -> Result<(), String> {
+    // A 1s heartbeat plus 100ms polling leaves a bounded scheduling allowance.
+    // SourceHealth stores an interval envelope, so a stalled worker or sleep
+    // must fail instead of filling an arbitrarily long hole with healthy HB.
+    if observed
+        .checked_sub(previous)
+        .filter(|gap| *gap <= 15_000_000)
+        .is_none()
+    {
+        return Err("meeting_capture_health_gap".into());
+    }
+    Ok(())
+}
+
+// Serialize only clock publication and the shared stop boundary. Native health
+// checks and packet reads stay outside this short lock. A heartbeat sampled
+// after the common end must never precede the terminal heartbeat in the queue.
+fn publish_heartbeat(
+    sender: &CaptureSender,
+    stop: &AtomicBool,
+    boundary: &std::sync::Mutex<()>,
+    source: Source,
+    previous: u64,
+    now: impl FnOnce() -> Result<u64, String>,
+) -> Result<Option<u64>, String> {
+    let _boundary = boundary
+        .lock()
+        .map_err(|_| "meeting_capture_boundary_lock")?;
+    if stop.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    let observed = now()?;
+    verify_health_continuity(previous, observed)?;
+    deliver_event(
+        sender,
+        CaptureEvent::Heartbeat {
+            source,
+            qpc_100ns: observed,
+        },
+        stop,
+    )?;
+    Ok(Some(observed))
+}
+
+fn request_stop_boundary(
+    stop: &AtomicBool,
+    boundary: &std::sync::Mutex<()>,
+    now: impl FnOnce() -> Result<u64, String>,
+) -> Result<Option<u64>, String> {
+    let _boundary = boundary
+        .lock()
+        .map_err(|_| "meeting_capture_boundary_lock")?;
+    if stop.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    let end = now()?;
+    Ok(stop
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+        .then_some(end))
+}
+
 #[cfg(target_os = "windows")]
 pub use native::{list_devices, now_qpc_100ns, start_capture, CaptureHandle};
 
@@ -167,7 +320,10 @@ pub use native::{list_devices, now_qpc_100ns, start_capture, CaptureHandle};
 pub struct CaptureHandle;
 #[cfg(not(target_os = "windows"))]
 impl CaptureHandle {
-    pub fn stop(self) -> Result<(), String> {
+    pub fn start_qpc_100ns(&self) -> u64 {
+        0
+    }
+    pub fn stop(self) -> Result<u64, String> {
         Err("meeting_capture_platform_unsupported".into())
     }
 }
@@ -215,7 +371,6 @@ mod native {
     use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
     use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
-    const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
     const HEARTBEAT_PERIOD: Duration = Duration::from_secs(1);
     const MICROPHONE_STALL: Duration = Duration::from_secs(5);
     const MAX_DRAIN_PACKETS: usize = 128;
@@ -558,20 +713,15 @@ mod native {
         }
     }
 
-    enum Notice {
-        Ready,
-        Started,
-        Failed(String),
-    }
-
     fn worker(
         id: String,
         source: Source,
         epoch: u32,
         sender: &CaptureSender,
         stop: &AtomicBool,
+        boundary: &std::sync::Mutex<()>,
         notices: &Sender<Notice>,
-        start: Receiver<bool>,
+        start: Receiver<StartGate>,
     ) -> Result<(), String> {
         let _com = ComApartment::new()?;
         let mut stream = NativeStream::open(&id, source)?;
@@ -579,16 +729,35 @@ mod native {
             .send(Notice::Ready)
             .map_err(|_| "meeting_capture_startup_cancelled")?;
         match start.recv_timeout(STARTUP_TIMEOUT) {
-            Ok(true) if !stop.load(Ordering::Acquire) => {}
+            Ok(StartGate::Start) if !stop.load(Ordering::Acquire) => {}
             _ => return Ok(()),
         }
         stream.start()?;
         notices
             .send(Notice::Started)
             .map_err(|_| "meeting_capture_startup_cancelled")?;
+        let common_start = match start.recv_timeout(STARTUP_TIMEOUT) {
+            Ok(StartGate::Commit(qpc)) if !stop.load(Ordering::Acquire) => qpc,
+            _ => return Err("meeting_capture_startup_cancelled".into()),
+        };
+        stream.health()?;
+        let committed_qpc = now_qpc_100ns()?;
+        verify_health_continuity(common_start, committed_qpc)?;
+        deliver_event(
+            sender,
+            CaptureEvent::Heartbeat {
+                source,
+                qpc_100ns: common_start,
+            },
+            stop,
+        )?;
+        notices
+            .send(Notice::Committed)
+            .map_err(|_| "meeting_capture_startup_cancelled")?;
         let mut sequence = 0;
         let mut last_packet = Instant::now();
         let mut last_heartbeat = Instant::now();
+        let mut last_health_qpc = committed_qpc;
         let result = (|| {
             while !stop.load(Ordering::Acquire) {
                 let status = unsafe { WaitForSingleObject(stream.event.0, 100) };
@@ -603,30 +772,43 @@ mod native {
                 }
                 if last_heartbeat.elapsed() >= HEARTBEAT_PERIOD {
                     stream.health()?;
-                    deliver_event(
+                    if let Some(observed_qpc) = publish_heartbeat(
                         sender,
-                        CaptureEvent::Heartbeat {
-                            source,
-                            qpc_100ns: now_qpc_100ns()?,
-                        },
                         stop,
-                    )?;
+                        boundary,
+                        source,
+                        last_health_qpc,
+                        now_qpc_100ns,
+                    )? {
+                        last_health_qpc = observed_qpc;
+                    }
                     last_heartbeat = Instant::now();
                 }
             }
             Ok(())
         })();
+        // Health must be observed while this engine is still running, after the
+        // shared stop request. The caller commits the end only if BOTH workers
+        // subsequently return success; raw packets beyond that end stay intact.
+        let health_result = if result.is_ok() {
+            stream
+                .health()
+                .and_then(|_| now_qpc_100ns())
+                .and_then(|observed_qpc| verify_health_continuity(last_health_qpc, observed_qpc))
+        } else {
+            Ok(())
+        };
         let stop_result = stream.stop();
         // On failure preserve the first error; on ordinary stop keep the tail.
         // A consumer still drains the channel until stop() joins both workers.
-        let tail_result = if result.is_ok() && stop_result.is_ok() {
+        let tail_result = if result.is_ok() && health_result.is_ok() && stop_result.is_ok() {
             stream
                 .drain(source, epoch, &mut sequence, sender, stop, true)
                 .map(|_| ())
         } else {
             Ok(())
         };
-        result.and(stop_result).and(tail_result)
+        result.and(health_result).and(stop_result).and(tail_result)
     }
 
     /// Owns both worker threads. The shared stop flag becomes true on any error;
@@ -635,6 +817,9 @@ mod native {
     pub struct CaptureHandle {
         stop: Arc<AtomicBool>,
         workers: Vec<JoinHandle<Result<(), String>>>,
+        sender: CaptureSender,
+        start_qpc_100ns: u64,
+        boundary: Arc<std::sync::Mutex<()>>,
     }
     impl CaptureHandle {
         fn join(&mut self) -> Result<(), String> {
@@ -650,8 +835,17 @@ mod native {
             }
             first_error.map_or(Ok(()), Err)
         }
-        pub fn stop(mut self) -> Result<(), String> {
-            self.join()
+        pub fn start_qpc_100ns(&self) -> u64 {
+            self.start_qpc_100ns
+        }
+
+        pub fn stop(mut self) -> Result<u64, String> {
+            // External cancellation/failure already set stop, and cannot be
+            // retroactively certified healthy by choosing a later endpoint.
+            let requested_end = request_stop_boundary(&self.stop, &self.boundary, now_qpc_100ns);
+            let workers = self.join();
+            let end = requested_end?;
+            complete_interval(self.start_qpc_100ns, end, workers, &self.sender, &self.stop)
         }
     }
     impl Drop for CaptureHandle {
@@ -673,6 +867,9 @@ mod native {
         let mut handle = CaptureHandle {
             stop: stop.clone(),
             workers: Vec::with_capacity(2),
+            sender: sender.clone(),
+            start_qpc_100ns: 0,
+            boundary: Arc::new(std::sync::Mutex::new(())),
         };
         let (notices, receiver) = channel();
         let mut gates = Vec::with_capacity(2);
@@ -684,6 +881,7 @@ mod native {
             let sender = sender.clone();
             let stop = stop.clone();
             let notices = notices.clone();
+            let boundary = handle.boundary.clone();
             let epoch = config.epoch;
             let thread = thread::Builder::new()
                 .name(
@@ -695,7 +893,9 @@ mod native {
                 )
                 .spawn(move || {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        worker(id, source, epoch, &sender, &stop, &notices, start)
+                        worker(
+                            id, source, epoch, &sender, &stop, &boundary, &notices, start,
+                        )
                     }))
                     .unwrap_or_else(|_| Err("meeting_capture_thread_panicked".into()));
                     if let Err(code) = &result {
@@ -721,34 +921,13 @@ mod native {
             }
         }
         drop(notices);
-        let startup = (|| {
-            for _ in 0..2 {
-                match receiver.recv_timeout(STARTUP_TIMEOUT) {
-                    Ok(Notice::Ready) => {}
-                    Ok(Notice::Failed(code)) => return Err(code),
-                    _ => return Err("meeting_capture_initialize_timeout".into()),
-                }
+        match coordinate_startup(&receiver, &gates, &stop, now_qpc_100ns) {
+            Ok(common_start) => handle.start_qpc_100ns = common_start,
+            Err(error) => {
+                drop(gates);
+                let join_result = handle.join();
+                return Err(join_result.err().unwrap_or(error));
             }
-            for gate in &gates {
-                gate.send(true)
-                    .map_err(|_| "meeting_capture_startup_cancelled")?;
-            }
-            for _ in 0..2 {
-                match receiver.recv_timeout(STARTUP_TIMEOUT) {
-                    Ok(Notice::Started) => {}
-                    Ok(Notice::Failed(code)) => return Err(code),
-                    _ => return Err("meeting_capture_start_timeout".into()),
-                }
-            }
-            if stop.load(Ordering::Acquire) {
-                return Err("meeting_capture_startup_cancelled".into());
-            }
-            Ok(())
-        })();
-        if let Err(error) = startup {
-            drop(gates);
-            let join_result = handle.join();
-            return Err(join_result.err().unwrap_or(error));
         }
         Ok(handle)
     }

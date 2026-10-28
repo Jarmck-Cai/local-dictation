@@ -105,6 +105,12 @@ pub struct MeetingManifest {
     pub status: MeetingStatus,
     /// Static error code only; never audio, transcript, or device identifiers.
     pub error: Option<String>,
+    /// Original capture failure survives processing status changes and retries.
+    #[serde(default)]
+    pub capture_error: Option<String>,
+    /// None denotes legacy metadata; processing must preserve capture provenance.
+    #[serde(default)]
+    pub capture_complete: Option<bool>,
     pub chunks: Vec<ChunkMeta>,
     #[serde(default)]
     pub source_health: Vec<SourceHealth>,

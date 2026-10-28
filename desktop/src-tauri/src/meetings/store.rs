@@ -16,10 +16,36 @@ pub type StoreResult<T> = Result<T, &'static str>;
 pub const MAX_PACKET_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 const MAGIC: &[u8; 8] = b"QSMEET01";
 const RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static ACTIVE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+fn preserve_capture_provenance(manifest: &mut MeetingManifest) {
+    if manifest.capture_error.is_some() {
+        manifest.capture_complete = Some(false);
+    }
+    if manifest.capture_complete.is_none() {
+        manifest.capture_complete = Some(!matches!(
+            manifest.status,
+            MeetingStatus::Recording | MeetingStatus::Paused | MeetingStatus::Interrupted
+        ));
+    }
+    if manifest.capture_complete == Some(false) && manifest.capture_error.is_none() {
+        manifest.capture_error = Some(
+            if matches!(
+                manifest.status,
+                MeetingStatus::Recording | MeetingStatus::Paused | MeetingStatus::Interrupted
+            ) {
+                manifest.error.clone()
+            } else {
+                None
+            }
+            .unwrap_or_else(|| "meeting_capture_recovered".into()),
+        );
+    }
+}
 
 #[derive(Clone)]
 pub struct MeetingStore {
@@ -319,6 +345,8 @@ impl MeetingStore {
             devices,
             status: MeetingStatus::Recording,
             error: None,
+            capture_error: None,
+            capture_complete: None,
             chunks: vec![],
             source_health: vec![],
         };
@@ -333,6 +361,52 @@ impl MeetingStore {
             failed: false,
             stats: WriterStats::default(),
         })
+    }
+    /// Claim an existing recording for processing; its lease also prevents expiry.
+    pub fn edit(&self, id: &str) -> StoreResult<MeetingWriter> {
+        let directory = self.directory(id)?;
+        let lease = SessionLease::acquire(&directory)?;
+        let mut manifest = self.load(id)?;
+        if matches!(
+            manifest.status,
+            MeetingStatus::Recording | MeetingStatus::Paused
+        ) || manifest.chunks.iter().any(|chunk| !chunk.finalized)
+        {
+            return Err("meeting_needs_recovery");
+        }
+        preserve_capture_provenance(&mut manifest);
+        Ok(MeetingWriter {
+            store: self.clone(),
+            directory,
+            manifest,
+            open: [None, None],
+            _lease: lease,
+            last_checkpoint: Instant::now(),
+            failed: false,
+            stats: WriterStats::default(),
+        })
+    }
+    /// Read a bounded optional transcript without opening any audio data.
+    pub fn read_transcript(&self, id: &str) -> StoreResult<Option<Vec<u8>>> {
+        let path = self.directory(id)?.join("transcript.json");
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("meeting_io"),
+            Ok(_) => (),
+        }
+        if regular(&path)?.len() > MAX_TRANSCRIPT_BYTES {
+            return Err("meeting_transcript");
+        }
+        let mut bytes = Vec::new();
+        File::open(path)
+            .map_err(|_| "meeting_io")?
+            .take(MAX_TRANSCRIPT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "meeting_io")?;
+        if bytes.len() as u64 > MAX_TRANSCRIPT_BYTES {
+            return Err("meeting_transcript");
+        }
+        Ok(Some(bytes))
     }
     pub fn load(&self, id: &str) -> StoreResult<MeetingManifest> {
         let directory = self.directory(id)?;
@@ -431,9 +505,14 @@ impl MeetingStore {
         let _lease = SessionLease::acquire(&directory)?;
         let mut manifest = self.load(id)?;
         // Scan every chunk without mutation. A later read I/O failure must not truncate an earlier file.
+        let mut lost_committed_audio = false;
         for meta in &mut manifest.chunks {
             let path = directory.join(&meta.file);
-            *meta = scanner(&path, meta)?;
+            let recovered = scanner(&path, meta)?;
+            lost_committed_audio |= recovered.committed_bytes < meta.committed_bytes
+                || recovered.frames < meta.frames
+                || recovered.packets < meta.packets;
+            *meta = recovered;
         }
         // All scans succeeded. Pre-open every destination before the first truncation.
         let mut destinations = Vec::with_capacity(manifest.chunks.len());
@@ -451,14 +530,28 @@ impl MeetingStore {
                 .map_err(|_| "meeting_io")?;
             file.sync_all().map_err(|_| "meeting_io")?;
         }
+        if lost_committed_audio {
+            manifest.capture_complete = Some(false);
+            manifest
+                .capture_error
+                .get_or_insert_with(|| "meeting_capture_recovered".into());
+        }
+        preserve_capture_provenance(&mut manifest);
         manifest.status = MeetingStatus::Interrupted;
         manifest.error = Some("meeting_recovered".into());
-        manifest.end_qpc_100ns = manifest
+        let recovered_end = manifest
             .chunks
             .iter()
             .filter(|c| c.packets != 0)
             .map(|c| c.end_qpc_100ns)
             .max();
+        // A successful stop can precede the tail drained from native buffers.
+        // Recovery retains that committed user boundary while preserving raw packets.
+        manifest.end_qpc_100ns = match (manifest.end_qpc_100ns, recovered_end) {
+            (Some(committed), Some(recovered)) => Some(committed.min(recovered)),
+            (Some(committed), None) => Some(committed),
+            (None, recovered) => recovered,
+        };
         atomic_manifest(&directory, &manifest)?;
         Ok(manifest)
     }
@@ -474,8 +567,15 @@ impl MeetingStore {
                 .and_then(|s| s.to_str())
                 .ok_or("meeting_path")?;
             if name != "manifest.json"
+                && name != "transcript.json"
                 && name != ".recording.lock"
                 && !chunk_name(name)
+                && !name
+                    .strip_prefix(".transcript-")
+                    .and_then(|s| s.strip_suffix(".tmp"))
+                    .is_some_and(|s| {
+                        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+                    })
                 && !(name.starts_with(".manifest-")
                     && name.ends_with(".tmp")
                     && name[10..name.len() - 4]
@@ -517,6 +617,44 @@ impl MeetingStore {
     }
 }
 impl MeetingWriter {
+    /// Atomically replace this meeting's transcript while retaining the lease.
+    pub fn write_transcript(&mut self, bytes: &[u8]) -> StoreResult<()> {
+        if self.failed {
+            return Err("meeting_writer_failed");
+        }
+        if bytes.len() as u64 > MAX_TRANSCRIPT_BYTES {
+            return Err("meeting_transcript");
+        }
+        let document: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| "meeting_transcript")?;
+        if document.get("id").and_then(|v| v.as_str()) != Some(self.manifest.id.as_str()) {
+            return Err("meeting_transcript");
+        }
+        self.store.directory(&self.manifest.id)?;
+        let target = self.directory.join("transcript.json");
+        if target.exists() {
+            regular(&target)?;
+        }
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary = self
+            .directory
+            .join(format!(".transcript-{}-{sequence}.tmp", std::process::id()));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|_| "meeting_io")?;
+            file.write_all(bytes).map_err(|_| "meeting_io")?;
+            file.sync_all().map_err(|_| "meeting_io")?;
+            drop(file);
+            atomic_replace(&temporary, &target)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+        result
+    }
     pub fn checkpoint_if_due(&mut self) -> StoreResult<bool> {
         if self.last_checkpoint.elapsed() < Duration::from_secs(1) {
             return Ok(false);
@@ -578,7 +716,6 @@ impl MeetingWriter {
         result
     }
     fn append_valid(&mut self, packet: CapturePacket) -> StoreResult<()> {
-        self.store.directory(&self.manifest.id)?;
         let source = source_index(packet.source);
         let bytes = 40 + packet.data.len() as u64;
         let rollover = self.open[source].as_ref().is_some_and(|(index, _)| {
@@ -592,6 +729,10 @@ impl MeetingWriter {
             self.close_chunk(source)?;
         }
         if self.open[source].is_none() {
+            // Existing packets use an already-open handle. Validate every
+            // ancestor whenever a new path is opened and at each checkpoint,
+            // without repeating filesystem metadata queries for every packet.
+            self.store.directory(&self.manifest.id)?;
             let index = self.manifest.chunks.len();
             if index >= 100_000 {
                 return Err("meeting_chunk_limit");
@@ -698,8 +839,31 @@ impl MeetingWriter {
         if self.failed && status != MeetingStatus::Interrupted && status != MeetingStatus::Failed {
             return Err("meeting_writer_failed");
         }
-        self.close_chunk(0)?;
-        self.close_chunk(1)?;
+        if status == MeetingStatus::Interrupted && self.manifest.capture_error.is_none() {
+            self.manifest.capture_error = Some(
+                error
+                    .clone()
+                    .unwrap_or_else(|| "meeting_recording_interrupted".into()),
+            );
+        }
+        if status == MeetingStatus::Interrupted || self.failed {
+            self.manifest.capture_complete = Some(false);
+        } else if status == MeetingStatus::Recorded {
+            self.manifest.capture_complete = Some(true);
+        }
+        if self.failed {
+            // A failed write can leave bytes beyond committed_bytes. Keep an
+            // explicit recovery marker instead of blessing a partial tail.
+            for slot in &mut self.open {
+                if let Some((index, file)) = slot.take() {
+                    self.manifest.chunks[index].finalized = false;
+                    file.sync_all().map_err(|_| "meeting_io")?;
+                }
+            }
+        } else {
+            self.close_chunk(0)?;
+            self.close_chunk(1)?;
+        }
         self.checkpoint(status, end_qpc_100ns, error)?;
         Ok(self.manifest.clone())
     }
