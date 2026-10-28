@@ -13,6 +13,7 @@ import { SnapshotGuard } from "@/lib/dictationState";
 import { Button } from "../ui/Button";
 import { SettingsGroup } from "../ui/SettingsGroup";
 import { LearnedTermRow } from "./LearnedTermRow";
+import { CollectedTerms } from "./CollectedTerms";
 
 const validationErrors = new Set([
   "vocabulary_term_invalid",
@@ -190,7 +191,7 @@ export const VocabularyReview = ({
   );
 };
 
-export const VocabularyLearning = () => {
+const ConfirmedVocabularyManagement = () => {
   const { t } = useTranslation();
   const [view, setView] = useState<VocabularyView | null>(null);
   const [corrections, setCorrections] =
@@ -321,5 +322,23 @@ export const VocabularyLearning = () => {
         )}
       </div>
     </SettingsGroup>
+  );
+};
+
+export const VocabularyLearning = () => {
+  const { t } = useTranslation();
+  return (
+    <div className="space-y-4">
+      <CollectedTerms />
+      <details className="rounded-lg border border-mid-gray/15 p-3">
+        <summary className="cursor-pointer text-sm font-medium">
+          {t("dictation.collectedTerms.confirmedTitle")}
+        </summary>
+        <p className="text-xs text-text/60 my-3">
+          {t("dictation.collectedTerms.confirmedHint")}
+        </p>
+        <ConfirmedVocabularyManagement />
+      </details>
+    </div>
   );
 };
