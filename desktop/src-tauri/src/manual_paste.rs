@@ -13,6 +13,14 @@ use tauri::{AppHandle, Emitter, Manager};
 mod binding_conflicts;
 #[path = "manual_paste_keyboard.rs"]
 mod keyboard;
+#[cfg(any(target_os = "windows", test))]
+#[path = "keyboard_state_policy.rs"]
+mod keyboard_state_policy;
+#[cfg(target_os = "windows")]
+#[path = "keyboard_state_windows.rs"]
+mod keyboard_state_windows;
+#[cfg(target_os = "windows")]
+pub(crate) use keyboard_state_windows::Prepared as PreparedKeyboard;
 #[path = "manual_paste_policy.rs"]
 mod policy;
 use policy::{GestureLatch, ManualOutcome, ReleaseDecision, ReleaseWait};
@@ -23,15 +31,15 @@ const RELEASE_POLL: Duration = Duration::from_millis(10);
 
 /// At most one release waiter for a held gesture, including recovery after
 /// its first deadline. Old waiters cannot clear a newer gesture's watcher.
-struct ReleaseWatch(u64);
+struct ReleaseWatch(u64, AppHandle);
 impl ReleaseWatch {
-    fn begin(ticket: u64) -> Option<Self> {
+    fn begin(ticket: u64, app: AppHandle) -> Option<Self> {
         MANUAL_PRESS
             .begin_release_watch(ticket)
-            .then(|| Self(ticket))
+            .then(|| Self(ticket, app))
     }
     fn consume(self, started: Instant) {
-        consume_until_release(started, self.0);
+        consume_until_release(&self.1, started, self.0);
     }
 }
 impl Drop for ReleaseWatch {
@@ -104,14 +112,20 @@ pub fn handle_shortcut(app: &AppHandle, is_pressed: bool) {
         // A backend's combo-release can mean only a modifier came up. Keep
         // the gesture consumed until the aggregate physical keyboard is up.
         if let Some(ticket) = MANUAL_PRESS.current() {
-            if matches!(any_keyboard_key_down(), Ok(false)) {
+            if matches!(
+                any_keyboard_key_down_for_settings(&settings::get_settings(app)),
+                Ok(false)
+            ) {
                 MANUAL_PRESS.release(ticket);
             }
         }
         return;
     }
     let Some(ticket) = MANUAL_PRESS.claim() else {
-        if let Some(watch) = MANUAL_PRESS.current().and_then(ReleaseWatch::begin) {
+        if let Some(watch) = MANUAL_PRESS
+            .current()
+            .and_then(|ticket| ReleaseWatch::begin(ticket, app.clone()))
+        {
             // Recovery only: even after a prior deadline, this edge cannot
             // become a paste. A full release re-arms the next deliberate press.
             emit(app, "release_to_retry", None);
@@ -119,7 +133,7 @@ pub fn handle_shortcut(app: &AppHandle, is_pressed: bool) {
         }
         return;
     };
-    let Some(watch) = ReleaseWatch::begin(ticket) else {
+    let Some(watch) = ReleaseWatch::begin(ticket, app.clone()) else {
         return;
     };
     let started = Instant::now();
@@ -158,7 +172,7 @@ pub fn handle_shortcut(app: &AppHandle, is_pressed: bool) {
         let result = policy::execute(
             is_cancelled,
             || {
-                wait_for_release(started, is_cancelled)?;
+                wait_for_release(&app, started, is_cancelled)?;
                 MANUAL_PRESS.release(ticket);
                 Ok(())
             },
@@ -175,7 +189,7 @@ pub fn handle_shortcut(app: &AppHandle, is_pressed: bool) {
                 if is_cancelled() {
                     return Err("cancelled".into());
                 }
-                match any_keyboard_key_down() {
+                match any_keyboard_key_down_for_settings(&settings::get_settings(&app)) {
                     Ok(false) => crate::clipboard::paste_latest_preserving_clipboard(
                         body,
                         app.clone(),
@@ -200,13 +214,14 @@ fn consume_rejected_gesture(started: Instant, watch: ReleaseWatch) {
     tauri::async_runtime::spawn_blocking(move || watch.consume(started));
 }
 
-fn consume_until_release(started: Instant, ticket: u64) {
-    if MANUAL_PRESS.current() == Some(ticket) && wait_for_release(started, || false).is_ok() {
+fn consume_until_release(app: &AppHandle, started: Instant, ticket: u64) {
+    if MANUAL_PRESS.current() == Some(ticket) && wait_for_release(app, started, || false).is_ok() {
         MANUAL_PRESS.release(ticket);
     }
 }
 
 fn wait_for_release(
+    app: &AppHandle,
     started: Instant,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<(), ManualOutcome> {
@@ -216,14 +231,75 @@ fn wait_for_release(
         if cancelled {
             return Err(ManualOutcome::Cancelled);
         }
-        let any_key_down = any_keyboard_key_down().map_err(|code| match code {
-            "unsupported" => ManualOutcome::Unsupported,
-            _ => ManualOutcome::KeyboardUnavailable,
-        })?;
+        let any_key_down = any_keyboard_key_down_for_settings(&settings::get_settings(app))
+            .map_err(|code| match code {
+                "unsupported" => ManualOutcome::Unsupported,
+                _ => ManualOutcome::KeyboardUnavailable,
+            })?;
         match wait.poll(Instant::now(), any_key_down, cancelled) {
             ReleaseDecision::Ready => return Ok(()),
             ReleaseDecision::Cancelled => return Err(ManualOutcome::Cancelled),
             ReleaseDecision::TimedOut => return Err(ManualOutcome::KeysHeld),
+            ReleaseDecision::Pending => std::thread::sleep(RELEASE_POLL),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn start_keyboard_state_observer() -> Result<(), &'static str> {
+    keyboard_state_windows::start()
+}
+
+#[cfg(target_os = "windows")]
+fn bound_high_keys(settings: &settings::AppSettings) -> u16 {
+    keyboard_state_policy::configured_mask(
+        settings
+            .bindings
+            .values()
+            .map(|binding| binding.current_binding.as_str()),
+    )
+}
+
+pub(crate) fn any_keyboard_key_down_for_settings(
+    settings: &settings::AppSettings,
+) -> Result<bool, &'static str> {
+    #[cfg(target_os = "windows")]
+    {
+        match keyboard_state_windows::prepare(bound_high_keys(settings)) {
+            Ok(_) => Ok(false),
+            Err("keys_held") => Ok(true),
+            Err(code) => Err(code),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = settings;
+        any_keyboard_key_down()
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn prepare_keyboard(app: &AppHandle) -> Result<PreparedKeyboard, String> {
+    keyboard_state_windows::prepare(bound_high_keys(&settings::get_settings(app)))
+        .map_err(String::from)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn wait_before_automatic(
+    app: &AppHandle,
+    cancelled: impl Fn() -> bool,
+) -> Result<(), String> {
+    let wait = ReleaseWait::new(Instant::now(), Duration::from_millis(400));
+    loop {
+        if cancelled() {
+            return Err(keyboard::CANCELLED.into());
+        }
+        let held = any_keyboard_key_down_for_settings(&settings::get_settings(app))
+            .map_err(String::from)?;
+        match wait.poll(Instant::now(), held, cancelled()) {
+            ReleaseDecision::Ready => return Ok(()),
+            ReleaseDecision::Cancelled => return Err(keyboard::CANCELLED.into()),
+            ReleaseDecision::TimedOut => return Err("keys_held".into()),
             ReleaseDecision::Pending => std::thread::sleep(RELEASE_POLL),
         }
     }
@@ -253,10 +329,13 @@ pub(crate) fn any_keyboard_key_down() -> Result<bool, &'static str> {
 
 /// Shared protected-paste chord, invoked inside with_enigo's locked closure
 /// immediately before its only key attempt.
+#[cfg(target_os = "windows")]
 pub(crate) fn send_paste_chord(
     enigo: &mut enigo::Enigo,
     method: settings::PasteMethod,
     is_cancelled: impl Fn() -> bool,
+    app: &AppHandle,
+    prepared: &PreparedKeyboard,
 ) -> Result<(), String> {
     use enigo::Keyboard;
     let chord = match method {
@@ -284,7 +363,12 @@ pub(crate) fn send_paste_chord(
     keyboard::inject_if_released(
         &mut Adapter(enigo),
         chord,
-        any_keyboard_key_down,
+        || {
+            keyboard_state_windows::fast_check(
+                prepared,
+                bound_high_keys(&settings::get_settings(app)),
+            )
+        },
         is_cancelled,
         || std::thread::sleep(Duration::from_millis(100)),
     )

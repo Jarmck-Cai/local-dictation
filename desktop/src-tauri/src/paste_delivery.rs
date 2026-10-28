@@ -6,6 +6,8 @@ pub fn paste_error_code(error: &str) -> &'static str {
     match error {
         "manual_paste_restore_failed" => "clipboard_restore_failed",
         "automatic_paste_unconfirmed" => "input_unconfirmed",
+        "keys_held" => "keys_held",
+        "keyboard_unavailable" => "keyboard_unavailable",
         _ => "failed",
     }
 }
@@ -83,6 +85,15 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
+    fn keyboard_gate_rejections_have_distinct_public_codes() {
+        assert_eq!(paste_error_code("keys_held"), "keys_held");
+        assert_eq!(
+            paste_error_code("keyboard_unavailable"),
+            "keyboard_unavailable"
+        );
+    }
+
+    #[test]
     fn error_events_distinguish_restore_failure_without_exposing_internal_details() {
         assert_eq!(
             paste_error_code("manual_paste_restore_failed"),
@@ -93,8 +104,9 @@ mod tests {
             "input_unconfirmed"
         );
         for error in [
-            "keys_held",
             "manual_paste_backup_failed",
+            "keys_held: private synthetic key detail",
+            "keyboard_unavailable: private synthetic diagnostic",
             "private synthetic diagnostic",
             "",
         ] {

@@ -54,10 +54,13 @@ wrappers = "\n".join(function(OVERLAY, signature) for signature in (
     "pub fn hide_recording_overlay(",
 ))
 notice_path = (ROOT / "desktop/src-tauri/src/overlay_notice.rs").as_posix()
+delivery_path = (ROOT / "desktop/src-tauri/src/paste_delivery.rs").as_posix()
 harness = '''#![allow(dead_code)]
 use std::sync::Mutex;
 #[path = "NOTICE_PATH"]
 mod overlay_notice;
+#[path = "DELIVERY_PATH"]
+mod paste_delivery;
 use overlay_notice::OverlayNotice;
 static OVERLAY_NOTICE: Mutex<OverlayNotice> = Mutex::new(OverlayNotice::new());
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -114,6 +117,16 @@ fn scenario(name: &str, style: OverlayStyle, supports_streaming: bool,
     println!("CASE\\t{}\\t{}\\t{}\\t{}\\t{}", name, emitted[0].1,
         rendered.state.unwrap_or("hidden"), rendered.update.failures, rendered.update.capture_ready);
 }
+fn paste_error_scenario(name: &str, error: &str) {
+    *OVERLAY_NOTICE.lock().unwrap() = OverlayNotice::new();
+    let app = AppHandle { settings: Settings { overlay_style: OverlayStyle::None }, emitted: Mutex::new(vec![]) };
+    OVERLAY_NOTICE.lock().unwrap().report_paste_error(paste_delivery::paste_error_code(error));
+    let rendered = sync_overlay_on_main(&app);
+    assert_eq!(rendered.update.failures, OverlayNotice::PASTE);
+    assert!(rendered.update.failure_generation > 0);
+    println!("PASTE\\t{}\\t{}\\t{}", name, rendered.update.paste_error_code,
+        rendered.state.unwrap_or("hidden"));
+}
 fn main() {
     scenario("none-recording", OverlayStyle::None, false, None, false, false, false, false);
     scenario("none-recording-fault", OverlayStyle::None, false, None, true, false, false, false);
@@ -124,8 +137,13 @@ fn main() {
     scenario("completed-fault", OverlayStyle::Minimal, false, Some("processing"), true, true, false, false);
     scenario("streaming", OverlayStyle::Live, true, None, false, false, false, false);
     scenario("live-without-streaming", OverlayStyle::Live, false, None, false, false, false, false);
+    paste_error_scenario("held-key", "keys_held");
+    paste_error_scenario("state-unavailable", "keyboard_unavailable");
+    paste_error_scenario("restore-failed", "manual_paste_restore_failed");
+    paste_error_scenario("unconfirmed", "automatic_paste_unconfirmed");
+    paste_error_scenario("unknown", "private synthetic detail");
 }
-'''.replace("NOTICE_PATH", notice_path).replace("SNAPSHOT", snapshot).replace("WRAPPERS", wrappers).replace("SYNC", sync).replace("ENTRY", entry)
+'''.replace("NOTICE_PATH", notice_path).replace("DELIVERY_PATH", delivery_path).replace("SNAPSHOT", snapshot).replace("WRAPPERS", wrappers).replace("SYNC", sync).replace("ENTRY", entry)
 OUTPUTS.mkdir(exist_ok=True)
 source = OUTPUTS / "overlay-wiring-harness.rs"
 executable = OUTPUTS / "overlay-wiring-check.exe"
@@ -133,10 +151,14 @@ source.write_text(harness, encoding="utf-8")
 subprocess.run(["rustc", "--edition=2021", str(source), "-o", str(executable)], check=True)
 run = subprocess.run([str(executable)], check=True, text=True, capture_output=True)
 cases = []
+paste_errors = []
 for line in run.stdout.splitlines():
     if line.startswith("CASE\t"):
         _, name, state, native, failures, ready = line.split("\t")
         cases.append({"name": name, "state": state, "native": native, "failures": int(failures), "ready": ready == "true"})
+    elif line.startswith("PASTE\t"):
+        _, name, code, native = line.split("\t")
+        paste_errors.append({"name": name, "code": code, "native": native})
 
 consumer_start = CONSUMER.index('  const recording = state === "recording"')
 consumer_end = CONSUMER.index("  const shortcut =", consumer_start)
@@ -172,3 +194,50 @@ for entry in cases:
 if failures:
     raise AssertionError("\n".join(failures))
 print(f"All {len(cases)} actual overlay entry/producer/consumer checks passed; native scheduling and React hooks were not started.")
+
+# Transpile the real frontend whitelist; no React/Tauri runtime is loaded. The
+# same parsed code drives the existing toast and recovery-card translation keys.
+error_program = '''
+const fs = require("node:fs");
+const path = require("node:path");
+const Module = require("node:module");
+const fixture = JSON.parse(fs.readFileSync(0, "utf8"));
+const ts = require(path.join(fixture.root, "desktop/node_modules/typescript/lib/typescript.js"));
+const filename = path.join(fixture.root, "desktop/src/lib/dictationState.ts");
+const compiled = ts.transpileModule(fs.readFileSync(filename, "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+}).outputText;
+const implementation = new Module(filename);
+implementation._compile(compiled, filename);
+process.stdout.write(JSON.stringify(fixture.cases.map((entry) => {
+    const code = implementation.exports.pasteErrorCode({ code: entry.code });
+    const translated = {};
+    for (const language of ["en", "zh"]) {
+        const strings = JSON.parse(fs.readFileSync(path.join(fixture.root,
+            "desktop/src/i18n/locales", language, "translation.json"), "utf8"));
+        translated[language] = code === "failed"
+            ? { title: strings.errors.pasteFailedTitle, description: strings.errors.pasteFailed }
+            : strings.dictation.autoPaste[code];
+    }
+    return { ...entry, frontend: code, translated };
+})));
+'''
+result = subprocess.run(["node", "-e", error_program], input=json.dumps({"root": str(ROOT), "cases": paste_errors}),
+                        check=True, text=True, encoding="utf-8", capture_output=True)
+paste_errors = json.loads(result.stdout)
+expected_errors = {
+    "held-key": "keys_held",
+    "state-unavailable": "keyboard_unavailable",
+    "restore-failed": "clipboard_restore_failed",
+    "unconfirmed": "input_unconfirmed",
+    "unknown": "failed",
+}
+assert {entry["name"] for entry in paste_errors} == set(expected_errors)
+for entry in paste_errors:
+    assert entry["native"] == "error", entry
+    assert entry["code"] == entry["frontend"] == expected_errors[entry["name"]], json.dumps(entry)
+    for language in ("en", "zh"):
+        message = entry["translated"].get(language)
+        assert message and message.get("title") and message.get("description"), entry
+    print(f"PASS paste-{entry['name']}: native={entry['code']}, frontend={entry['frontend']}, translated=en/zh")
+print(f"All {len(paste_errors)} actual paste-code/overlay/frontend whitelist checks passed; no clipboard or keyboard API executed.")

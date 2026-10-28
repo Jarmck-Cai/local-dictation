@@ -820,11 +820,31 @@ fn paste_automatic_windows(
         if is_cancelled() {
             return Ok(false);
         }
+        match crate::manual_paste::wait_before_automatic(app_handle, is_cancelled) {
+            Ok(()) => {}
+            Err(code) if code == "manual_paste_cancelled" => return Ok(false),
+            Err(code) => return Err(code),
+        }
+        let prepared = std::cell::RefCell::new(None);
         // Acquire the keyboard lock before borrowing the clipboard: an Enigo
         // wait must not sit between the transaction's lease check and its chord.
-        match crate::protected_paste::run_automatic(
+        match crate::protected_paste::run_with_preflight(
             text,
-            || crate::manual_paste::send_paste_chord(enigo, paste_method, is_cancelled),
+            || {
+                *prepared.borrow_mut() = Some(crate::manual_paste::prepare_keyboard(app_handle)?);
+                Ok(())
+            },
+            || {
+                let prepared = prepared.borrow();
+                let prepared = prepared.as_ref().ok_or("keyboard_unavailable")?;
+                crate::manual_paste::send_paste_chord(
+                    enigo,
+                    paste_method,
+                    is_cancelled,
+                    app_handle,
+                    prepared,
+                )
+            },
             is_cancelled,
             copy_result,
         ) {
@@ -976,15 +996,39 @@ pub(crate) fn paste_latest_preserving_clipboard(
         }
         _ => return Err("manual_paste_unsupported_method".into()),
     };
-    crate::protected_paste::run(
-        &text,
-        || {
-            with_enigo(&app, |enigo| {
-                crate::manual_paste::send_paste_chord(enigo, method, &is_cancelled)
-            })
-        },
-        &is_cancelled,
-    )
+    #[cfg(target_os = "windows")]
+    {
+        // No mutex wait may sit between the final lease check and its chord.
+        // A new copy while waiting here becomes the later snapshot instead.
+        with_enigo(&app, |enigo| {
+            let prepared = std::cell::RefCell::new(None);
+            crate::protected_paste::run_with_preflight(
+                &text,
+                || {
+                    *prepared.borrow_mut() = Some(crate::manual_paste::prepare_keyboard(&app)?);
+                    Ok(())
+                },
+                || {
+                    let prepared = prepared.borrow();
+                    let prepared = prepared.as_ref().ok_or("keyboard_unavailable")?;
+                    crate::manual_paste::send_paste_chord(
+                        enigo,
+                        method,
+                        &is_cancelled,
+                        &app,
+                        prepared,
+                    )
+                },
+                &is_cancelled,
+                false,
+            )
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (method, is_cancelled);
+        Err("manual_paste_unavailable".into())
+    }
 }
 
 #[cfg(test)]

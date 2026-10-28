@@ -40,3 +40,14 @@ pub(crate) fn run_automatic(
 ) -> Result<bool, String> {
     platform::run_automatic(text, inject, is_cancelled, copy_result)
 }
+
+#[cfg(target_os = "windows")]
+pub(crate) fn run_with_preflight(
+    text: &str,
+    preflight: impl FnOnce() -> Result<(), String>,
+    inject: impl FnOnce() -> Result<(), String>,
+    is_cancelled: impl Fn() -> bool,
+    copy_result: bool,
+) -> Result<bool, String> {
+    platform::run_with_preflight(text, preflight, inject, is_cancelled, copy_result)
+}

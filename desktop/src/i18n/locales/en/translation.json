@@ -1075,6 +1075,14 @@
       }
     },
     "autoPaste": {
+      "keys_held": {
+        "title": "Keys are still held",
+        "description": "A key was detected as held, so no text was inserted. Release all keys, place the cursor in the target field, then use your manual paste shortcut to continue. You can also copy the result."
+      },
+      "keyboard_unavailable": {
+        "title": "Keyboard state unavailable",
+        "description": "The system could not provide the keyboard state, so no text was inserted. Try your manual paste shortcut again later, or copy the result."
+      },
       "clipboard_restore_failed": {
         "title": "Clipboard restoration incomplete",
         "description": "The original clipboard could not be fully restored. Please check your clipboard; the result remains in Recent transcripts."

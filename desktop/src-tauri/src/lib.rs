@@ -1019,6 +1019,13 @@ pub fn run(cli_args: CliArgs) {
                 return Ok(());
             }
 
+            // Only the interactive desktop observes extended function-key state.
+            // Audio-only maintenance and headless transcription returned above.
+            #[cfg(target_os = "windows")]
+            if let Err(code) = manual_paste::start_keyboard_state_observer() {
+                log::warn!("Extended function-key state observer unavailable: {code}");
+            }
+
             // Create main window programmatically so we can set data_directory
             // for portable mode (redirects WebView2 cache to portable Data dir)
             let mut win_builder =

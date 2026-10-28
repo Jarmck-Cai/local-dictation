@@ -1075,6 +1075,14 @@
       }
     },
     "autoPaste": {
+      "keys_held": {
+        "title": "按键尚未松开",
+        "description": "检测到按键尚未松开，本次尚未输入。松开全部按键后，将光标放在目标输入框，使用补贴快捷键继续；也可复制结果。"
+      },
+      "keyboard_unavailable": {
+        "title": "无法读取按键状态",
+        "description": "系统未能提供按键状态，本次尚未输入。可稍后使用补贴快捷键继续，或复制结果。"
+      },
       "clipboard_restore_failed": {
         "title": "剪贴板恢复未完成",
         "description": "未能完整恢复原剪贴板，请检查剪贴板；结果仍保留在最近转录。"

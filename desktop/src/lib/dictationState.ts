@@ -2,12 +2,22 @@ import type { CloudStatus, DictationTiming } from "./dictationApi";
 
 export function pasteErrorCode(
   payload: unknown,
-): "clipboard_restore_failed" | "input_unconfirmed" | "failed" {
+):
+  | "clipboard_restore_failed"
+  | "input_unconfirmed"
+  | "keys_held"
+  | "keyboard_unavailable"
+  | "failed" {
   const code =
     typeof payload === "object" && payload !== null
       ? (payload as { code?: unknown }).code
       : undefined;
-  if (code === "clipboard_restore_failed" || code === "input_unconfirmed")
+  if (
+    code === "clipboard_restore_failed" ||
+    code === "input_unconfirmed" ||
+    code === "keys_held" ||
+    code === "keyboard_unavailable"
+  )
     return code;
   return "failed";
 }

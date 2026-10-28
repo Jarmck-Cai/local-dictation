@@ -793,3 +793,21 @@ pub(super) fn run_automatic(
     let mut clipboard = WinClipboard::new(copy_result).map_err(String::from)?;
     policy::transact_with_retention(&mut clipboard, text, inject, is_cancelled, copy_result)
 }
+
+pub(super) fn run_with_preflight(
+    text: &str,
+    preflight: impl FnOnce() -> Result<(), String>,
+    inject: impl FnOnce() -> Result<(), String>,
+    is_cancelled: impl Fn() -> bool,
+    copy_result: bool,
+) -> Result<bool, String> {
+    let mut clipboard = WinClipboard::new(copy_result).map_err(String::from)?;
+    policy::transact_with_preflight(
+        &mut clipboard,
+        text,
+        preflight,
+        inject,
+        is_cancelled,
+        copy_result,
+    )
+}

@@ -76,6 +76,8 @@ struct SyntheticDesktop {
     copy_at: Option<u64>, copy_on_settle: bool, ownership_lost: bool,
     retained: bool, published_text: String,
     settle_wait: u64, events: Vec<(&'static str, &'static str)>,
+    preflight_wait: u64,
+    copy_on_input_lock: bool,
 }
 thread_local! { static DESKTOP: RefCell<SyntheticDesktop> = RefCell::new(SyntheticDesktop::default()); }
 fn advance(delta: u64) {
@@ -123,6 +125,9 @@ impl AppHandle {
     }
     fn clipboard(&self) -> FakeClipboard { FakeClipboard }
     fn try_state<T: 'static>(&self) -> Option<&T> {
+        DESKTOP.with(|s| { let mut s=s.borrow_mut(); if s.copy_on_input_lock {
+            s.copy_on_input_lock=false; s.clipboard="synthetic-new-user-copy".into(); s.ownership_lost=true;
+        }});
         if let Some(barrier) = &self.lock_barrier { barrier.wait(); }
         let state: &dyn std::any::Any = &*self.enigo; state.downcast_ref()
     }
@@ -157,12 +162,31 @@ mod paste_tx {
 '''
 
 SAFE_ADAPTERS = r'''
-mod settings { pub(crate) use super::PasteMethod; }
+mod settings {
+    pub(crate) use super::PasteMethod;
+    pub(crate) fn get_settings(app: &super::AppHandle) -> super::Settings { super::get_settings(app) }
+}
 mod manual_paste {
     use super::*;
     use crate::keyboard;
     fn any_keyboard_key_down() -> Result<bool, &'static str> {
         Ok(DESKTOP.with(|s| s.borrow().keys_held))
+    }
+    pub(crate) struct PreparedKeyboard;
+    fn bound_high_keys(_: &Settings) -> u16 { 0 }
+    pub(crate) fn wait_before_automatic(_: &AppHandle, cancelled: impl Fn() -> bool) -> Result<(), String> {
+        if cancelled() { return Err("manual_paste_cancelled".into()); }
+        if any_keyboard_key_down().unwrap() { advance(400); return Err("keys_held".into()); }
+        Ok(())
+    }
+    pub(crate) fn prepare_keyboard(_: &AppHandle) -> Result<PreparedKeyboard, String> {
+        advance(DESKTOP.with(|s| s.borrow().preflight_wait));
+        if any_keyboard_key_down().unwrap() { Err("keys_held".into()) } else { Ok(PreparedKeyboard) }
+    }
+    mod keyboard_state_windows {
+        pub(super) fn fast_check(_: &super::PreparedKeyboard, _: u16) -> Result<bool, &'static str> {
+            super::any_keyboard_key_down()
+        }
     }
     // REAL_MANUAL_CHORD
 }
@@ -229,11 +253,11 @@ mod protected_paste {
                 })
             }
         }
-        pub(super) fn run_automatic(text: &str, inject: impl FnOnce() -> Result<(), String>,
+        pub(super) fn run_with_preflight(text: &str, preflight: impl FnOnce() -> Result<(), String>, inject: impl FnOnce() -> Result<(), String>,
             cancelled: impl Fn() -> bool, copy: bool) -> Result<bool, String> {
             DESKTOP.with(|s| s.borrow_mut().protected_calls += 1);
             let mut provider = FakeProvider { original: String::new(), text: String::new(), began: 0 };
-            crate::protected_policy::transact_with_retention(&mut provider, text, inject, cancelled, copy)
+            crate::protected_policy::transact_with_preflight(&mut provider, text, preflight, inject, cancelled, copy)
         }
     }
     // REAL_AUTOMATIC_WRAPPER
@@ -316,6 +340,38 @@ mod automatic_tests {
             DESKTOP.with(|s| { let s = s.borrow(); assert!(s.chord_times.is_empty());
                 assert_eq!(s.legacy_writes, 0); assert_eq!(s.clipboard, "synthetic-previous-transcript"); });
         }
+    }
+    #[test]
+    fn new_copy_during_keyboard_preflight_is_rechecked_before_any_chord() {
+        let app = app(500, PasteMethod::CtrlV, false);
+        DESKTOP.with(|s| { let mut s = s.borrow_mut(); s.preflight_wait = 60; s.copy_at = Some(30); });
+        assert_eq!(paste_cancellable("synthetic-current".into(), app, cancelled),
+            Err("manual_paste_clipboard_changed".into()));
+        DESKTOP.with(|s| { let s = s.borrow(); assert!(s.chord_times.is_empty());
+            assert_eq!(s.clipboard, "synthetic-new-user-copy"); assert_eq!(s.legacy_writes, 0); });
+    }
+    #[test]
+    fn cancellation_during_keyboard_preflight_is_settled_without_a_chord() {
+        let app = app(500, PasteMethod::CtrlV, false);
+        DESKTOP.with(|s| { let mut s = s.borrow_mut(); s.preflight_wait = 60; s.cancel_at = Some(30); });
+        assert_eq!(paste_cancellable("synthetic-current".into(), app, cancelled), Ok(false));
+        DESKTOP.with(|s| { let s = s.borrow(); assert!(s.chord_times.is_empty());
+            assert_eq!(s.clipboard, "synthetic-previous-transcript"); });
+    }
+    #[test]
+    fn manual_input_lock_is_acquired_before_clipboard_backup_publication_and_lease() {
+        let app=app(500,PasteMethod::CtrlV,false);
+        DESKTOP.with(|s|s.borrow_mut().copy_on_input_lock=true);
+        assert_eq!(paste_latest_preserving_clipboard("synthetic-current".into(),app,cancelled),Ok(true));
+        DESKTOP.with(|s| { let s=s.borrow(); assert_eq!(s.received,vec!["synthetic-current"]);
+            assert_eq!(s.clipboard,"synthetic-new-user-copy"); assert_eq!(s.chord_times.len(),1); });
+    }
+    #[test]
+    fn manual_new_copy_during_preflight_is_rejected_before_any_chord() {
+        let app=app(500,PasteMethod::CtrlV,false);
+        DESKTOP.with(|s| {let mut s=s.borrow_mut();s.preflight_wait=60;s.copy_at=Some(30);});
+        assert_eq!(paste_latest_preserving_clipboard("synthetic-current".into(),app,cancelled),Err("manual_paste_clipboard_changed".into()));
+        DESKTOP.with(|s| {let s=s.borrow();assert!(s.chord_times.is_empty());assert_eq!(s.clipboard,"synthetic-new-user-copy");});
     }
     #[test]
     fn cancellation_after_chord_restores_without_retry() {
@@ -473,6 +529,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--characterize", action="store_true")
     parser.add_argument("--legacy", action="store_true")
+    parser.add_argument("--late-preflight", action="store_true", help="Model the old unsafe placement after the lease gate; regression must fail")
     parser.add_argument("--filter", default="")
     args = parser.parse_args()
     source = ROOT / "desktop/src-tauri/src"
@@ -486,7 +543,7 @@ def main() -> int:
     }
     baseline = args.legacy or args.characterize
     if not baseline:
-        selected["clipboard.rs"].append("paste_automatic_windows")
+        selected["clipboard.rs"].extend(["paste_automatic_windows", "paste_latest_preserving_clipboard"])
         selected["actions.rs"] = ["emit_paste_error"]
     functions = {}
     manifest = {"synthetic_only": True, "source_functions": {},
@@ -520,14 +577,18 @@ def main() -> int:
         keyboard = (source / "manual_paste_keyboard.rs").as_posix()
         protected = (source / "protected_paste_policy.rs").as_posix()
         chord = function((source / "manual_paste.rs").read_text(encoding="utf-8"), "send_paste_chord")
-        wrapper = function((source / "protected_paste.rs").read_text(encoding="utf-8"), "run_automatic")
+        wrapper = function((source / "protected_paste.rs").read_text(encoding="utf-8"), "run_with_preflight")
         for name, body in [("manual_paste.rs::send_paste_chord", chord),
-                           ("protected_paste.rs::run_automatic", wrapper)]:
+                           ("protected_paste.rs::run_with_preflight", wrapper)]:
             manifest["source_functions"][name] = hashlib.sha256(body.encode()).hexdigest()
         safe_adapters = (f'\n#[path = "{keyboard}"] mod keyboard;\n'
                          f'#[path = "{protected}"] mod protected_policy;\n'
                          + SAFE_ADAPTERS.replace("// REAL_MANUAL_CHORD", chord.replace("std::thread::sleep", "crate::virtual_clock::sleep"))
                          .replace("// REAL_AUTOMATIC_WRAPPER", wrapper))
+        if args.late_preflight:
+            safe_adapters = safe_adapters.replace(
+                "crate::protected_policy::transact_with_preflight(&mut provider, text, preflight, inject, cancelled, copy)",
+                "crate::protected_policy::transact_with_retention(&mut provider, text, || { preflight()?; inject() }, cancelled, copy)")
     harness = (ADAPTERS + f'\n#[path = "{delivery}"] mod paste_delivery;\n'
                + 'use paste_delivery::clipboard_submission;\n'
                + '\n'.join(functions["settings.rs"])

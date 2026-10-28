@@ -40,6 +40,8 @@ impl OverlayNotice {
         self.paste_error_code = match code {
             "clipboard_restore_failed" => Some("clipboard_restore_failed"),
             "input_unconfirmed" => Some("input_unconfirmed"),
+            "keys_held" => Some("keys_held"),
+            "keyboard_unavailable" => Some("keyboard_unavailable"),
             _ => None,
         };
     }

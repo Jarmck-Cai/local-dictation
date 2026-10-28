@@ -9,6 +9,17 @@ import {
 import type { DictationTiming } from "./dictationApi";
 
 assert.equal(
+  pasteErrorCode({ code: "keys_held", detail: "private synthetic key detail" }),
+  "keys_held",
+  "a keyboard release rejection must reach the dedicated recovery message",
+);
+assert.equal(
+  pasteErrorCode({ code: "keyboard_unavailable" }),
+  "keyboard_unavailable",
+  "unavailable key state must not be presented as a held key or generic failure",
+);
+
+assert.equal(
   pasteErrorCode({ code: "clipboard_restore_failed" }),
   "clipboard_restore_failed",
 );
@@ -23,6 +34,9 @@ for (const payload of [
   "arbitrary text",
   { code: "arbitrary text" },
   { code: "__proto__" },
+  { code: "keys_held: private synthetic key detail" },
+  { code: "keyboard_unavailable: private synthetic diagnostic" },
+  { code: "KEYS_HELD" },
   { code: "failed" },
 ]) {
   assert.equal(

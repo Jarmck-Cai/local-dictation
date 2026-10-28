@@ -180,6 +180,17 @@ pub(crate) fn transact_with_retention<P: Provider>(
     is_cancelled: impl Fn() -> bool,
     copy_result: bool,
 ) -> Result<bool, String> {
+    transact_with_preflight(provider, text, || Ok(()), inject, is_cancelled, copy_result)
+}
+
+pub(crate) fn transact_with_preflight<P: Provider>(
+    provider: &mut P,
+    text: &str,
+    preflight: impl FnOnce() -> Result<(), String>,
+    inject: impl FnOnce() -> Result<(), String>,
+    is_cancelled: impl Fn() -> bool,
+    copy_result: bool,
+) -> Result<bool, String> {
     if is_cancelled() {
         return Err(CANCELLED.into());
     }
@@ -190,6 +201,16 @@ pub(crate) fn transact_with_retention<P: Provider>(
     // Publish can fail after EmptyClipboard: even that path must settle.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         provider.publish()?;
+        if is_cancelled() {
+            return Err(CANCELLED);
+        }
+        // A keyboard/source barrier can wait. It MUST precede the final lease
+        // check so a new copy during that wait cannot authorize an old paste.
+        preflight().map_err(|error| match error.as_str() {
+            CANCELLED => CANCELLED,
+            "keys_held" => "keys_held",
+            _ => "keyboard_unavailable",
+        })?;
         if is_cancelled() {
             return Err(CANCELLED);
         }
