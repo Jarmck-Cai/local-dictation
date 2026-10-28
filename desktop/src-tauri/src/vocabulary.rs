@@ -140,7 +140,7 @@ async fn command(
     tauri::async_runtime::spawn_blocking(move || {
         let view = with_connection(&app, |connection| {
             operation(connection)?;
-            store::view(connection)
+            store::reviewable_view(connection)
         })?;
         if changed {
             let _ = app.emit("vocabulary-updated", ());

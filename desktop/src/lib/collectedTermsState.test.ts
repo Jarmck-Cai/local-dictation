@@ -170,4 +170,33 @@ function fixture() {
   await a;
   assert.equal(seen.length, count);
 }
-console.log("collected terms state: 7 asynchronous scenarios passed");
+// Failed requests under a different filter must not display the previous filter.
+{
+  const { state, reads } = fixture();
+  const first = state.load();
+  reads[0].result.resolve(page());
+  await first;
+  const changed = state.load({ filter: "deleted" });
+  reads[1].result.reject(new Error("synthetic failed search"));
+  await changed;
+  assert.equal(state.snapshot.filter, "deleted");
+  assert.equal(state.snapshot.page, null);
+  assert.equal(state.snapshot.failed, true);
+}
+// A committed label cannot roll back visually when its follow-up read fails.
+{
+  const { state, reads, writes } = fixture();
+  const first = state.load();
+  reads[0].result.resolve(page());
+  await first;
+  const change = state.like(7, true);
+  writes[0].result.resolve();
+  await Promise.resolve();
+  reads[1].result.reject(new Error("synthetic failed refresh"));
+  await change;
+  assert.equal(state.snapshot.failed, true);
+  assert.equal(state.snapshot.changeFailed, false);
+  assert.equal(state.snapshot.page, null);
+  assert.equal(state.snapshot.busy, false);
+}
+console.log("collected terms state: 9 asynchronous scenarios passed");

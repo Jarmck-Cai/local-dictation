@@ -368,3 +368,36 @@ fn schema_seven_upgrade_preserves_confirmed_ids_and_is_idempotent() {
         assert_eq!(page(&db, "all").total, 0);
     }
 }
+
+#[test]
+fn explicit_correction_is_not_hidden_by_old_transcript_candidate_limit() {
+    let db = db();
+    for index in 0..201 {
+        db.execute("INSERT INTO vocabulary_candidates(history_id,term,source,occurrences) VALUES(1,?1,'transcript',500)",[format!("OldAuto{index}")]).unwrap();
+    }
+    db.execute("INSERT INTO vocabulary_candidates(history_id,term,replacement_from,source) VALUES(1,'FixedOnly','FixedTypo','asr_correction')",[]).unwrap();
+    let view = store::reviewable_view(&db).unwrap();
+    assert_eq!(view.candidates.len(), 1);
+    assert_eq!(view.candidates[0].proposal.term, "FixedOnly");
+    assert_eq!(view.entries[0].id, 73);
+}
+
+#[test]
+fn locative_context_preserves_known_place_names() {
+    for name in ["马德里", "新德里"] {
+        let terms = collected_core::extract(&format!("我在{name}工作。{name}的数据库项目。"));
+        assert!(terms.iter().any(|t| t == name), "lost {name}");
+        assert!(
+            !terms.iter().any(|t| t == name.strip_suffix('里').unwrap()),
+            "truncated known name {name}"
+        );
+    }
+}
+
+#[test]
+fn declarations_do_not_collect_code_variables_as_prose_terms() {
+    let terms = collected_core::extract("Rust discussion; let BadCode = OtherWord; SQLite");
+    assert!(terms.iter().any(|t| t == "Rust"));
+    assert!(terms.iter().any(|t| t == "SQLite"));
+    assert!(!terms.iter().any(|t| t == "BadCode" || t == "OtherWord"));
+}

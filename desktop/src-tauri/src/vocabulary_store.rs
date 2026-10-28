@@ -217,12 +217,20 @@ pub fn set_enabled(conn: &mut Connection, id: i64, enabled: bool) -> Result<()> 
     transaction.commit().map_err(storage)
 }
 
+pub fn reviewable_view(conn: &Connection) -> Result<View> {
+    view_candidates(conn, false)
+}
+
 pub fn view(conn: &Connection) -> Result<View> {
+    view_candidates(conn, true)
+}
+
+fn view_candidates(conn: &Connection, include_transcript: bool) -> Result<View> {
     let transaction = conn.unchecked_transaction().map_err(storage)?;
     let candidates = {
-        let mut statement = transaction.prepare("SELECT MIN(id), term, replacement_from, context, source, SUM(occurrences) FROM vocabulary_candidates WHERE status=0 GROUP BY term, replacement_from, context, source ORDER BY SUM(occurrences) DESC, MIN(id) LIMIT 200").map_err(storage)?;
+        let mut statement = transaction.prepare("SELECT MIN(id), term, replacement_from, context, source, SUM(occurrences) FROM vocabulary_candidates WHERE status=0 AND (?1 OR source!='transcript') GROUP BY term, replacement_from, context, source ORDER BY SUM(occurrences) DESC, MIN(id) LIMIT 200").map_err(storage)?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map([include_transcript], |row| {
                 Ok(Candidate {
                     id: row.get(0)?,
                     proposal: Proposal {

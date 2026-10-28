@@ -38,7 +38,11 @@ export class CollectedTermsState {
   async load(query: Partial<CollectedTermsQuery> = {}): Promise<void> {
     if (!this.alive) return;
     const ticket = ++this.generation;
-    this.update(query);
+    const contextChanged =
+      (query.query !== undefined && query.query !== this.snapshot.query) ||
+      (query.filter !== undefined && query.filter !== this.snapshot.filter) ||
+      (query.offset !== undefined && query.offset !== this.snapshot.offset);
+    this.update({ ...query, ...(contextChanged ? { page: null } : {}) });
     // Events and searches invalidate old reads but wait for a write to commit.
     if (this.snapshot.busy) return;
     const { query: text, filter, offset, limit } = this.snapshot;
@@ -67,14 +71,16 @@ export class CollectedTermsState {
     if (!this.alive || this.snapshot.busy) return;
     ++this.generation;
     this.update({ busy: true, loading: false, changeFailed: false });
+    let committed = false;
     try {
       await operation();
+      committed = true;
     } catch {
       this.update({ changeFailed: true });
     }
     if (!this.alive) return;
     ++this.generation;
-    this.update({ busy: false });
+    this.update({ busy: false, ...(committed ? { page: null } : {}) });
     await this.load();
   }
   like(id: number, liked: boolean) {
