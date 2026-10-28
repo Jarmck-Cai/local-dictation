@@ -52,8 +52,12 @@ fn memory_bytes() -> (usize, usize) {
     (0, 0)
 }
 
-fn source_packet(source: Source, sequence: u64) -> CapturePacket {
-    let channels = if source == Source::Microphone { 1 } else { 2 };
+fn source_packet(source: Source, sequence: u64, microphone_channels: u16) -> CapturePacket {
+    let channels = if source == Source::Microphone {
+        microphone_channels
+    } else {
+        2
+    };
     let silent = sequence % 1000 >= 950;
     let mut data = Vec::with_capacity(480 * channels as usize * 4);
     if !silent {
@@ -105,6 +109,13 @@ fn run() -> StoreResult<()> {
     if seconds == 0 || seconds > 86400 {
         return Err("harness_seconds");
     }
+    let microphone_channels: u16 = value("--microphone-channels")
+        .unwrap_or_else(|| "1".into())
+        .parse()
+        .map_err(|_| "harness_channels")?;
+    if !matches!(microphone_channels, 1 | 2) {
+        return Err("harness_channels");
+    }
     let accelerated = args.iter().any(|a| a == "--accelerated");
     let stall_ms: u64 = value("--stall-checkpoint-ms")
         .unwrap_or_else(|| "0".into())
@@ -126,7 +137,7 @@ fn run() -> StoreResult<()> {
     let started = Instant::now();
     println!(
         "{}",
-        serde_json::json!({"event":"start", "mode":if accelerated {"accelerated_sample_duration"} else {"actual_elapsed"}, "planned_seconds":seconds, "queue_capacity":MEETING_CAPTURE_QUEUE_CAPACITY,"queue_payload_budget_bytes":MEETING_CAPTURE_QUEUE_MAX_BYTES,"sample_rate":48000,"packet_frames":480,"sources":2,"controlled_checkpoint_stall_ms":stall_ms})
+        serde_json::json!({"event":"start", "mode":if accelerated {"accelerated_sample_duration"} else {"actual_elapsed"}, "planned_seconds":seconds, "queue_capacity":MEETING_CAPTURE_QUEUE_CAPACITY,"queue_payload_budget_bytes":MEETING_CAPTURE_QUEUE_MAX_BYTES,"sample_rate":48000,"packet_frames":480,"sources":2,"microphone_channels":microphone_channels,"remote_channels":2,"controlled_checkpoint_stall_ms":stall_ms})
     );
     let producer = thread::spawn(move || -> StoreResult<()> {
         let send = |event| -> StoreResult<()> {
@@ -172,7 +183,11 @@ fn run() -> StoreResult<()> {
                         thread::sleep(Duration::from_millis(1));
                     }
                 }
-                send(CaptureEvent::Packet(source_packet(source, sequence)))?;
+                send(CaptureEvent::Packet(source_packet(
+                    source,
+                    sequence,
+                    microphone_channels,
+                )))?;
             }
             if sequence % 100 == 0 {
                 for source in [Source::Microphone, Source::Remote] {
@@ -294,7 +309,11 @@ fn run() -> StoreResult<()> {
         let source_index = if source == Source::Microphone { 0 } else { 1 };
         let mut reader = store.open_reader_for_chunk(&id, meta)?;
         while let Some(packet) = reader.next_packet()? {
-            let expected = source_packet(source, verified_sequences[source_index]);
+            let expected = source_packet(
+                source,
+                verified_sequences[source_index],
+                microphone_channels,
+            );
             if packet.source != expected.source
                 || packet.epoch != expected.epoch
                 || packet.sequence != expected.sequence
