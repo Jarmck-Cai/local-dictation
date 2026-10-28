@@ -1,10 +1,25 @@
 use crate::actions::process_transcription_output;
 use crate::managers::{
-    history::{HistoryManager, PaginatedHistory},
+    history::{HistoryManager, HistorySearchPage, PaginatedHistory},
     transcription::TranscriptionManager,
 };
 use std::sync::Arc;
 use tauri::{AppHandle, State};
+
+#[tauri::command]
+#[specta::specta]
+pub async fn search_history_entries(
+    history_manager: State<'_, Arc<HistoryManager>>,
+    cursor: Option<i64>,
+    limit: Option<usize>,
+    query: Option<String>,
+    anchor_id: Option<i64>,
+) -> Result<HistorySearchPage, String> {
+    history_manager
+        .search_history_entries(cursor, limit, query, anchor_id)
+        .await
+        .map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 #[specta::specta]

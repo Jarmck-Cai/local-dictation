@@ -1,10 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, Copy, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import type { HistoryEntry } from "@/bindings";
 import { formatDateTime } from "@/utils/dateFormat";
 import { useDictationData } from "@/hooks/DictationData";
+import { useHistorySearch } from "@/hooks/useHistorySearch";
+import {
+  recentHistoryEntries,
+  type CorrectionDraft,
+} from "@/lib/historySearchState";
 import { historyFinalText } from "@/lib/usageSummary";
 import { Button } from "../../ui/Button";
 import { copyToClipboard } from "./clipboard";
@@ -12,8 +17,7 @@ import type { DictationTiming } from "@/lib/dictationApi";
 import { DictationTimingDetails } from "../DictationTiming";
 import { CorrectionSample } from "./CorrectionSample";
 import { UsageOverview } from "../UsageOverview";
-
-const PAGE_SIZE = 30;
+import "./historyWorkspace.css";
 
 export const HistorySettings = () => {
   const { t, i18n } = useTranslation();
@@ -21,70 +25,21 @@ export const HistorySettings = () => {
     history,
     timing: { metrics },
   } = useDictationData();
-  const {
-    entries,
-    loading,
-    failed,
-    retry,
-    removeEntry,
-    hasMore,
-    loadingMore,
-    moreFailed,
-    loadMore,
-    retryMore,
-  } = history;
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
-  const [expandedId, setExpandedId] = useState<number | null>(null);
-  const sentinelRef = useRef<HTMLDivElement>(null);
-
-  const revealMore = useCallback(async () => {
-    if (loading || loadingMore || failed || moreFailed) return;
-    const nextCount = visibleCount + PAGE_SIZE;
-    setVisibleCount(nextCount);
-    if (nextCount > entries.length && hasMore) await loadMore();
-  }, [
-    loading,
-    loadingMore,
-    failed,
-    moreFailed,
-    visibleCount,
-    entries.length,
-    hasMore,
-    loadMore,
-  ]);
-
-  useEffect(() => {
-    const sentinel = sentinelRef.current;
-    if (
-      !sentinel ||
-      loading ||
-      loadingMore ||
-      failed ||
-      moreFailed ||
-      (visibleCount >= entries.length && !hasMore)
-    )
-      return;
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) void revealMore();
-    });
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [
-    loading,
-    loadingMore,
-    failed,
-    moreFailed,
-    visibleCount,
-    entries.length,
-    hasMore,
-    revealMore,
-  ]);
+  const [allHistory, setAllHistory] = useState(false);
+  const search = useHistorySearch(allHistory);
+  const { state, expandedId } = search;
+  const entries = allHistory
+    ? search.entries
+    : recentHistoryEntries(history.entries);
+  const loading = allHistory ? search.loading : history.loading;
+  const failed = allHistory ? search.failed : history.failed;
+  const retry = allHistory ? search.retry : history.retry;
 
   const today = new Date();
   const yesterday = new Date(today);
   yesterday.setDate(today.getDate() - 1);
   const groups = new Map<string, { label: string; entries: HistoryEntry[] }>();
-  for (const entry of entries.slice(0, visibleCount)) {
+  for (const entry of entries) {
     const date = new Date(entry.timestamp * 1000);
     const key = date.toDateString();
     const label =
@@ -104,6 +59,87 @@ export const HistorySettings = () => {
     <div className="qs-page space-y-6">
       <UsageOverview />
       <section aria-label={t("dictation.history.title")}>
+        <div className="qs-history-toolbar">
+          <div>
+            <h1>
+              {t(
+                allHistory
+                  ? "dictation.historyWorkspace.title"
+                  : "dictation.historyWorkspace.recent",
+              )}
+            </h1>
+            <p className="qs-history-caption">
+              {t(
+                allHistory
+                  ? "dictation.historyWorkspace.pageHint"
+                  : "dictation.historyWorkspace.recentHint",
+              )}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {allHistory && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void state.refresh()}
+                disabled={loading || search.invalidQuery || search.composing}
+              >
+                {t("dictation.historyWorkspace.refresh")}
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setAllHistory((value) => !value)}
+            >
+              {t(
+                allHistory
+                  ? "dictation.historyWorkspace.back"
+                  : "dictation.historyWorkspace.allHistory",
+              )}
+            </Button>
+          </div>
+        </div>
+        {allHistory && (
+          <div className="qs-history-search">
+            <label htmlFor="history-search">
+              {t("dictation.historyWorkspace.searchLabel")}
+            </label>
+            <input
+              id="history-search"
+              type="search"
+              value={search.input}
+              aria-describedby="history-search-help"
+              aria-invalid={search.invalidQuery}
+              placeholder={t("dictation.historyWorkspace.searchPlaceholder")}
+              onChange={(event) => void state.setInput(event.target.value)}
+              onCompositionStart={() => state.compositionStart()}
+              onCompositionEnd={(event) =>
+                void state.compositionEnd(event.currentTarget.value)
+              }
+            />
+            <p
+              id="history-search-help"
+              className={
+                search.invalidQuery
+                  ? "text-xs text-error"
+                  : "qs-history-caption"
+              }
+              role={search.invalidQuery ? "alert" : undefined}
+            >
+              {t(
+                search.invalidQuery
+                  ? "dictation.historyWorkspace.queryTooLong"
+                  : "dictation.historyWorkspace.searchHelp",
+              )}
+            </p>
+            {search.refreshAvailable && (
+              <p role="status" className="text-xs text-text/65">
+                {t("dictation.historyWorkspace.newRecords")}
+              </p>
+            )}
+          </div>
+        )}
         {loading && !entries.length && (
           <p role="status" className="qs-empty">
             {t("settings.history.loading")}
@@ -117,9 +153,18 @@ export const HistorySettings = () => {
             </Button>
           </div>
         )}
-        {!loading && !failed && !entries.length && (
-          <p className="qs-empty">{t("dictation.history.empty")}</p>
-        )}
+        {!loading &&
+          !failed &&
+          !entries.length &&
+          !(allHistory && search.invalidQuery) && (
+            <p className="qs-empty">
+              {t(
+                allHistory && search.query
+                  ? "dictation.historyWorkspace.noMatches"
+                  : "dictation.history.empty",
+              )}
+            </p>
+          )}
         {[...groups].map(([key, group]) => (
           <section key={key} className="qs-day-group" aria-label={group.label}>
             <div className="qs-day-heading">
@@ -136,34 +181,57 @@ export const HistorySettings = () => {
                 entry={entry}
                 timing={metrics.find((row) => row.history_id === entry.id)}
                 expanded={expandedId === entry.id}
-                onToggle={() =>
-                  setExpandedId((id) => (id === entry.id ? null : entry.id))
+                onToggle={() => state.toggleExpanded(entry.id)}
+                draft={search.drafts.get(entry.id)}
+                onDraftChange={(text) => state.setDraftText(entry.id, text)}
+                onSubmitted={(sample) => state.markSubmitted(entry.id, sample)}
+                onSubmittingChange={(submitting) =>
+                  state.setSubmitting(entry.id, submitting)
                 }
-                onDelete={() => removeEntry(entry.id)}
+                onDelete={async () => {
+                  await history.removeEntry(entry.id);
+                  state.receive({ action: "deleted", id: entry.id });
+                }}
               />
             ))}
           </section>
         ))}
-        <div ref={sentinelRef} className="h-1" />
-        {moreFailed && (
-          <div className="qs-inline-alert" role="alert">
-            <p>{t("dictation.history.loadMoreFailed")}</p>
-            <Button variant="secondary" size="sm" onClick={() => retryMore()}>
-              {t("dictation.retry")}
-            </Button>
-          </div>
-        )}
-        {!moreFailed && (visibleCount < entries.length || hasMore) && (
-          <div className="py-3 text-center">
+        {allHistory && (
+          <nav
+            className="qs-history-pagination"
+            aria-label={t("dictation.historyWorkspace.title")}
+          >
             <Button
-              variant="ghost"
+              variant="secondary"
               size="sm"
-              onClick={revealMore}
-              disabled={loading || loadingMore || failed}
+              onClick={() => void state.previous()}
+              disabled={
+                loading ||
+                search.page <= 1 ||
+                search.invalidQuery ||
+                search.composing
+              }
             >
-              {t(loadingMore ? "common.loading" : "dictation.history.loadMore")}
+              {t("dictation.historyWorkspace.previous")}
             </Button>
-          </div>
+            <span aria-live="polite">
+              {t("dictation.historyWorkspace.page", { page: search.page })}
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void state.next()}
+              disabled={
+                loading ||
+                failed ||
+                !search.hasMore ||
+                search.invalidQuery ||
+                search.composing
+              }
+            >
+              {t("dictation.historyWorkspace.next")}
+            </Button>
+          </nav>
         )}
       </section>
       <p className="text-xs text-text/45 leading-relaxed">
@@ -179,12 +247,20 @@ const HistoryEntryCard = ({
   timing,
   expanded,
   onToggle,
+  draft,
+  onDraftChange,
+  onSubmitted,
+  onSubmittingChange,
 }: {
   entry: HistoryEntry;
   onDelete: () => Promise<void>;
   timing?: DictationTiming;
   expanded: boolean;
   onToggle: () => void;
+  draft: CorrectionDraft | undefined;
+  onDraftChange: (text: string) => void;
+  onSubmitted: (sample: string) => void;
+  onSubmittingChange: (submitting: boolean) => void;
 }) => {
   const { t, i18n } = useTranslation();
   const [copied, setCopied] = useState<"final" | "raw" | null>(null);
@@ -311,7 +387,15 @@ const HistoryEntryCard = ({
             </div>
           </details>
         )}
-        {finalText.trim() && <CorrectionSample historyId={entry.id} />}
+        {finalText.trim() && (
+          <CorrectionSample
+            historyId={entry.id}
+            draft={draft}
+            onTextChange={onDraftChange}
+            onSubmitted={onSubmitted}
+            onSubmittingChange={onSubmittingChange}
+          />
+        )}
         <div className="flex items-center justify-between gap-4 border-t border-mid-gray/15 pt-3">
           <p className="text-xs text-text/45">
             {t("dictation.history.inputAttempt")}

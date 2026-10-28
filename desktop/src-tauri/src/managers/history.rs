@@ -41,6 +41,18 @@ pub struct PaginatedHistory {
     pub has_more: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct HistorySearchPage {
+    pub entries: Vec<HistoryEntry>,
+    pub has_more: bool,
+    pub next_cursor: Option<i64>,
+    pub anchor_id: Option<i64>,
+}
+
+#[cfg(test)]
+#[path = "history_search_tests.rs"]
+mod history_search_tests;
+
 #[derive(Clone, Debug, Serialize, Deserialize, Type, tauri_specta::Event)]
 #[serde(tag = "action")]
 pub enum HistoryUpdatePayload {
@@ -474,6 +486,79 @@ impl HistoryManager {
         }
 
         Ok(())
+    }
+
+    /// Search retained raw/final text independently of the bounded usage window.
+    pub async fn search_history_entries(
+        &self,
+        cursor: Option<i64>,
+        limit: Option<usize>,
+        query: Option<String>,
+        anchor_id: Option<i64>,
+    ) -> Result<HistorySearchPage> {
+        let conn = self.get_connection()?;
+        Self::search_history_entries_with_conn(&conn, cursor, limit, query.as_deref(), anchor_id)
+    }
+
+    fn search_history_entries_with_conn(
+        conn: &Connection,
+        cursor: Option<i64>,
+        limit: Option<usize>,
+        query: Option<&str>,
+        anchor_id: Option<i64>,
+    ) -> Result<HistorySearchPage> {
+        let query = query.unwrap_or("");
+        if query.chars().count() > 256 {
+            return Err(anyhow!("History search query exceeds 256 characters"));
+        }
+        let limit = limit.unwrap_or(30).clamp(1, 100);
+        let pattern = if query.trim().is_empty() {
+            None
+        } else {
+            let literal = query
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            Some(format!("%{literal}%"))
+        };
+        // Read the upper bound and its first page from one SQLite snapshot.
+        let transaction = conn.unchecked_transaction()?;
+        let anchor_id = match anchor_id {
+            Some(id) => Some(id),
+            None => {
+                transaction.query_row("SELECT MAX(id) FROM transcription_history", [], |row| {
+                    row.get(0)
+                })?
+            }
+        };
+        let mut stmt = transaction.prepare(
+            "SELECT id, file_name, timestamp, saved, title, transcription_text,
+                    post_processed_text, post_process_prompt, post_process_requested
+             FROM transcription_history
+             WHERE id <= ?1 AND (?2 IS NULL OR id < ?2)
+               AND (?3 IS NULL OR transcription_text LIKE ?3 ESCAPE '\\'
+                    OR post_processed_text LIKE ?3 ESCAPE '\\')
+             ORDER BY id DESC LIMIT ?4",
+        )?;
+        let mut entries = stmt
+            .query_map(
+                params![anchor_id, cursor, pattern, (limit + 1) as i64],
+                Self::map_history_entry,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let has_more = entries.len() > limit;
+        entries.truncate(limit);
+        let next_cursor = if has_more {
+            entries.last().map(|entry| entry.id)
+        } else {
+            None
+        };
+        Ok(HistorySearchPage {
+            entries,
+            has_more,
+            next_cursor,
+            anchor_id,
+        })
     }
 
     pub async fn get_history_entries(
