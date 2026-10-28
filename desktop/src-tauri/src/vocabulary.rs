@@ -1,4 +1,13 @@
 //! Local-only, explicitly reviewed vocabulary learning. No audio or network access.
+#[path = "vocabulary_collected_core.rs"]
+mod collected_core;
+#[path = "vocabulary_collected_runtime.rs"]
+mod collected_runtime;
+#[path = "vocabulary_collected_store.rs"]
+mod collected_store;
+#[cfg(test)]
+#[path = "vocabulary_collected_tests.rs"]
+mod collected_tests;
 #[path = "vocabulary_core.rs"]
 mod core;
 #[path = "vocabulary_store.rs"]
@@ -12,6 +21,8 @@ use tauri::{AppHandle, Emitter};
 
 pub(crate) const SCHEMA: &str = store::SCHEMA;
 pub(crate) const MANAGEMENT_SCHEMA: &str = store::MANAGEMENT_SCHEMA;
+pub(crate) const COLLECTED_SCHEMA: &str = collected_store::SCHEMA;
+pub use collected_runtime::schedule_collected_terms_refresh;
 
 // A fresh application process starts empty. No transcript body is retained.
 static RECENT_CORRECTIONS: Mutex<core::RecentCorrections> = Mutex::new(core::RecentCorrections {
@@ -80,6 +91,7 @@ impl From<store::View> for VocabularyView {
             candidates: value
                 .candidates
                 .into_iter()
+                .filter(|candidate| candidate.proposal.source != "transcript")
                 .map(|candidate| VocabularyCandidate {
                     id: candidate.id,
                     term: candidate.proposal.term,
@@ -242,12 +254,97 @@ pub async fn submit_correction_sample(
 
 /// Called after history save, off the input delivery path. Re-observation is idempotent.
 pub fn observe_transcript(app: &AppHandle, entry: &HistoryEntry) -> Result<(), String> {
-    let proposals = core::extract_terms(&entry.transcription_text);
-    with_connection(app, |connection| {
-        store::observe(connection, entry.id, &proposals)
+    let changed = with_connection(app, |connection| {
+        collected_store::observe_snapshot(connection, entry.id, &entry.transcription_text)
     })?;
-    let _ = app.emit("vocabulary-updated", ());
+    if changed {
+        let _ = app.emit("collected-terms-updated", ());
+    }
     Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, specta::Type)]
+pub struct CollectedTerm {
+    pub id: i64,
+    pub term: String,
+    pub record_count: u32,
+    pub last_seen: Option<i64>,
+    pub liked: bool,
+    pub deleted: bool,
+}
+
+#[derive(Clone, Debug, Serialize, specta::Type)]
+pub struct CollectedTermsPage {
+    pub entries: Vec<CollectedTerm>,
+    pub total: u32,
+    pub offset: u32,
+    pub limit: u32,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_collected_terms(
+    app: AppHandle,
+    query: Option<String>,
+    filter: Option<String>,
+    offset: Option<u32>,
+    limit: Option<u32>,
+) -> Result<CollectedTermsPage, String> {
+    // A read returns the current snapshot; reconciliation remains off the input path.
+    schedule_collected_terms_refresh(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        let page = with_connection(&app, |db| {
+            collected_store::page(db, query.as_deref(), filter.as_deref(), offset, limit)
+        })?;
+        Ok(CollectedTermsPage {
+            entries: page
+                .entries
+                .into_iter()
+                .map(|term| CollectedTerm {
+                    id: term.id,
+                    term: term.term,
+                    record_count: term.record_count,
+                    last_seen: term.last_seen,
+                    liked: term.liked,
+                    deleted: term.deleted,
+                })
+                .collect(),
+            total: page.total,
+            offset: page.offset,
+            limit: page.limit,
+        })
+    })
+    .await
+    .map_err(|_| "collected_terms_unavailable".to_owned())?
+}
+
+async fn collected_mutation(
+    app: AppHandle,
+    operation: impl FnOnce(&mut Connection) -> store::Result<()> + Send + 'static,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        with_connection(&app, operation)?;
+        let _ = app.emit("collected-terms-updated", ());
+        Ok(())
+    })
+    .await
+    .map_err(|_| "collected_terms_unavailable".to_owned())?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_collected_term_liked(app: AppHandle, id: i64, liked: bool) -> Result<(), String> {
+    collected_mutation(app, move |db| collected_store::set_liked(db, id, liked)).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_collected_term_deleted(
+    app: AppHandle,
+    id: i64,
+    deleted: bool,
+) -> Result<(), String> {
+    collected_mutation(app, move |db| collected_store::set_deleted(db, id, deleted)).await
 }
 
 fn confirmed_rules(app: &AppHandle) -> Vec<core::Rule> {
