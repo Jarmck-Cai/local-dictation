@@ -18,6 +18,7 @@ mod input;
 mod llm_client;
 mod managers;
 mod manual_paste;
+mod meetings;
 mod memory;
 mod overlay;
 mod paste_tx;
