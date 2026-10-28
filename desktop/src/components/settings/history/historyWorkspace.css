@@ -1,0 +1,59 @@
+.qs-history-toolbar,
+.qs-history-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.qs-history-toolbar h1,
+.qs-history-toolbar h2 {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.qs-history-caption {
+  font-size: 12px;
+  opacity: 0.55;
+}
+
+.qs-history-search {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 18px;
+}
+
+.qs-history-search label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.qs-history-search input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--color-mid-gray);
+  border-radius: 8px;
+  padding: 9px 12px;
+  background: var(--color-background);
+  color: var(--color-text);
+  font-size: 14px;
+  user-select: text;
+}
+
+.qs-history-search input:focus-visible {
+  outline: 2px solid var(--color-logo-primary);
+  outline-offset: 2px;
+}
+
+.qs-history-pagination {
+  justify-content: center;
+  margin-top: 20px;
+  margin-bottom: 0;
+}
+
+.qs-history-pagination span {
+  font-size: 12px;
+  opacity: 0.65;
+}

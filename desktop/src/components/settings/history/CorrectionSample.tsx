@@ -6,20 +6,35 @@ import {
   type VocabularyView,
 } from "@/lib/dictationApi";
 import { SnapshotGuard } from "@/lib/dictationState";
+import type { CorrectionDraft } from "@/lib/historySearchState";
 import { Button } from "../../ui/Button";
 import { VocabularyReview } from "../VocabularyLearning";
 
 const MAX_SAMPLE_CHARACTERS = 8000;
 
-export const CorrectionSample = ({ historyId }: { historyId: number }) => {
-  return <CorrectionSampleForm key={historyId} historyId={historyId} />;
+interface CorrectionSampleProps {
+  historyId: number;
+  draft: CorrectionDraft | undefined;
+  onTextChange: (text: string) => void;
+  onSubmitted: (sample: string) => void;
+  onSubmittingChange: (submitting: boolean) => void;
+}
+
+export const CorrectionSample = (props: CorrectionSampleProps) => {
+  return <CorrectionSampleForm key={props.historyId} {...props} />;
 };
 
-const CorrectionSampleForm = ({ historyId }: { historyId: number }) => {
+const CorrectionSampleForm = ({
+  historyId,
+  draft,
+  onTextChange,
+  onSubmitted,
+  onSubmittingChange,
+}: CorrectionSampleProps) => {
   const { t } = useTranslation();
-  const [text, setText] = useState("");
-  const [lastSubmitted, setLastSubmitted] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const text = draft?.text ?? "";
+  const lastSubmitted = draft?.lastSubmitted ?? null;
+  const busy = draft?.submitting ?? false;
   const [failed, setFailed] = useState(false);
   const [view, setView] = useState<VocabularyView | null>(null);
   const guardRef = useRef<SnapshotGuard>();
@@ -42,19 +57,19 @@ const CorrectionSampleForm = ({ historyId }: { historyId: number }) => {
       return;
     const request = guard.begin();
     const sample = text.trim();
-    setBusy(true);
+    onSubmittingChange(true);
     setFailed(false);
     try {
       const next = await dictationApi.submitCorrection(historyId, sample);
+      onSubmitted(sample);
       if (guard.isCurrent(request)) {
         setView(next);
-        setLastSubmitted(sample);
       }
       notifyVocabularyChanged();
     } catch {
       if (guard.isCurrent(request)) setFailed(true);
     } finally {
-      if (guard.isAlive()) setBusy(false);
+      onSubmittingChange(false);
     }
   };
 
@@ -76,7 +91,7 @@ const CorrectionSampleForm = ({ historyId }: { historyId: number }) => {
           className="block w-full resize-y rounded-lg border border-mid-gray/25 bg-background p-2.5 text-sm text-text select-text focus:outline-none focus:border-logo-primary disabled:opacity-60"
           placeholder={t("dictation.correction.placeholder")}
           onChange={(event) => {
-            setText(event.target.value);
+            onTextChange(event.target.value);
             setFailed(false);
           }}
         />
