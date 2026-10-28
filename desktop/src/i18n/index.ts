@@ -1,4 +1,6 @@
 import i18n from "i18next";
+import { historyWorkspaceMessages } from "./features/historyWorkspace";
+import { collectedTermsMessages } from "./features/collectedTerms";
 import { initReactI18next } from "react-i18next";
 import { locale } from "@tauri-apps/plugin-os";
 import { LANGUAGE_METADATA } from "./languages";
@@ -20,7 +22,22 @@ const resources: Record<string, { translation: Record<string, unknown> }> = {};
 for (const [path, module] of Object.entries(localeModules)) {
   const langCode = path.match(/\.\/locales\/(.+)\/translation\.json/)?.[1];
   if (langCode) {
-    resources[langCode] = { translation: module.default };
+    resources[langCode] = {
+      translation: {
+        ...module.default,
+        dictation: {
+          ...(module.default.dictation as Record<string, unknown>),
+          collectedTerms:
+            collectedTermsMessages[
+              langCode as keyof typeof collectedTermsMessages
+            ],
+          historyWorkspace:
+            historyWorkspaceMessages[
+              langCode as keyof typeof historyWorkspaceMessages
+            ],
+        },
+      },
+    };
   }
 }
 

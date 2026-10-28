@@ -226,6 +226,12 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     app_handle.manage(model_manager.clone());
     app_handle.manage(transcription_manager.clone());
     app_handle.manage(history_manager.clone());
+    // Reconcile only existing local transcripts, away from input delivery.
+    let collected_app = app_handle.clone();
+    app_handle.listen("history-update-payload", move |_| {
+        vocabulary::schedule_collected_terms_refresh(&collected_app);
+    });
+    vocabulary::schedule_collected_terms_refresh(app_handle);
     dictation_metrics::prune(app_handle);
     let cleanup_history = history_manager.clone();
     let cleanup_app = app_handle.clone();
@@ -236,6 +242,7 @@ fn initialize_core_logic(app_handle: &AppHandle) {
             log::warn!("Expired audio cleanup failed: {error}");
         }
         dictation_metrics::prune(&cleanup_app);
+        vocabulary::schedule_collected_terms_refresh(&cleanup_app);
     });
     app_handle.manage(tray::TrayState::new());
     transcription_manager.initiate_model_load();
@@ -676,6 +683,9 @@ pub fn run(cli_args: CliArgs) {
             dictation_cleanup::toggle_dictation_cloud,
             dictation_metrics::get_dictation_metrics,
             vocabulary::get_vocabulary,
+            vocabulary::get_collected_terms,
+            vocabulary::set_collected_term_liked,
+            vocabulary::set_collected_term_deleted,
             vocabulary::review_vocabulary_candidate,
             vocabulary::delete_learned_term,
             vocabulary::update_learned_term,
@@ -796,6 +806,7 @@ pub fn run(cli_args: CliArgs) {
             commands::transcription::get_model_load_status,
             commands::transcription::unload_model_manually,
             commands::history::get_history_entries,
+            commands::history::search_history_entries,
             commands::history::toggle_history_entry_saved,
             commands::history::get_audio_file_path,
             commands::history::delete_history_entry,

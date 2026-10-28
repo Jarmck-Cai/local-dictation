@@ -33,6 +33,8 @@ static MIGRATIONS: &[M] = &[
     M::up("ALTER TABLE transcription_history ADD COLUMN post_process_requested BOOLEAN NOT NULL DEFAULT 0;"),
     M::up(crate::vocabulary::SCHEMA),
     M::up(crate::vocabulary::MANAGEMENT_SCHEMA),
+    M::up(crate::vocabulary::COLLECTED_SCHEMA),
+
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
@@ -905,3 +907,7 @@ mod tests {
         assert_eq!(entry.transcription_text, "completed");
     }
 }
+
+#[cfg(test)]
+#[path = "history_migration_tests.rs"]
+mod migration_tests;
