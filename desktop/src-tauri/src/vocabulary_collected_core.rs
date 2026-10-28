@@ -28,7 +28,16 @@ pub fn extract(text: &str) -> Vec<String> {
         if line.contains(['`', '{', '}']) {
             continue;
         }
-        for chunk in line.split_whitespace() {
+        let mut chunks = line.split_whitespace().peekable();
+        let mut code_statement = false;
+        while let Some(chunk) = chunks.next() {
+            let declaration = matches!(chunk, "let" | "const" | "var")
+                && chunks.clone().take(4).any(|next| next.contains('='));
+            let assignment_follows = chunks.peek().is_some_and(|next| next.starts_with('='));
+            if code_statement || declaration || chunk.contains('=') || assignment_follows {
+                code_statement = !chunk.ends_with(';');
+                continue;
+            }
             if code_chunk(chunk) {
                 continue;
             }
@@ -66,7 +75,10 @@ pub fn extract(text: &str) -> Vec<String> {
                     // HMM may attach the locative particle in “在…里” to an
                     // unknown name. Strip only in that grammatical context,
                     // never generate arbitrary substrings or a product whitelist.
-                    if chunk[..token.byte_start].ends_with('在') && term.chars().count() >= 3 {
+                    if !jieba.has_word(term)
+                        && chunk[..token.byte_start].ends_with('在')
+                        && term.chars().count() >= 3
+                    {
                         term = term.strip_suffix('里').unwrap_or(term);
                     }
                     if term.chars().all(cjk)

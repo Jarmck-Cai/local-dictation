@@ -8,9 +8,9 @@ export const collectedTermsMessages: {
     description:
       "Words found in at least two retained transcripts appear automatically. Like words to keep them, or delete them from this list.",
     boundary:
-      "Collection and likes stay local and do not change dictation or AI prompts. Counts refer to retained transcripts, not lifetime usage or accuracy.",
+      "Collected words are for viewing and management. They do not automatically change your input. Counts refer to currently retained transcripts.",
     coverage:
-      "Uses local Chinese dictionary segmentation and English technical terms. Coverage is limited; unknown names may be missed. Paths, URLs and code are skipped. Text may already include your confirmed vocabulary corrections.",
+      "Automatic collection may include recognition mistakes or miss uncommon words.",
     search: "Search collected words",
     refresh: "Refresh",
     retry: "Retry",
@@ -46,9 +46,8 @@ export const collectedTermsMessages: {
     description:
       "在至少两条保留转录中出现的词会自动收集。可点赞保留，也可从列表中删除。",
     boundary:
-      "收录和点赞仅保存在本地，不改变输入正文或 AI 提示。次数指当前保留转录的记录数，不是终身使用次数或正确率。",
-    coverage:
-      "采用本地中文词典分词和英文技术词提取，覆盖有限，生僻人名可能遗漏；跳过路径、网址与代码。来源文字可能已包含旧词库的确认纠正。",
+      "词表仅用于查看和管理，不会自动修改输入内容。次数按当前保留的转录记录统计。",
+    coverage: "自动收集可能包含识别错误，也可能遗漏生僻词。",
     search: "搜索词表",
     refresh: "刷新",
     retry: "重试",
