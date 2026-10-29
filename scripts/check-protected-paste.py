@@ -74,7 +74,7 @@ def main() -> int:
     parser.add_argument("--build-manual-rdp-probe", type=Path,
                         help="build only; fixed-text clipboard probe requires separate explicit invocation")
     parser.add_argument("--build-automatic-rdp-probe", type=Path,
-                        help="build only; one Ctrl+V to a separately authorized foreground MSTSC target")
+                        help="build only; one separately authorized fixed-input attempt to foreground MSTSC")
     parser.add_argument("--enigo-rlib", type=Path)
     args = parser.parse_args()
     if args.windows_rlib and os.name != "nt":
@@ -137,6 +137,7 @@ def main() -> int:
                 auto_hashes = {}
                 if args.build_automatic_rdp_probe:
                     enigo_rlib = args.enigo_rlib.resolve(strict=True)
+                    auto_hashes["enigo_rlib"] = hashlib.sha256(enigo_rlib.read_bytes()).hexdigest()
                     extra_link = ["--extern", f"enigo={enigo_rlib}", "-L", f"dependency={enigo_rlib.parent}"]
                     for name in ["manual_paste_keyboard", "keyboard_state_policy", "keyboard_state_windows"]:
                         filename = root / f"desktop/src-tauri/src/{name}.rs"
@@ -171,16 +172,16 @@ def main() -> int:
                 if args.build_automatic_rdp_probe:
                     source = source[:source.index("fn main() -> std::process::ExitCode")] + r'''fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (retain, pid) = match args.as_slice() {
-        [mode, pid] if mode == "--automatic-rdp-restore" || mode == "--automatic-rdp-retain" => {
+    let (retain, scancode, unicode, pid) = match args.as_slice() {
+        [mode, pid] if mode == "--automatic-rdp-restore" || mode == "--automatic-rdp-retain" || mode == "--automatic-rdp-scancode" || mode == "--automatic-rdp-unicode" => {
             match pid.parse::<u32>() {
-                Ok(pid) if pid != 0 => (mode == "--automatic-rdp-retain", pid),
+                Ok(pid) if pid != 0 => (mode == "--automatic-rdp-retain", mode == "--automatic-rdp-scancode", mode == "--automatic-rdp-unicode", pid),
                 _ => { println!("NO native APIs called. Positive target PID required."); return std::process::ExitCode::from(2); }
             }
         },
         _ => { println!("NO native APIs called. Explicit one-shot RDP mode and PID required."); return std::process::ExitCode::from(2); }
     };
-    match platform::automatic_probe(pid, retain) {
+    match platform::automatic_probe(pid, retain, scancode, unicode) {
         Ok(()) => { println!("status=settled remote_insertion_requires_user_confirmation=true"); std::process::ExitCode::SUCCESS },
         Err(code) => { println!("status=ended code={}", code); std::process::ExitCode::FAILURE },
     }
