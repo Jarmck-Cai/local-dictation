@@ -213,3 +213,17 @@
 ## 第七阶段：外部方案调研后再定实现
 
 用户要求安排一个独立子代理研究微软资料及开源方案，再权衡实现。暂不写正式输入算法；保留 U1 为已有实测支持的候选，不提前认定最终方案。研究需比较剪贴板格式/恢复策略、Unicode 直接输入、检测前台 RDP 客户端与运行于远端会话的区别、取消/单次提交/非 BMP/长文本/复制偏好等边界，并区分协议约定、开源实现与本机实测。
+
+### 调研结论与候选排序
+
+独立调研已整理微软协议/API 和 FreeRDP、Handy、OpenWhispr、AutoHotkey、当前 Enigo 固定版本的源码；详细笔记仅保留本机。源码阅读不能代替当前环境的兼容验收，也没有提供当前 MSTSC 内部发生哪次转换的证据。
+
+- [MS-RDPECLIP 的交互流程](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpeclip/9a784d09-bf53-4362-995d-a20d0eb5f074) 将格式列表、按需正文传输、应用取数分为多个阶段。格式回执、本地延迟渲染读取均不是远端落字回执；文件流锁不能作为普通文本的冻结或落字确认。
+- [Windows 的格式合成](https://learn.microsoft.com/en-us/windows/win32/dataxchg/clipboard-formats#synthesized-clipboard-formats) 允许 Unicode 与 ANSI/OEM 文本转换。只提供 Unicode 不代表消费者不能请求合成格式；owner 收到 Unicode 渲染请求也不能唯一确定消费者原始请求格式。现场仍缺实际格式/响应编码证据，不认定 CF_TEXT、CP1252 或线程 locale 为根因。
+- [FreeRDP Windows 实现](https://github.com/FreeRDP/FreeRDP/blob/f0f03eb0290d0ff600696763edf44ea2e37a455b/client/Windows/wf_cliprdr.c#L1218-L1279) 按请求的格式 ID 从系统剪贴板取数，可借鉴其协议分层；不能把它当作闭源 MSTSC 的实现证明。其他文本工具的固定等待、保留剪贴板或重试策略也不能覆盖本分支已经失败的单变量对照。
+- [当前 Enigo 0.6.1 源码](https://github.com/enigo-rs/enigo/blob/b297a14e807abdf818b7809a70b445ade4fc5897/src/win/win_impl.rs#L276-L298) 的 LF/Tab 会排入实体 Return/Tab 后再排 Unicode 字符；[非 BMP 释放](https://github.com/enigo-rs/enigo/blob/b297a14e807abdf818b7809a70b445ade4fc5897/src/win/win_impl.rs#L475-L504) 使用首个 UTF-16 单元。本机依赖 commit 与源码已复核。U1 不包含这些字符，因此不能直接放开该入口处理任意正文。
+- [MsTscAx 手动剪贴板同步接口](https://learn.microsoft.com/en-us/windows/win32/termserv/imsrdpclipboard) 确实存在，但未找到外部应用附着任意系统 MSTSC 取得该控制器的受支持方式；同步成功也没有编辑器落字语义。不要笼统宣称 RDP 没有同步 API。
+
+工程建议排序为：优先验证已识别系统 MSTSC 的有界 Unicode 适配器；剪贴板修正继续作为需额外格式/时序证据的路线；自有客户端或远端辅助组件会引入部署与维护，暂不进入本轮。该排序基于 U1 正向实测和本轮成本，不是用户已禁止远端组件，也不是 Unicode 已完成验收。
+
+若继续实现，须保留真实键状态、取消、输出时前台身份复查、一次提交与新复制优先；默认直接输入不碰剪贴板，显式复制偏好另行安全结算。离线先核对 UTF-16、控制字符、长度/溢出、部分接受与焦点变化；不以返回错误推定零输入，不自动重贴。日志区分“OS 接受输入”与“剪贴板读取”，两者均不能称远端已确认。正式算法、配置、安装版及已禁用的 Direct 设置在本调研阶段仍未改动。
