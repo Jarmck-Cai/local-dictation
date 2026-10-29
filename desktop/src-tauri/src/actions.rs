@@ -49,7 +49,7 @@ fn emit_paste_error(app: &AppHandle, error: &str) {
 
 /// Drop guard that finishes the transcription pipeline, including immediate
 /// model unloading on early exits.
-struct FinishGuard(AppHandle, Arc<TranscriptionManager>);
+struct FinishGuard(AppHandle, Arc<TranscriptionManager>, Option<u64>);
 impl Drop for FinishGuard {
     fn drop(&mut self) {
         // Esc remains registered throughout recognition and cleanup. Remove it
@@ -57,8 +57,10 @@ impl Drop for FinishGuard {
         // queued recording and register its own cancellation lifecycle.
         shortcut::unregister_cancel_shortcut(&self.0);
         self.1.maybe_unload_immediately("transcription session");
-        if let Some(c) = self.0.try_state::<TranscriptionCoordinator>() {
-            c.notify_processing_finished();
+        if let (Some(c), Some(recording_id)) =
+            (self.0.try_state::<TranscriptionCoordinator>(), self.2)
+        {
+            c.notify_processing_finished(recording_id);
         }
         // The pipeline just freed its large transient buffers (captured PCM,
         // WAV copy, engine scratch); hand the cached pages back to the OS so
@@ -353,6 +355,9 @@ impl ShortcutAction for TranscribeAction {
     }
 
     fn stop(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
+        let recording_id = app
+            .try_state::<TranscriptionCoordinator>()
+            .and_then(|coordinator| coordinator.current_recording_id());
         // Capture before claiming the session: once it is claimed, Esc can
         // cancel from another callback before the processing task is spawned.
         let cancel_generation = app
@@ -367,7 +372,14 @@ impl ShortcutAction for TranscribeAction {
             .and_then(|mut sessions| sessions.remove(binding_id))
         {
             Some(Some((session, started))) => (session, Some(started)),
-            Some(None) => return,
+            Some(None) => {
+                if let (Some(coordinator), Some(id)) =
+                    (app.try_state::<TranscriptionCoordinator>(), recording_id)
+                {
+                    coordinator.notify_stop_aborted(id);
+                }
+                return;
+            }
             None => (CleanupSession::unavailable(), None),
         };
         // Prevent a slow microphone from emitting a ready event or start chime
@@ -408,7 +420,7 @@ impl ShortcutAction for TranscribeAction {
         timing.begin_resources();
 
         tauri::async_runtime::spawn(async move {
-            let guard = Arc::new(FinishGuard(ah.clone(), Arc::clone(&tm)));
+            let guard = Arc::new(FinishGuard(ah.clone(), Arc::clone(&tm), recording_id));
             debug!(
                 "Starting async transcription task for binding: {}",
                 binding_id

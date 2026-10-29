@@ -1,10 +1,11 @@
 use crate::actions::ACTION_MAP;
 use crate::managers::audio::AudioRecordingManager;
+use crate::recording_gate::{RecordingGate, RecordingPermit};
 use crate::settings::ShortcutActivation;
 use log::{debug, error, warn};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
@@ -174,8 +175,14 @@ enum Command {
     Input(InputEvent),
     Cancel {
         recording_was_active: bool,
+        recording_id: Option<u64>,
     },
-    ProcessingFinished,
+    StopAborted {
+        recording_id: u64,
+    },
+    ProcessingFinished {
+        recording_id: u64,
+    },
     TryBeginManualPaste {
         expires: Instant,
         active: Arc<AtomicBool>,
@@ -238,6 +245,10 @@ struct CoordinatorState {
     recording_hotkey: Option<String>,
     manual_paste: Option<(u64, Arc<AtomicBool>)>,
     next_manual_paste_id: u64,
+    next_recording_id: u64,
+    recording_id: Option<u64>,
+    cancel_completed_id: Option<u64>,
+    stop_aborted_id: Option<u64>,
 }
 
 impl CoordinatorState {
@@ -298,6 +309,10 @@ impl CoordinatorState {
             recording_hotkey: None,
             manual_paste: None,
             next_manual_paste_id: 0,
+            next_recording_id: 0,
+            recording_id: None,
+            cancel_completed_id: None,
+            stop_aborted_id: None,
         }
     }
 
@@ -540,17 +555,19 @@ impl CoordinatorState {
             self.hold = None;
             self.recording_deadline = None;
             self.recording_hotkey = None;
+            self.recording_id = None;
         }
     }
 
     fn on_processing_finished(&mut self) -> Option<Effect> {
         // An untagged completion belongs to the automatic transcription pipeline.
         // Only the matching manual guard may release a manual transaction.
-        if self.manual_paste.is_some() {
+        if self.manual_paste.is_some() || self.stage != Stage::Processing {
             return None;
         }
         self.stage = Stage::Idle;
         self.hold = None;
+        self.recording_id = None;
         let pending = self.pending_press.take()?;
         debug!(
             "Pipeline drained; starting remembered press for '{}'",
@@ -562,6 +579,36 @@ impl CoordinatorState {
             pending.pressed_at,
             pending.locked,
         ))
+    }
+
+    fn accepts_processing_finished(&self, recording_id: u64) -> bool {
+        self.stage == Stage::Processing
+            && self.manual_paste.is_none()
+            && self.recording_id == Some(recording_id)
+    }
+
+    fn on_cancel_complete(&mut self, recording_id: Option<u64>, recording_was_active: bool) {
+        if recording_id != self.recording_id {
+            return;
+        }
+        if self.stage == Stage::Processing && recording_was_active {
+            self.cancel_completed_id = recording_id;
+        }
+        self.on_cancel(recording_was_active);
+    }
+
+    fn on_stop_aborted(&mut self, recording_id: u64) {
+        if self.accepts_processing_finished(recording_id) {
+            self.stop_aborted_id = Some(recording_id);
+        }
+    }
+
+    fn aborted_stop_ready(&self) -> Option<u64> {
+        self.recording_id.filter(|id| {
+            self.accepts_processing_finished(*id)
+                && self.stop_aborted_id == Some(*id)
+                && self.cancel_completed_id == Some(*id)
+        })
     }
 
     /// Reconcile the optimistic `Stage::Recording` after the executor reports
@@ -577,6 +624,7 @@ impl CoordinatorState {
             self.hold = None;
             self.recording_deadline = None;
             self.recording_hotkey = None;
+            self.recording_id = None;
         }
     }
 
@@ -591,6 +639,10 @@ impl CoordinatorState {
         locked: bool,
     ) -> Effect {
         self.stage = Stage::Recording(binding_id.clone());
+        self.next_recording_id = self.next_recording_id.wrapping_add(1).max(1);
+        self.recording_id = Some(self.next_recording_id);
+        self.cancel_completed_id = None;
+        self.stop_aborted_id = None;
         self.hold = Some(Hold { pressed_at, locked });
         self.recording_deadline = Some(pressed_at + MAX_RECORDING);
         self.recording_hotkey = Some(hotkey_string.clone());
@@ -620,6 +672,135 @@ impl CoordinatorState {
 /// returned [`Effect`]s.
 pub struct TranscriptionCoordinator {
     tx: Sender<Command>,
+    recording_gate: Arc<RecordingGate>,
+    active_recording_id: Arc<AtomicU64>,
+    active_capture: Arc<Mutex<Option<(u64, Weak<RecordingPermit>)>>>,
+    arming_or_recording: Arc<AtomicBool>,
+}
+
+struct CaptureOwnership {
+    gate: Arc<RecordingGate>,
+    permit: Option<Arc<RecordingPermit>>,
+    active_recording_id: Arc<AtomicU64>,
+    active_capture: Arc<Mutex<Option<(u64, Weak<RecordingPermit>)>>>,
+    arming_or_recording: Arc<AtomicBool>,
+    pending_idle_unload: Option<u64>,
+}
+
+impl CaptureOwnership {
+    fn retry_idle_unload(&mut self, state: &CoordinatorState, id: u64, retry: impl FnOnce()) {
+        if self.pending_idle_unload == Some(id)
+            && state.stage == Stage::Idle
+            && state.recording_id.is_none()
+            && self.permit.is_none()
+        {
+            self.pending_idle_unload = None;
+            retry();
+        }
+    }
+
+    fn start_recording(
+        &mut self,
+        state: &mut CoordinatorState,
+        binding_id: &str,
+        hotkey: &str,
+        start: impl FnOnce(&str, &str) -> bool,
+        retry_unload: impl FnOnce(),
+    ) {
+        let id = state.recording_id.unwrap_or(0);
+        let mut action_ran = false;
+        let active_capture = &self.active_capture;
+        let active_recording_id = &self.active_recording_id;
+        let arming_or_recording = &self.arming_or_recording;
+        self.permit = start_with_capture(state, &self.gate, binding_id, |permit| {
+            *active_capture.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((id, Arc::downgrade(permit)));
+            active_recording_id.store(id, Ordering::Release);
+            arming_or_recording.store(true, Ordering::Release);
+            action_ran = true;
+            start(binding_id, hotkey)
+        });
+        let cancellation_retained_capture =
+            retain_session_capture(&self.active_capture, id).is_some() && self.permit.is_none();
+        if self.permit.is_some() {
+            self.pending_idle_unload = None;
+        } else if action_ran {
+            self.pending_idle_unload = Some(id);
+        }
+        self.sync_id(state);
+        if !cancellation_retained_capture {
+            self.retry_idle_unload(state, id, retry_unload);
+        }
+    }
+
+    fn cancel_completed(
+        &mut self,
+        state: &mut CoordinatorState,
+        id: Option<u64>,
+        recording_was_active: bool,
+        execute: impl FnOnce(&mut CoordinatorState, &mut Self, Effect),
+        retry_unload: impl FnOnce(),
+    ) {
+        if id.is_some() && id == state.recording_id {
+            self.pending_idle_unload = id;
+        }
+        state.on_cancel_complete(id, recording_was_active);
+        self.finish_aborted(state, execute);
+        self.release_if_idle(state);
+        if let Some(id) = id {
+            self.retry_idle_unload(state, id, retry_unload);
+        }
+    }
+
+    fn stop_aborted(
+        &mut self,
+        state: &mut CoordinatorState,
+        id: u64,
+        execute: impl FnOnce(&mut CoordinatorState, &mut Self, Effect),
+        retry_unload: impl FnOnce(),
+    ) {
+        if state.accepts_processing_finished(id) {
+            self.pending_idle_unload = Some(id);
+        }
+        state.on_stop_aborted(id);
+        self.finish_aborted(state, execute);
+        self.sync_id(state);
+        self.retry_idle_unload(state, id, retry_unload);
+    }
+
+    fn finish_aborted(
+        &mut self,
+        state: &mut CoordinatorState,
+        execute: impl FnOnce(&mut CoordinatorState, &mut Self, Effect),
+    ) {
+        if let Some(id) = state.aborted_stop_ready() {
+            if let Some(effect) = finish_processing_capture(state, &mut self.permit, id) {
+                execute(state, self, effect);
+            }
+        }
+    }
+
+    fn release_if_idle(&mut self, state: &CoordinatorState) {
+        if state.stage == Stage::Idle {
+            self.permit.take();
+        }
+        self.sync_id(state);
+    }
+
+    fn sync_id(&self, state: &CoordinatorState) {
+        self.arming_or_recording.store(
+            matches!(state.stage, Stage::Recording(_)),
+            Ordering::Release,
+        );
+        self.active_recording_id
+            .store(state.recording_id.unwrap_or(0), Ordering::Release);
+        if self.permit.is_none() {
+            *self
+                .active_capture
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -691,24 +872,44 @@ impl TranscriptionCoordinator {
     pub fn new(app: AppHandle) -> Self {
         let (tx, rx) = mpsc::channel();
         let worker_tx = tx.clone();
+        let recording_gate = Arc::new(RecordingGate::default());
+        let active_recording_id = Arc::new(AtomicU64::new(0));
+        let active_capture = Arc::new(Mutex::new(None));
+        let arming_or_recording = Arc::new(AtomicBool::new(false));
+        let worker_gate = Arc::clone(&recording_gate);
+        let worker_recording_id = Arc::clone(&active_recording_id);
+        let worker_active_capture = Arc::clone(&active_capture);
+        let worker_recording_stage = Arc::clone(&arming_or_recording);
 
         thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut state = CoordinatorState::new();
+                let mut capture = CaptureOwnership {
+                    gate: worker_gate,
+                    permit: None,
+                    active_recording_id: worker_recording_id,
+                    active_capture: worker_active_capture,
+                    arming_or_recording: worker_recording_stage,
+                    pending_idle_unload: None,
+                };
 
                 loop {
                     // Check before receiving too: a stream of repeated key
                     // events must not postpone the recording cap indefinitely.
                     if let Some(effect) = state.on_recording_limit(Instant::now()) {
-                        run_effect(&app, &mut state, effect);
+                        run_effect(&app, &mut state, &mut capture, effect);
                     }
                     if matches!(state.stage, Stage::Recording(_)) {
                         if let Some(detail) = app
                             .state::<Arc<AudioRecordingManager>>()
                             .capture_health_error()
                         {
+                            let recording_id = state.recording_id;
                             crate::utils::cancel_current_operation(&app);
-                            state.on_cancel(true);
+                            capture.cancel_completed(&mut state, recording_id, true,
+                                |state, capture, effect| run_effect(&app, state, capture, effect),
+                                || app.state::<Arc<crate::managers::transcription::TranscriptionManager>>()
+                                    .maybe_unload_immediately("failed capture cancellation"));
                             let _ = app.emit(
                                 "recording-error",
                                 serde_json::json!({
@@ -728,10 +929,10 @@ impl TranscriptionCoordinator {
                             Err(mpsc::RecvTimeoutError::Timeout) => {
                                 let now = Instant::now();
                                 if let Some(effect) = state.on_recording_limit(now) {
-                                    run_effect(&app, &mut state, effect);
+                                    run_effect(&app, &mut state, &mut capture, effect);
                                 } else if state.grace_deadline().is_some_and(|at| now >= at) {
                                     if let Some(effect) = state.on_grace_expired() {
-                                        run_effect(&app, &mut state, effect);
+                                        run_effect(&app, &mut state, &mut capture, effect);
                                     }
                                 }
                                 continue;
@@ -748,16 +949,33 @@ impl TranscriptionCoordinator {
                     match cmd {
                         Command::Input(input) => {
                             if let Some(effect) = state.on_input(input, Instant::now()) {
-                                run_effect(&app, &mut state, effect);
+                                run_effect(&app, &mut state, &mut capture, effect);
                             }
                         }
                         Command::Cancel {
                             recording_was_active,
-                        } => state.on_cancel(recording_was_active),
-                        Command::ProcessingFinished => {
-                            if let Some(effect) = state.on_processing_finished() {
-                                run_effect(&app, &mut state, effect);
+                            recording_id,
+                        } => {
+                            capture.cancel_completed(&mut state, recording_id, recording_was_active,
+                                |state, capture, effect| run_effect(&app, state, capture, effect),
+                                || app.state::<Arc<crate::managers::transcription::TranscriptionManager>>()
+                                    .maybe_unload_immediately("recording cancellation"));
+                        }
+                        Command::StopAborted { recording_id } => {
+                            capture.stop_aborted(&mut state, recording_id,
+                                |state, capture, effect| run_effect(&app, state, capture, effect),
+                                || app.state::<Arc<crate::managers::transcription::TranscriptionManager>>()
+                                    .maybe_unload_immediately("aborted recording stop"));
+                        }
+                        Command::ProcessingFinished { recording_id } => {
+                            if let Some(effect) = finish_processing_capture(
+                                &mut state,
+                                &mut capture.permit,
+                                recording_id,
+                            ) {
+                                run_effect(&app, &mut state, &mut capture, effect);
                             }
+                            capture.sync_id(&state);
                         }
                         Command::TryBeginManualPaste {
                             expires,
@@ -791,8 +1009,9 @@ impl TranscriptionCoordinator {
                         }
                         Command::ManualPasteFinished { id } => {
                             if let Some(effect) = state.on_manual_paste_finished(id) {
-                                run_effect(&app, &mut state, effect);
+                                run_effect(&app, &mut state, &mut capture, effect);
                             }
+                            capture.sync_id(&state);
                         }
                     }
                 }
@@ -803,7 +1022,44 @@ impl TranscriptionCoordinator {
             }
         });
 
-        Self { tx }
+        Self {
+            tx,
+            recording_gate,
+            active_recording_id,
+            active_capture,
+            arming_or_recording,
+        }
+    }
+
+    /// Claim the same capture slot used by every ordinary dictation start.
+    /// The caller holds the permit only while meeting capture is active.
+    pub fn try_claim_meeting_capture(&self) -> Result<RecordingPermit, String> {
+        self.recording_gate
+            .try_claim()
+            .ok_or_else(|| "meeting_dictation_busy".to_string())
+    }
+
+    /// Capture this identifier before spawning the matching stop pipeline.
+    pub fn current_recording_id(&self) -> Option<u64> {
+        match self.active_recording_id.load(Ordering::Acquire) {
+            0 => None,
+            id => Some(id),
+        }
+    }
+
+    /// Keep the already claimed session alive until synchronous cancellation
+    /// has sealed capture and restored mute, including a racing start failure.
+    pub(crate) fn retain_recording_capture(
+        &self,
+        recording_id: u64,
+    ) -> Option<Arc<RecordingPermit>> {
+        retain_session_capture(&self.active_capture, recording_id)
+    }
+
+    /// Read-only arming/recording state; processing completion must still obey
+    /// the user's immediate model-unload preference.
+    pub(crate) fn is_arming_or_recording(&self) -> bool {
+        self.arming_or_recording.load(Ordering::Acquire)
     }
 
     /// Send a keyboard input event for a transcribe binding. `hold_threshold`
@@ -884,11 +1140,14 @@ impl TranscriptionCoordinator {
         })
     }
 
-    pub fn notify_cancel(&self, recording_was_active: bool) {
+    /// Acknowledge cancellation only after capture sealing and mute restoration
+    /// have synchronously returned. The id is captured before either begins.
+    pub fn notify_cancel(&self, recording_was_active: bool, recording_id: Option<u64>) {
         if self
             .tx
             .send(Command::Cancel {
                 recording_was_active,
+                recording_id,
             })
             .is_err()
         {
@@ -896,26 +1155,54 @@ impl TranscriptionCoordinator {
         }
     }
 
-    pub fn notify_processing_finished(&self) {
-        if self.tx.send(Command::ProcessingFinished).is_err() {
+    /// A stop that consumed a cancellation tombstone has no async FinishGuard.
+    /// Its capture slot is released only after the matching real cancel ack.
+    pub fn notify_stop_aborted(&self, recording_id: u64) {
+        if self.tx.send(Command::StopAborted { recording_id }).is_err() {
+            warn!("Transcription coordinator channel closed");
+        }
+    }
+
+    pub fn notify_processing_finished(&self, recording_id: u64) {
+        if self
+            .tx
+            .send(Command::ProcessingFinished { recording_id })
+            .is_err()
+        {
             warn!("Transcription coordinator channel closed");
         }
     }
 }
 
-fn run_effect(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
+fn run_effect(
+    app: &AppHandle,
+    state: &mut CoordinatorState,
+    capture: &mut CaptureOwnership,
+    effect: Effect,
+) {
     match effect {
         Effect::Start {
             binding_id,
             hotkey_string,
         } => {
-            let started = start(app, &binding_id, &hotkey_string);
-            state.on_start_result(&binding_id, started);
+            capture.start_recording(
+                state,
+                &binding_id,
+                &hotkey_string,
+                |binding, hotkey| start(app, binding, hotkey),
+                || {
+                    app.state::<Arc<crate::managers::transcription::TranscriptionManager>>()
+                        .maybe_unload_immediately("failed recording startup")
+                },
+            );
         }
         Effect::Stop {
             binding_id,
             hotkey_string,
-        } => stop(app, &binding_id, &hotkey_string),
+        } => {
+            capture.arming_or_recording.store(false, Ordering::Release);
+            stop(app, &binding_id, &hotkey_string);
+        }
     }
 }
 
@@ -944,9 +1231,511 @@ fn stop(app: &AppHandle, binding_id: &str, hotkey_string: &str) {
     action.stop(app, binding_id, hotkey_string);
 }
 
+fn retain_session_capture(
+    active_capture: &Mutex<Option<(u64, Weak<RecordingPermit>)>>,
+    recording_id: u64,
+) -> Option<Arc<RecordingPermit>> {
+    active_capture
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|(id, _)| *id == recording_id)
+        .and_then(|(_, permit)| permit.upgrade())
+}
+
+fn start_with_capture(
+    state: &mut CoordinatorState,
+    gate: &Arc<RecordingGate>,
+    binding_id: &str,
+    start_recording: impl FnOnce(&Arc<RecordingPermit>) -> bool,
+) -> Option<Arc<RecordingPermit>> {
+    let permit = gate.try_claim().map(Arc::new);
+    // Claim before invoking any action: it can load a model, show an overlay,
+    // mute playback, and open the microphone before it returns.
+    let started = permit.as_ref().is_some_and(start_recording);
+    state.on_start_result(binding_id, started);
+    if started {
+        permit
+    } else {
+        None
+    }
+}
+
+fn finish_processing_capture(
+    state: &mut CoordinatorState,
+    recording_permit: &mut Option<Arc<RecordingPermit>>,
+    recording_id: u64,
+) -> Option<Effect> {
+    if !state.accepts_processing_finished(recording_id) {
+        return None;
+    }
+    recording_permit.take();
+    state.on_processing_finished()
+}
+
+#[cfg(test)]
+mod recording_bridge_tests {
+    use super::*;
+
+    fn capture_for_test(gate: &Arc<RecordingGate>) -> CaptureOwnership {
+        CaptureOwnership {
+            gate: gate.clone(),
+            permit: None,
+            active_recording_id: Arc::new(AtomicU64::new(0)),
+            active_capture: Arc::new(Mutex::new(None)),
+            arming_or_recording: Arc::new(AtomicBool::new(false)),
+            pending_idle_unload: None,
+        }
+    }
+
+    #[test]
+    fn arming_failure_retries_unload_and_cancelled_arming_waits_for_real_ack() {
+        for cancellation_in_flight in [false, true] {
+            let gate = Arc::new(RecordingGate::default());
+            let mut capture = capture_for_test(&gate);
+            let active_capture = capture.active_capture.clone();
+            let mut state = CoordinatorState::new();
+            state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+            let id = state.recording_id.unwrap();
+            let mut cancellation = None;
+            let mut unloads = 0;
+            capture.start_recording(
+                &mut state,
+                "transcribe",
+                "f8",
+                |_, _| {
+                    if cancellation_in_flight {
+                        cancellation = retain_session_capture(&active_capture, id);
+                    }
+                    false
+                },
+                || unloads += 1,
+            );
+            assert_eq!(state.stage, Stage::Idle);
+            if cancellation_in_flight {
+                assert_eq!(
+                    unloads, 0,
+                    "the audio cancel tail has not acknowledged restoration"
+                );
+                assert!(gate.try_claim().is_none());
+                drop(cancellation);
+                capture.cancel_completed(
+                    &mut state,
+                    Some(id),
+                    true,
+                    |_, _, _| panic!(),
+                    || unloads += 1,
+                );
+            }
+            assert_eq!(unloads, 1);
+            assert!(gate.try_claim().is_some());
+        }
+    }
+
+    #[test]
+    fn real_recording_cancel_retries_unload_after_releasing_capture() {
+        let gate = Arc::new(RecordingGate::default());
+        let mut capture = capture_for_test(&gate);
+        let mut state = CoordinatorState::new();
+        state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+        capture.permit = start_with_capture(&mut state, &gate, "transcribe", |_| true);
+        capture.sync_id(&state);
+        let id = state.recording_id.unwrap();
+        let mut unloads = 0;
+        capture.cancel_completed(
+            &mut state,
+            Some(id),
+            true,
+            |_, _, _| panic!("cancel should not start another recording"),
+            || {
+                assert!(
+                    gate.try_claim().is_some(),
+                    "capture must be released before unload retry"
+                );
+                unloads += 1;
+            },
+        );
+        assert_eq!(state.stage, Stage::Idle);
+        assert_eq!(
+            unloads, 1,
+            "Immediate must be retried after the real cancel acknowledgement"
+        );
+        capture.cancel_completed(
+            &mut state,
+            Some(id),
+            true,
+            |_, _, _| panic!(),
+            || unloads += 1,
+        );
+        assert_eq!(
+            unloads, 1,
+            "duplicate acknowledgement must not unload another session"
+        );
+    }
+
+    #[test]
+    fn aborted_stop_retries_unload_in_both_acknowledgement_orders() {
+        for cancel_first in [false, true] {
+            let gate = Arc::new(RecordingGate::default());
+            let mut capture = capture_for_test(&gate);
+            let mut state = CoordinatorState::new();
+            state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+            capture.permit = start_with_capture(&mut state, &gate, "transcribe", |_| true);
+            let id = state.recording_id.unwrap();
+            state.begin_processing("transcribe".into(), "f8".into());
+            let mut unloads = 0;
+            if cancel_first {
+                capture.cancel_completed(
+                    &mut state,
+                    Some(id),
+                    true,
+                    |_, _, _| panic!(),
+                    || unloads += 1,
+                );
+                assert_eq!(unloads, 0);
+                capture.stop_aborted(&mut state, id, |_, _, _| panic!(), || unloads += 1);
+            } else {
+                capture.stop_aborted(&mut state, id, |_, _, _| panic!(), || unloads += 1);
+                assert_eq!(unloads, 0);
+                capture.cancel_completed(
+                    &mut state,
+                    Some(id),
+                    true,
+                    |_, _, _| panic!(),
+                    || unloads += 1,
+                );
+            }
+            assert_eq!(unloads, 1);
+            assert!(gate.try_claim().is_some());
+        }
+    }
+
+    #[test]
+    fn stale_cancel_ack_does_not_retry_unload_during_new_recording_or_processing() {
+        let gate = Arc::new(RecordingGate::default());
+        let mut capture = capture_for_test(&gate);
+        let mut state = CoordinatorState::new();
+        state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+        capture.permit = start_with_capture(&mut state, &gate, "transcribe", |_| true);
+        let new_id = state.recording_id.unwrap();
+        capture.pending_idle_unload = Some(new_id.wrapping_sub(1));
+        let mut unloads = 0;
+        capture.cancel_completed(
+            &mut state,
+            Some(new_id.wrapping_sub(1)),
+            true,
+            |_, _, _| panic!(),
+            || unloads += 1,
+        );
+        state.begin_processing("transcribe".into(), "f8".into());
+        capture.cancel_completed(
+            &mut state,
+            Some(new_id.wrapping_sub(1)),
+            true,
+            |_, _, _| panic!(),
+            || unloads += 1,
+        );
+        assert_eq!(unloads, 0);
+        assert!(capture.permit.is_some());
+    }
+
+    #[test]
+    fn aborted_completion_executes_remembered_start_and_claims_real_capture() {
+        for cancel_arrives_first in [true, false] {
+            let gate = Arc::new(RecordingGate::default());
+            let mut capture = CaptureOwnership {
+                gate: gate.clone(),
+                permit: None,
+                active_recording_id: Arc::new(AtomicU64::new(0)),
+                active_capture: Arc::new(Mutex::new(None)),
+                arming_or_recording: Arc::new(AtomicBool::new(false)),
+                pending_idle_unload: None,
+            };
+            let mut state = CoordinatorState::new();
+            state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+            capture.permit = start_with_capture(&mut state, &gate, "transcribe", |_| true);
+            let id = state.recording_id.unwrap();
+            state.begin_processing("transcribe".into(), "f8".into());
+            if cancel_arrives_first {
+                state.on_cancel_complete(Some(id), true);
+            } else {
+                state.on_stop_aborted(id);
+            }
+            // A new press after CancelComplete is a new request; before the
+            // acknowledgement it is abandoned by that explicit cancellation.
+            state.on_input(
+                InputEvent {
+                    binding_id: "transcribe".into(),
+                    hotkey_string: "f8".into(),
+                    is_pressed: true,
+                    mode: ShortcutActivation::Toggle,
+                    hold_threshold: Duration::ZERO,
+                    external: true,
+                },
+                Instant::now(),
+            );
+            if cancel_arrives_first {
+                state.on_stop_aborted(id);
+            } else {
+                state.on_cancel_complete(Some(id), true);
+            }
+            let mut starts = 0;
+            capture.finish_aborted(&mut state, |state, capture, effect| {
+                let Effect::Start { binding_id, .. } = effect else {
+                    panic!("completion must start");
+                };
+                capture.permit = start_with_capture(state, &capture.gate, &binding_id, |_| {
+                    starts += 1;
+                    true
+                });
+            });
+            assert_eq!(starts, usize::from(cancel_arrives_first));
+            assert_eq!(
+                matches!(state.stage, Stage::Recording(_)),
+                cancel_arrives_first
+            );
+            assert_eq!(capture.permit.is_some(), cancel_arrives_first);
+            assert_eq!(gate.try_claim().is_none(), cancel_arrives_first);
+        }
+    }
+
+    #[test]
+    fn cancelled_arming_keeps_capture_until_real_mute_restoration() {
+        let gate = Arc::new(RecordingGate::default());
+        let active_capture = Mutex::new(None);
+        let mut state = CoordinatorState::new();
+        state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+        let id = state.recording_id.unwrap();
+        let mut cancel_guard = None;
+        let permit = start_with_capture(&mut state, &gate, "transcribe", |permit| {
+            *active_capture.lock().unwrap() = Some((id, Arc::downgrade(permit)));
+            cancel_guard = retain_session_capture(&active_capture, id);
+            // The low-level recorder has reported Idle, but cancellation is
+            // still sealing its tail and restoring playback on another thread.
+            false
+        });
+        assert!(permit.is_none());
+        assert_eq!(state.stage, Stage::Idle);
+        assert!(
+            gate.try_claim().is_none(),
+            "meeting must wait for real cancel completion"
+        );
+        drop(cancel_guard);
+        assert!(gate.try_claim().is_some());
+    }
+
+    #[test]
+    fn cancelled_capture_reference_is_bound_to_its_own_generation() {
+        let gate = Arc::new(RecordingGate::default());
+        let active_capture = Mutex::new(None);
+        let first = Arc::new(gate.try_claim().unwrap());
+        *active_capture.lock().unwrap() = Some((41, Arc::downgrade(&first)));
+        let old_reference = retain_session_capture(&active_capture, 41).unwrap();
+        assert!(retain_session_capture(&active_capture, 42).is_none());
+        drop(first);
+        assert!(gate.try_claim().is_none());
+        drop(old_reference);
+        let next = Arc::new(gate.try_claim().unwrap());
+        assert!(
+            retain_session_capture(&active_capture, 41).is_none(),
+            "expired weak reference cannot retain a new slot"
+        );
+        *active_capture.lock().unwrap() = Some((42, Arc::downgrade(&next)));
+        assert!(retain_session_capture(&active_capture, 41).is_none());
+        let new_reference = retain_session_capture(&active_capture, 42).unwrap();
+        drop(next);
+        assert!(gate.try_claim().is_none());
+        drop(new_reference);
+        assert!(gate.try_claim().is_some());
+    }
+
+    #[test]
+    fn aborted_stop_waits_for_real_cancel_ack_in_both_message_orders() {
+        for cancel_arrives_first in [false, true] {
+            let gate = Arc::new(RecordingGate::default());
+            let mut state = CoordinatorState::new();
+            state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+            let mut permit = start_with_capture(&mut state, &gate, "transcribe", |_| true);
+            let id = state.recording_id.unwrap();
+            state.begin_processing("transcribe".into(), "f8".into());
+            // Simulate cancel_recording already publishing Idle while a slow
+            // capture stop and playback restoration have not returned yet.
+            if cancel_arrives_first {
+                state.on_cancel_complete(Some(id), true);
+            } else {
+                state.on_stop_aborted(id);
+            }
+            assert!(state.aborted_stop_ready().is_none());
+            assert!(
+                gate.try_claim().is_none(),
+                "capture/mute tail is still owned"
+            );
+            if cancel_arrives_first {
+                state.on_stop_aborted(id);
+            } else {
+                state.on_cancel_complete(Some(id), true);
+            }
+            let finished = state
+                .aborted_stop_ready()
+                .expect("both stop and real cancel ack arrived");
+            finish_processing_capture(&mut state, &mut permit, finished);
+            assert_eq!(state.stage, Stage::Idle);
+            assert!(gate.try_claim().is_some());
+        }
+    }
+
+    #[test]
+    fn old_cancel_ack_and_aborted_stop_cannot_complete_new_capture() {
+        let gate = Arc::new(RecordingGate::default());
+        let mut state = CoordinatorState::new();
+        state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+        let mut permit = start_with_capture(&mut state, &gate, "transcribe", |_| true);
+        let old_id = state.recording_id.unwrap();
+        state.begin_processing("transcribe".into(), "f8".into());
+        finish_processing_capture(&mut state, &mut permit, old_id);
+        state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+        permit = start_with_capture(&mut state, &gate, "transcribe", |_| true);
+        state.on_cancel_complete(Some(old_id), true);
+        state.on_stop_aborted(old_id);
+        assert!(matches!(state.stage, Stage::Recording(_)));
+        assert!(gate.try_claim().is_none());
+        state.begin_processing("transcribe".into(), "f8".into());
+        state.on_cancel_complete(Some(old_id), true);
+        state.on_stop_aborted(old_id);
+        assert!(state.aborted_stop_ready().is_none());
+        assert!(gate.try_claim().is_none());
+        drop(permit);
+    }
+
+    #[test]
+    fn normal_processing_cancel_still_waits_for_its_finish_guard() {
+        let gate = Arc::new(RecordingGate::default());
+        let mut state = CoordinatorState::new();
+        state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+        let mut permit = start_with_capture(&mut state, &gate, "transcribe", |_| true);
+        let id = state.recording_id.unwrap();
+        state.begin_processing("transcribe".into(), "f8".into());
+        state.on_cancel_complete(Some(id), true);
+        assert!(state.aborted_stop_ready().is_none());
+        assert!(gate.try_claim().is_none());
+        finish_processing_capture(&mut state, &mut permit, id);
+        assert!(gate.try_claim().is_some());
+    }
+
+    #[test]
+    fn meeting_capture_blocks_every_dictation_start_side_effect() {
+        let gate = Arc::new(RecordingGate::default());
+        let _meeting = gate.try_claim().unwrap();
+        let mut state = CoordinatorState::new();
+        state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+        let mut calls = 0;
+        let permit = start_with_capture(&mut state, &gate, "transcribe", |_| {
+            calls += 1;
+            true
+        });
+        assert_eq!(
+            calls, 0,
+            "model kickoff, overlay, mute and capture must not run"
+        );
+        assert!(permit.is_none());
+        assert_eq!(state.stage, Stage::Idle);
+    }
+
+    #[test]
+    fn failed_dictation_start_releases_the_capture_slot() {
+        let gate = Arc::new(RecordingGate::default());
+        let mut state = CoordinatorState::new();
+        state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+        let permit = start_with_capture(&mut state, &gate, "transcribe", |_| false);
+        assert!(permit.is_none());
+        assert!(gate.try_claim().is_some());
+        assert_eq!(state.stage, Stage::Idle);
+    }
+
+    #[test]
+    fn capture_stays_owned_through_async_stop_and_only_matching_finish_releases_it() {
+        let gate = Arc::new(RecordingGate::default());
+        let mut state = CoordinatorState::new();
+        state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+        let mut permit = start_with_capture(&mut state, &gate, "transcribe", |_| true);
+        let old_id = state.recording_id.unwrap();
+        state.begin_processing("transcribe".into(), "f8".into());
+        assert!(
+            gate.try_claim().is_none(),
+            "async stop has not sealed capture or restored mute"
+        );
+        finish_processing_capture(&mut state, &mut permit, old_id.wrapping_add(1));
+        assert!(
+            gate.try_claim().is_none(),
+            "a stale finish cannot release capture"
+        );
+        finish_processing_capture(&mut state, &mut permit, old_id);
+        assert!(gate.try_claim().is_some());
+        state.begin_recording("transcribe".into(), "f8".into(), Instant::now(), true);
+        permit = start_with_capture(&mut state, &gate, "transcribe", |_| true);
+        finish_processing_capture(&mut state, &mut permit, old_id);
+        assert!(
+            gate.try_claim().is_none(),
+            "old completion cannot release new recording"
+        );
+        state.begin_processing("transcribe".into(), "f8".into());
+        finish_processing_capture(&mut state, &mut permit, old_id);
+        assert!(
+            gate.try_claim().is_none(),
+            "old completion cannot release new processing"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_automatic_finish_cannot_complete_a_new_recording_or_processing() {
+        let mut state = CoordinatorState::new();
+        let now = Instant::now();
+        state.begin_recording("transcribe".into(), "f8".into(), now, true);
+        let old_id = state.recording_id.unwrap();
+        state.begin_processing("transcribe".into(), "f8".into());
+        assert!(state.accepts_processing_finished(old_id));
+        state.on_processing_finished();
+        state.begin_recording("transcribe".into(), "f8".into(), now, true);
+        let new_id = state.recording_id.unwrap();
+        assert_ne!(old_id, new_id);
+        assert!(!state.accepts_processing_finished(old_id));
+        state.begin_processing("transcribe".into(), "f8".into());
+        assert!(!state.accepts_processing_finished(old_id));
+        assert!(state.accepts_processing_finished(new_id));
+    }
+
+    #[test]
+    fn automatic_finish_cannot_complete_manual_paste() {
+        let mut state = CoordinatorState::new();
+        let now = Instant::now();
+        state.begin_recording("transcribe".into(), "f8".into(), now, true);
+        let old_id = state.recording_id.unwrap();
+        state.begin_processing("transcribe".into(), "f8".into());
+        state.on_processing_finished();
+        state
+            .try_begin_manual_paste(
+                now,
+                now + Duration::from_secs(1),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert!(!state.accepts_processing_finished(old_id));
+    }
+
+    #[test]
+    fn duplicate_automatic_finish_leaves_a_live_recording_intact() {
+        let mut state = CoordinatorState::new();
+        let now = Instant::now();
+        state.begin_recording("transcribe".into(), "f8".into(), now, true);
+        assert!(state.on_processing_finished().is_none());
+        assert_eq!(state.stage, Stage::Recording("transcribe".into()));
+        assert!(state.recording_deadline.is_some());
+    }
 
     #[test]
     fn manual_paste_claims_idle_until_its_own_finish() {

@@ -14,7 +14,7 @@ use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -251,12 +251,233 @@ impl Drop for StreamWorkerGuard {
     }
 }
 
+#[derive(Default)]
+struct BatchTranscriptionGate {
+    serial: Mutex<()>,
+    active: AtomicBool,
+    pending: AtomicUsize,
+}
+
+struct BatchTranscriptionPermit<'a> {
+    gate: &'a BatchTranscriptionGate,
+    _serial: MutexGuard<'a, ()>,
+}
+
+impl BatchTranscriptionGate {
+    fn acquire(&self) -> BatchTranscriptionPermit<'_> {
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        let serial = self.serial.lock().unwrap_or_else(|e| e.into_inner());
+        self.active.store(true, Ordering::Release);
+        BatchTranscriptionPermit {
+            gate: self,
+            _serial: serial,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
+    fn has_work(&self) -> bool {
+        self.pending.load(Ordering::Acquire) != 0
+    }
+}
+
+impl Drop for BatchTranscriptionPermit<'_> {
+    fn drop(&mut self) {
+        // Clear before the serial guard unlocks, so the next borrower cannot
+        // have its active flag cleared by this completed call.
+        self.gate.active.store(false, Ordering::Release);
+        self.gate.pending.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct EngineSlot<E> {
+    generation: u64,
+    model_id: Option<String>,
+    cached: Option<E>,
+    borrowed: Option<EngineBorrowToken>,
+    next_borrow_id: u64,
+    loading: bool,
+    immediate_pending: bool,
+}
+
+impl<E> Default for EngineSlot<E> {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            model_id: None,
+            cached: None,
+            borrowed: None,
+            next_borrow_id: 0,
+            loading: false,
+            immediate_pending: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct EngineBorrowToken {
+    generation: u64,
+    id: u64,
+}
+
+struct EngineLease {
+    token: EngineBorrowToken,
+    model_id: String,
+}
+
+impl<E> EngineSlot<E> {
+    fn is_loaded(&self) -> bool {
+        self.model_id.is_some() && (self.cached.is_some() || self.borrowed.is_some())
+    }
+
+    fn invalidate(&mut self) -> Option<E> {
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.model_id = None;
+        self.borrowed = None;
+        self.loading = false;
+        self.immediate_pending = false;
+        self.cached.take()
+    }
+
+    fn begin_load(&mut self) -> (u64, Option<E>) {
+        let previous = self.invalidate();
+        self.loading = true;
+        (self.generation, previous)
+    }
+
+    fn finish_load(
+        &mut self,
+        generation: u64,
+        model_id: &str,
+        engine: E,
+    ) -> std::result::Result<(), E> {
+        if self.generation != generation || !self.loading {
+            return Err(engine);
+        }
+        self.cached = Some(engine);
+        self.model_id = Some(model_id.into());
+        self.loading = false;
+        Ok(())
+    }
+
+    fn borrow(&mut self) -> Option<(E, EngineLease)> {
+        let model_id = self.model_id.clone()?;
+        let engine = self.cached.take()?;
+        self.next_borrow_id = self.next_borrow_id.wrapping_add(1).max(1);
+        let token = EngineBorrowToken {
+            generation: self.generation,
+            id: self.next_borrow_id,
+        };
+        self.borrowed = Some(token);
+        Some((engine, EngineLease { token, model_id }))
+    }
+
+    fn return_borrow(&mut self, lease: &EngineLease, engine: E) -> std::result::Result<(), E> {
+        if self.generation != lease.token.generation || self.borrowed != Some(lease.token) {
+            return Err(engine);
+        }
+        self.cached = Some(engine);
+        self.borrowed = None;
+        Ok(())
+    }
+
+    fn abandon(&mut self, token: EngineBorrowToken) -> bool {
+        if self.generation == token.generation && self.borrowed == Some(token) {
+            self.invalidate();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn conditional_unload(
+        &mut self,
+        generation: u64,
+        protected: impl FnOnce() -> bool,
+    ) -> Option<E> {
+        self.try_conditional_unload(generation, protected, true)
+    }
+
+    fn try_conditional_unload(
+        &mut self,
+        generation: u64,
+        protected: impl FnOnce() -> bool,
+        defer_immediate: bool,
+    ) -> Option<E> {
+        if self.generation != generation {
+            return None;
+        }
+        if self.borrowed.is_some() || self.loading || protected() {
+            if defer_immediate {
+                self.immediate_pending = true;
+            }
+            return None;
+        }
+        self.invalidate()
+    }
+
+    fn retry_deferred_unload(
+        &mut self,
+        generation: u64,
+        protected: impl FnOnce() -> bool,
+    ) -> Option<E> {
+        if !self.immediate_pending {
+            return None;
+        }
+        self.conditional_unload(generation, protected)
+    }
+
+    fn conditional_idle_unload(
+        &mut self,
+        generation: u64,
+        last_activity: &AtomicU64,
+        now_ms: u64,
+        limit_ms: u64,
+        protected: impl FnOnce() -> bool,
+    ) -> Option<E> {
+        if now_ms.saturating_sub(last_activity.load(Ordering::Acquire)) <= limit_ms {
+            return None;
+        }
+        self.try_conditional_unload(generation, protected, false)
+    }
+}
+
+struct EngineLeaseGuard<E> {
+    slot: Arc<Mutex<EngineSlot<E>>>,
+    token: EngineBorrowToken,
+}
+
+impl<E> Drop for EngineLeaseGuard<E> {
+    fn drop(&mut self) {
+        self.slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .abandon(self.token);
+    }
+}
+
+struct EngineLoadGuard<E> {
+    slot: Arc<Mutex<EngineSlot<E>>>,
+    generation: u64,
+}
+
+impl<E> Drop for EngineLoadGuard<E> {
+    fn drop(&mut self) {
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.generation == self.generation && slot.loading {
+            slot.loading = false;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TranscriptionManager {
-    engine: Arc<Mutex<Option<LoadedEngine>>>,
+    engine: Arc<Mutex<EngineSlot<LoadedEngine>>>,
+    batch_gate: Arc<BatchTranscriptionGate>,
     model_manager: Arc<ModelManager>,
     app_handle: AppHandle,
-    current_model_id: Arc<Mutex<Option<String>>>,
     last_activity: Arc<AtomicU64>,
     shutdown_signal: Arc<AtomicBool>,
     watcher_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
@@ -289,10 +510,10 @@ pub struct TranscriptionManager {
 impl TranscriptionManager {
     pub fn new(app_handle: &AppHandle, model_manager: Arc<ModelManager>) -> Result<Self> {
         let manager = Self {
-            engine: Arc::new(Mutex::new(None)),
+            engine: Arc::new(Mutex::new(EngineSlot::default())),
+            batch_gate: Arc::new(BatchTranscriptionGate::default()),
             model_manager,
             app_handle: app_handle.clone(),
-            current_model_id: Arc::new(Mutex::new(None)),
             last_activity: Arc::new(AtomicU64::new(Self::now_ms())),
             shutdown_signal: Arc::new(AtomicBool::new(false)),
             watcher_handle: Arc::new(Mutex::new(None)),
@@ -356,17 +577,12 @@ impl TranscriptionManager {
                                     idle_ms / 1000,
                                     limit_seconds
                                 );
-                                match manager_cloned.unload_model() {
-                                    Ok(()) => {
-                                        let unload_duration = unload_start.elapsed();
-                                        info!(
-                                            "Model unloaded due to inactivity (took {}ms)",
-                                            unload_duration.as_millis()
-                                        );
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to unload idle model: {}", e);
-                                    }
+                                if manager_cloned.maybe_unload_idle(limit_ms) {
+                                    let unload_duration = unload_start.elapsed();
+                                    info!(
+                                        "Model unloaded due to inactivity (took {}ms)",
+                                        unload_duration.as_millis()
+                                    );
                                 }
                             }
                         }
@@ -381,7 +597,7 @@ impl TranscriptionManager {
     }
 
     /// Lock the engine mutex, recovering from poison if a previous transcription panicked.
-    fn lock_engine(&self) -> MutexGuard<'_, Option<LoadedEngine>> {
+    fn lock_slot(&self) -> MutexGuard<'_, EngineSlot<LoadedEngine>> {
         self.engine.lock().unwrap_or_else(|poisoned| {
             warn!("Engine mutex was poisoned by a previous panic, recovering");
             poisoned.into_inner()
@@ -391,7 +607,16 @@ impl TranscriptionManager {
     pub fn is_model_loaded(&self) -> bool {
         // The engine may be leased out to the streaming worker (taken out of
         // the mutex). It's still loaded, just in use, so report true.
-        self.lock_engine().is_some() || self.active_engine_lease.load(Ordering::Acquire) != 0
+        self.lock_slot().is_loaded()
+    }
+
+    fn borrow_engine(&self) -> Option<(LoadedEngine, EngineLease, EngineLeaseGuard<LoadedEngine>)> {
+        let (engine, lease) = self.lock_slot().borrow()?;
+        let guard = EngineLeaseGuard {
+            slot: self.engine.clone(),
+            token: lease.token,
+        };
+        Some((engine, lease, guard))
     }
 
     /// Accelerator changes should not disturb the current transcription. Mark
@@ -421,15 +646,10 @@ impl TranscriptionManager {
         let unload_start = std::time::Instant::now();
         debug!("Starting to unload model");
 
-        {
-            let mut engine = self.lock_engine();
-            // Dropping the engine frees all resources
-            *engine = None;
-        }
-        {
-            let mut current_model = self.current_model_id.lock().unwrap();
-            *current_model = None;
-        }
+        // Change ownership and generation together; drop native resources only
+        // after releasing the short arbitration lock.
+        let previous = self.lock_slot().invalidate();
+        drop(previous);
 
         // Emit unloaded event
         let _ = self.app_handle.emit(
@@ -464,14 +684,93 @@ impl TranscriptionManager {
 
     /// Unloads the model immediately if the setting is enabled and the model is loaded
     pub fn maybe_unload_immediately(&self, context: &str) {
+        self.maybe_unload_immediately_for(context, false);
+    }
+
+    fn maybe_unload_idle(&self, limit_ms: u64) -> bool {
+        let generation = self.lock_slot().generation;
+        let previous = self.lock_slot().conditional_idle_unload(
+            generation,
+            &self.last_activity,
+            Self::now_ms(),
+            limit_ms,
+            || {
+                self.batch_gate.has_work()
+                    || self
+                        .app_handle
+                        .try_state::<crate::TranscriptionCoordinator>()
+                        .is_some_and(|coordinator| coordinator.current_recording_id().is_some())
+                    || self
+                        .app_handle
+                        .try_state::<Arc<AudioRecordingManager>>()
+                        .is_some_and(|audio| audio.is_recording())
+            },
+        );
+        if let Some(previous) = previous {
+            drop(previous);
+            let _ = self.app_handle.emit(
+                "model-state-changed",
+                ModelStateEvent {
+                    event_type: "unloaded".into(),
+                    model_id: None,
+                    model_name: None,
+                    error: None,
+                },
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    fn maybe_unload_immediately_for(&self, context: &str, protect_processing: bool) {
+        self.conditional_unload_for(context, protect_processing, false);
+    }
+
+    fn conditional_unload_for(&self, context: &str, protect_processing: bool, deferred_only: bool) {
+        let generation = self.lock_slot().generation;
         let settings = get_settings(&self.app_handle);
-        if settings.model_unload_timeout == ModelUnloadTimeout::Immediately
-            && self.is_model_loaded()
-        {
-            info!("Immediately unloading model after {}", context);
-            if let Err(e) = self.unload_model() {
-                warn!("Failed to immediately unload model: {}", e);
+        if settings.model_unload_timeout != ModelUnloadTimeout::Immediately {
+            return;
+        }
+        let protected = || {
+            let protected_dictation = self
+                .app_handle
+                .try_state::<crate::TranscriptionCoordinator>()
+                .is_some_and(|coordinator| {
+                    coordinator.is_arming_or_recording()
+                        || (protect_processing && coordinator.current_recording_id().is_some())
+                });
+            let microphone_recording = self
+                .app_handle
+                .try_state::<Arc<AudioRecordingManager>>()
+                .is_some_and(|audio| audio.is_recording());
+            defer_immediate_unload(
+                self.batch_gate.has_work(),
+                protected_dictation,
+                microphone_recording,
+            )
+        };
+        let previous = {
+            let mut slot = self.lock_slot();
+            if deferred_only {
+                slot.retry_deferred_unload(generation, protected)
+            } else {
+                slot.conditional_unload(generation, protected)
             }
+        };
+        if let Some(previous) = previous {
+            info!("Immediately unloading model after {}", context);
+            drop(previous);
+            let _ = self.app_handle.emit(
+                "model-state-changed",
+                ModelStateEvent {
+                    event_type: "unloaded".into(),
+                    model_id: None,
+                    model_name: None,
+                    error: None,
+                },
+            );
         }
     }
 
@@ -489,6 +788,19 @@ impl TranscriptionManager {
         model_id: &str,
         device_index: Option<usize>,
     ) -> Result<()> {
+        self.load_model_with_device_reserved(model_id, device_index, None)
+    }
+
+    fn load_model_with_device_reserved(
+        &self,
+        model_id: &str,
+        device_index: Option<usize>,
+        reservation: Option<(u64, Option<LoadedEngine>)>,
+    ) -> Result<()> {
+        let _reserved_load = reservation.as_ref().map(|(generation, _)| EngineLoadGuard {
+            slot: self.engine.clone(),
+            generation: *generation,
+        });
         apply_accelerator_settings(&self.app_handle);
 
         let load_start = std::time::Instant::now();
@@ -551,14 +863,13 @@ impl TranscriptionManager {
         // frees the previous native context first — avoids holding two models at
         // once (peak memory on large GGUFs). Clear the id too: if the new load
         // fails, status should read "no loaded model", not the dropped engine.
-        {
-            let mut engine = self.lock_engine();
-            *engine = None;
-        }
-        {
-            let mut current_model = self.current_model_id.lock().unwrap();
-            *current_model = None;
-        }
+        let (load_generation, previous) =
+            reservation.unwrap_or_else(|| self.lock_slot().begin_load());
+        let _load_guard = EngineLoadGuard {
+            slot: self.engine.clone(),
+            generation: load_generation,
+        };
+        drop(previous);
 
         // Create appropriate engine based on model type
 
@@ -737,13 +1048,19 @@ impl TranscriptionManager {
         };
 
         // Update the current engine and model ID
-        {
-            let mut engine = self.lock_engine();
-            *engine = Some(loaded_engine);
-        }
-        {
-            let mut current_model = self.current_model_id.lock().unwrap();
-            *current_model = Some(model_id.to_string());
+        let publish = {
+            let mut slot = self.lock_slot();
+            let result = slot.finish_load(load_generation, model_id, loaded_engine);
+            if result.is_ok() {
+                self.touch_activity();
+            }
+            result
+        };
+        if let Err(stale_engine) = publish {
+            drop(stale_engine);
+            let message = "Model load was superseded by another model operation";
+            emit_loading_failed(message);
+            return Err(anyhow::anyhow!(message));
         }
 
         // Reset idle timer so the watcher doesn't immediately unload a just-loaded model
@@ -766,6 +1083,7 @@ impl TranscriptionManager {
             model_id,
             load_duration.as_millis()
         );
+        self.conditional_unload_for("deferred recording startup cleanup", true, true);
         Ok(())
     }
 
@@ -782,6 +1100,10 @@ impl TranscriptionManager {
         }
 
         *is_loading = true;
+        // Reserve under the same short ownership lock before dispatch, so a
+        // failed recording startup can request cleanup even if this worker has
+        // not begun constructing its model yet. Native drops stay on the worker.
+        let reservation = self.lock_slot().begin_load();
         let self_clone = self.clone();
         thread::spawn(move || {
             if reload_pending {
@@ -790,7 +1112,11 @@ impl TranscriptionManager {
                     .store(false, Ordering::Release);
             }
             let settings = get_settings(&self_clone.app_handle);
-            if let Err(e) = self_clone.load_model(&settings.selected_model) {
+            if let Err(e) = self_clone.load_model_with_device_reserved(
+                &settings.selected_model,
+                None,
+                Some(reservation),
+            ) {
                 error!("Failed to load model: {}", e);
             }
             let mut is_loading = self_clone.is_loading.lock().unwrap();
@@ -800,8 +1126,7 @@ impl TranscriptionManager {
     }
 
     pub fn get_current_model(&self) -> Option<String> {
-        let current_model = self.current_model_id.lock().unwrap();
-        current_model.clone()
+        self.lock_slot().model_id.clone()
     }
 
     /// The compute backend the currently-loaded engine is bound to, for
@@ -810,7 +1135,7 @@ impl TranscriptionManager {
     /// its real backend string; ONNX engines report "onnx"; `None` when no
     /// model is loaded.
     pub fn current_backend(&self) -> Option<String> {
-        match self.lock_engine().as_ref() {
+        match self.lock_slot().cached.as_ref() {
             Some(LoadedEngine::TranscribeCpp(session)) => {
                 Some(session.model().backend().to_string())
             }
@@ -894,8 +1219,8 @@ impl TranscriptionManager {
             drain_until_finalize(rx);
             return;
         }
-        let mut engine = match self.lock_engine().take() {
-            Some(e) => e,
+        let (mut engine, engine_lease, _engine_guard) = match self.borrow_engine() {
+            Some(borrowed) => borrowed,
             None => {
                 info!(
                     "Live preview: model '{}' was unloaded before streaming could begin; \
@@ -913,6 +1238,7 @@ impl TranscriptionManager {
                 return;
             }
         };
+        let model_id = engine_lease.model_id.clone();
 
         // Only transcribe-cpp models expose streaming; ONNX engines fall back to
         // batch. The loaded session (not the ModelManager copy) is the source of
@@ -948,7 +1274,7 @@ impl TranscriptionManager {
         };
 
         if !supports_streaming {
-            self.return_engine(engine, &model_id);
+            self.return_engine(engine, &engine_lease);
             self.router.clear();
             drain_until_finalize(rx);
             return;
@@ -1112,12 +1438,12 @@ impl TranscriptionManager {
             // failed); drain so the finalize handshake still completes and the
             // caller falls back to batch transcription. Return the engine first
             // so the fallback can immediately use it.
-            self.return_engine(engine, &model_id);
+            self.return_engine(engine, &engine_lease);
             drain_until_finalize(rx);
             return;
         }
 
-        self.return_engine(engine, &model_id);
+        self.return_engine(engine, &engine_lease);
         if let (Some(reply), Some(result)) = (finalize_reply, finalize_result) {
             let _ = reply.send(result);
         }
@@ -1127,17 +1453,14 @@ impl TranscriptionManager {
 
     /// Return the leased engine to the mutex, unless the model was switched or
     /// unloaded during transcription (in which case the stale engine is dropped).
-    fn return_engine(&self, engine: LoadedEngine, expected_model_id: &str) {
-        let still_current =
-            self.current_model_id.lock().unwrap().as_deref() == Some(expected_model_id);
-        if still_current {
-            *self.lock_engine() = Some(engine);
-        } else {
+    fn return_engine(&self, engine: LoadedEngine, lease: &EngineLease) {
+        let returned = self.lock_slot().return_borrow(lease, engine);
+        if let Err(stale_engine) = returned {
             info!(
                 "Model changed/unloaded during transcription; dropping stale engine (was '{}')",
-                expected_model_id
+                lease.model_id
             );
-            // `engine` drops here, freeing its resources.
+            drop(stale_engine);
         }
     }
 
@@ -1209,6 +1532,25 @@ impl TranscriptionManager {
     }
 
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
+        self.transcribe_inner(audio, TranscriptionPurpose::Dictation)
+    }
+
+    /// Prepare the selected local model and recognize one meeting utterance
+    /// through the shared SenseVoice session.
+    /// Personal corrections, filler removal and translation never affect this
+    /// call; the user's persisted settings are left untouched.
+    pub fn transcribe_meeting(&self, audio: Vec<f32>) -> Result<String> {
+        self.transcribe_inner(audio, TranscriptionPurpose::Meeting)
+    }
+
+    /// Finish the whole meeting-processing callback on success, error or
+    /// cancellation. Call after any batch inference has returned; ordinary
+    /// dictation preparation and active capture retain their model protection.
+    pub fn finish_meeting_model_use(&self) {
+        self.maybe_unload_immediately_for("meeting processing", true);
+    }
+
+    fn transcribe_inner(&self, audio: Vec<f32>, purpose: TranscriptionPurpose) -> Result<String> {
         #[cfg(debug_assertions)]
         if std::env::var("HANDY_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
             return Err(anyhow::anyhow!(
@@ -1226,8 +1568,21 @@ impl TranscriptionManager {
 
         if audio.is_empty() {
             debug!("Empty audio vector");
-            self.maybe_unload_immediately("empty audio");
+            self.maybe_unload_after_transcription(purpose, "empty audio");
             return Ok(String::new());
+        }
+
+        // Batch inference temporarily takes the engine out of its mutex. Keep
+        // a separate shared lease so another batch waits rather than observing
+        // an empty engine, while microphone/model readiness checks stay fast.
+        let _batch = self.batch_gate.acquire();
+
+        // Prepare each meeting utterance after joining the batch queue. A cold
+        // application, or Immediate cleanup after the previous utterance, may
+        // have no cached model. Use the ordinary selected-model loading path;
+        // the batch lease protects its result from conditional idle cleanup.
+        if purpose == TranscriptionPurpose::Meeting {
+            self.initiate_model_load();
         }
 
         // Check if model is loaded, if not try to load it
@@ -1237,15 +1592,20 @@ impl TranscriptionManager {
             while *is_loading {
                 is_loading = self.loading_condvar.wait(is_loading).unwrap();
             }
+        }
 
-            let engine_guard = self.lock_engine();
-            if engine_guard.is_none() {
-                return Err(anyhow::anyhow!("Model is not loaded for transcription."));
-            }
+        let (mut engine, engine_lease, _engine_guard) = self
+            .borrow_engine()
+            .ok_or_else(|| anyhow::anyhow!("Model is not loaded for transcription."))?;
+        if purpose == TranscriptionPurpose::Meeting
+            && !matches!(engine, LoadedEngine::SenseVoice { .. })
+        {
+            self.return_engine(engine, &engine_lease);
+            return Err(anyhow::anyhow!("meeting_model_unsupported"));
         }
 
         // Get current settings for configuration
-        let settings = get_settings(&self.app_handle);
+        let settings = settings_for_transcription(&get_settings(&self.app_handle), purpose);
 
         // Validate selected language against the model's supported languages.
         // If the language isn't supported, fall back to "auto" to prevent errors.
@@ -1253,9 +1613,7 @@ impl TranscriptionManager {
         // from settings.selected_model when a caller loaded a specific model —
         // e.g. the --transcribe-file path's --model), not the persisted
         // selection.
-        let active_model = self
-            .get_current_model()
-            .unwrap_or_else(|| settings.selected_model.clone());
+        let active_model = engine_lease.model_id.clone();
         // Resolve the persisted language *intent* into the language this model
         // will actually use. The coercion is capability-aware (a must-pick model
         // never receives "auto") and computed fresh here — it is never written
@@ -1286,23 +1644,6 @@ impl TranscriptionManager {
         // We use catch_unwind to prevent engine panics from poisoning the mutex,
         // which would make the app hang indefinitely on subsequent operations.
         let (result, output_language, model_languages) = {
-            let mut engine_guard = self.lock_engine();
-
-            // Take the engine out so we own it during transcription.
-            // If the engine panics, we simply don't put it back (effectively unloading it)
-            // instead of poisoning the mutex.
-            let mut engine = match engine_guard.take() {
-                Some(e) => e,
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "Model failed to load after auto-load attempt. Please check your model settings."
-                    ));
-                }
-            };
-
-            // Release the lock before transcribing — no mutex held during the engine call
-            drop(engine_guard);
-
             // Probe live transcribe-cpp capabilities once (cheap GGUF-metadata
             // reads); the loaded session is the source of truth, not the
             // ModelManager copy. The whisper run extension is kind-tagged, so
@@ -1535,7 +1876,7 @@ impl TranscriptionManager {
                 Ok(inner_result) => {
                     // Success or normal error: return the engine unless a model
                     // switch/unload invalidated it while it was in use.
-                    self.return_engine(engine, &active_model);
+                    self.return_engine(engine, &engine_lease);
                     inner_result?
                 }
                 Err(panic_payload) => {
@@ -1548,23 +1889,17 @@ impl TranscriptionManager {
                     );
 
                     // Clear the model ID so it will be reloaded on next attempt
-                    {
-                        let mut current_model = self
-                            .current_model_id
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        *current_model = None;
+                    if self.lock_slot().abandon(engine_lease.token) {
+                        let _ = self.app_handle.emit(
+                            "model-state-changed",
+                            ModelStateEvent {
+                                event_type: "unloaded".to_string(),
+                                model_id: None,
+                                model_name: None,
+                                error: Some(format!("Engine panicked: {}", panic_msg)),
+                            },
+                        );
                     }
-
-                    let _ = self.app_handle.emit(
-                        "model-state-changed",
-                        ModelStateEvent {
-                            event_type: "unloaded".to_string(),
-                            model_id: None,
-                            model_name: None,
-                            error: Some(format!("Engine panicked: {}", panic_msg)),
-                        },
-                    );
 
                     return Err(anyhow::anyhow!(
                         "Transcription engine panicked: {}. The model has been unloaded and will reload on next attempt.",
@@ -1621,6 +1956,11 @@ impl TranscriptionManager {
 
         if final_result.is_empty() {
             info!("Transcription result is empty");
+        } else if purpose == TranscriptionPurpose::Meeting {
+            info!(
+                "Meeting transcription produced {} characters",
+                final_result.chars().count()
+            );
         } else {
             info!(
                 "Transcription result: {}",
@@ -1628,9 +1968,19 @@ impl TranscriptionManager {
             );
         }
 
-        self.maybe_unload_immediately("transcription");
+        drop(_batch);
+        self.maybe_unload_after_transcription(purpose, "transcription");
 
         Ok(final_result)
+    }
+
+    fn maybe_unload_after_transcription(&self, purpose: TranscriptionPurpose, context: &str) {
+        // Meeting utterances belong to one processing job. Its outer finally
+        // calls finish_meeting_model_use, so Immediate must not repeatedly
+        // destroy and reload the model between this job's bounded utterances.
+        if purpose == TranscriptionPurpose::Dictation {
+            self.maybe_unload_immediately_for(context, false);
+        }
     }
 }
 
@@ -1856,6 +2206,34 @@ fn transcribe_cpp_run_plan(
         language,
         target_language,
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TranscriptionPurpose {
+    Dictation,
+    Meeting,
+}
+
+fn defer_immediate_unload(
+    batch_work: bool,
+    arming_or_recording: bool,
+    microphone_recording: bool,
+) -> bool {
+    batch_work || arming_or_recording || microphone_recording
+}
+
+fn settings_for_transcription(
+    settings: &AppSettings,
+    purpose: TranscriptionPurpose,
+) -> AppSettings {
+    let mut effective = settings.clone();
+    if purpose == TranscriptionPurpose::Meeting {
+        effective.custom_words.clear();
+        effective.custom_filler_words = None;
+        effective.filler_word_removal_enabled = false;
+        effective.translate_to_english = false;
+    }
+    effective
 }
 
 fn post_process_transcription_text(
@@ -2327,6 +2705,500 @@ pub fn get_available_accelerators() -> AvailableAccelerators {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meeting_error_releases_borrow_and_batch_before_final_model_cleanup() {
+        let slot = Arc::new(Mutex::new(EngineSlot::default()));
+        let batches = BatchTranscriptionGate::default();
+        let (generation, _) = slot.lock().unwrap().begin_load();
+        slot.lock()
+            .unwrap()
+            .finish_load(generation, "sensevoice", "meeting engine")
+            .unwrap();
+        let failure = || -> std::result::Result<(), &'static str> {
+            let _batch = batches.acquire();
+            let (engine, lease) = slot.lock().unwrap().borrow().unwrap();
+            let _borrow = EngineLeaseGuard {
+                slot: slot.clone(),
+                token: lease.token,
+            };
+            slot.lock().unwrap().return_borrow(&lease, engine).unwrap();
+            Err("recognition failed")
+        };
+        assert_eq!(failure(), Err("recognition failed"));
+        assert!(!batches.has_work());
+        // A finally call protects another ordinary pipeline, including its
+        // Processing interval before that pipeline has entered batch inference.
+        assert!(slot
+            .lock()
+            .unwrap()
+            .conditional_unload(generation, || defer_immediate_unload(
+                batches.has_work(),
+                true,
+                false
+            ))
+            .is_none());
+        assert_eq!(slot.lock().unwrap().cached, Some("meeting engine"));
+        assert_eq!(
+            slot.lock()
+                .unwrap()
+                .conditional_unload(generation, || defer_immediate_unload(
+                    batches.has_work(),
+                    false,
+                    false
+                )),
+            Some("meeting engine")
+        );
+        assert!(!slot.lock().unwrap().is_loaded());
+    }
+
+    #[test]
+    fn late_batch_guard_cannot_abandon_the_next_borrow_of_the_same_model() {
+        let slot = Arc::new(Mutex::new(EngineSlot::default()));
+        let batches = BatchTranscriptionGate::default();
+        let (generation, _) = slot.lock().unwrap().begin_load();
+        slot.lock()
+            .unwrap()
+            .finish_load(generation, "sensevoice", "batch engine")
+            .unwrap();
+        let first_batch = batches.acquire();
+        let (first_engine, first_lease) = slot.lock().unwrap().borrow().unwrap();
+        let first_guard = EngineLeaseGuard {
+            slot: slot.clone(),
+            token: first_lease.token,
+        };
+        slot.lock()
+            .unwrap()
+            .return_borrow(&first_lease, first_engine)
+            .unwrap();
+        drop(first_batch);
+        let second_batch = batches.acquire();
+        let (second_engine, second_lease) = slot.lock().unwrap().borrow().unwrap();
+        drop(first_guard);
+        assert!(
+            slot.lock().unwrap().is_loaded(),
+            "old batch guard must not abandon its successor"
+        );
+        slot.lock()
+            .unwrap()
+            .return_borrow(&second_lease, second_engine)
+            .unwrap();
+        drop(second_batch);
+        assert_eq!(slot.lock().unwrap().cached, Some("batch engine"));
+    }
+
+    #[test]
+    fn late_stream_guard_and_stale_return_cannot_replace_a_new_borrow() {
+        let slot = Arc::new(Mutex::new(EngineSlot::default()));
+        let (generation, _) = slot.lock().unwrap().begin_load();
+        slot.lock()
+            .unwrap()
+            .finish_load(generation, "stream", "stream engine")
+            .unwrap();
+        let (first_engine, first_lease) = slot.lock().unwrap().borrow().unwrap();
+        let first_guard = EngineLeaseGuard {
+            slot: slot.clone(),
+            token: first_lease.token,
+        };
+        slot.lock()
+            .unwrap()
+            .return_borrow(&first_lease, first_engine)
+            .unwrap();
+        // Streaming may retain its guard while draining the finalize reply.
+        let (next_engine, next_lease) = slot.lock().unwrap().borrow().unwrap();
+        assert_eq!(
+            slot.lock()
+                .unwrap()
+                .return_borrow(&first_lease, "late stale return"),
+            Err("late stale return")
+        );
+        drop(first_guard);
+        assert!(slot.lock().unwrap().is_loaded());
+        slot.lock()
+            .unwrap()
+            .return_borrow(&next_lease, next_engine)
+            .unwrap();
+        assert_eq!(slot.lock().unwrap().cached, Some("stream engine"));
+    }
+
+    #[test]
+    fn unwinding_guard_abandons_only_its_own_borrow() {
+        let slot = Arc::new(Mutex::new(EngineSlot::default()));
+        let (generation, _) = slot.lock().unwrap().begin_load();
+        slot.lock()
+            .unwrap()
+            .finish_load(generation, "sensevoice", "engine")
+            .unwrap();
+        let (first_engine, first_lease) = slot.lock().unwrap().borrow().unwrap();
+        let old_guard = EngineLeaseGuard {
+            slot: slot.clone(),
+            token: first_lease.token,
+        };
+        slot.lock()
+            .unwrap()
+            .return_borrow(&first_lease, first_engine)
+            .unwrap();
+        let (_engine, lease) = slot.lock().unwrap().borrow().unwrap();
+        let _ = catch_unwind(AssertUnwindSafe(move || {
+            let _old_guard = old_guard;
+            panic!("old completed worker unwound while a new borrower was active");
+        }));
+        assert!(slot.lock().unwrap().is_loaded());
+        let current_guard = EngineLeaseGuard {
+            slot: slot.clone(),
+            token: lease.token,
+        };
+        let _ = catch_unwind(AssertUnwindSafe(move || {
+            let _current_guard = current_guard;
+            panic!("current engine failed");
+        }));
+        assert!(!slot.lock().unwrap().is_loaded());
+    }
+
+    #[test]
+    fn timed_idle_cleanup_rechecks_borrow_activity_and_new_load_atomically() {
+        let mut slot = EngineSlot::default();
+        let activity = AtomicU64::new(0);
+        let (generation, _) = slot.begin_load();
+        slot.finish_load(generation, "sensevoice", "engine")
+            .unwrap();
+        let (engine, lease) = slot.borrow().unwrap();
+        assert!(slot
+            .conditional_idle_unload(generation, &activity, 1000, 200, || false)
+            .is_none());
+        assert!(slot.is_loaded());
+        slot.return_borrow(&lease, engine).unwrap();
+        activity.store(900, Ordering::Release);
+        assert!(slot
+            .conditional_idle_unload(generation, &activity, 1000, 200, || false)
+            .is_none());
+        let (new_generation, _) = slot.begin_load();
+        slot.finish_load(new_generation, "sensevoice", "new engine")
+            .unwrap();
+        assert!(slot
+            .conditional_idle_unload(generation, &activity, 1500, 200, || false)
+            .is_none());
+        assert_eq!(slot.cached, Some("new engine"));
+        assert_eq!(
+            slot.conditional_idle_unload(new_generation, &activity, 1500, 200, || false),
+            Some("new engine")
+        );
+        assert!(!slot.is_loaded());
+    }
+
+    #[test]
+    fn normal_processing_completion_still_unloads_immediately_after_return() {
+        let gate = BatchTranscriptionGate::default();
+        let mut slot = EngineSlot::default();
+        let (generation, _) = slot.begin_load();
+        slot.finish_load(generation, "sensevoice", "normal dictation engine")
+            .unwrap();
+        let batch = gate.acquire();
+        let (engine, lease) = slot.borrow().unwrap();
+        assert!(slot
+            .conditional_unload(generation, || defer_immediate_unload(
+                gate.has_work(),
+                false,
+                false
+            ))
+            .is_none());
+        slot.return_borrow(&lease, engine).unwrap();
+        drop(batch);
+        assert_eq!(
+            slot.conditional_unload(generation, || defer_immediate_unload(
+                gate.has_work(),
+                false,
+                false
+            )),
+            Some("normal dictation engine")
+        );
+        assert!(!slot.is_loaded());
+    }
+
+    #[test]
+    fn engine_failure_guards_do_not_invalidate_a_replacement_generation() {
+        let slot = Arc::new(Mutex::new(EngineSlot::default()));
+        let (first, _) = slot.lock().unwrap().begin_load();
+        slot.lock()
+            .unwrap()
+            .finish_load(first, "sensevoice", "first engine")
+            .unwrap();
+        let (old_engine, old_lease) = slot.lock().unwrap().borrow().unwrap();
+        let old_guard = EngineLeaseGuard {
+            slot: slot.clone(),
+            token: old_lease.token,
+        };
+        let (next, _) = slot.lock().unwrap().begin_load();
+        drop(old_guard);
+        assert!(slot.lock().unwrap().loading);
+        let stale_load_guard = EngineLoadGuard {
+            slot: slot.clone(),
+            generation: first,
+        };
+        drop(stale_load_guard);
+        assert!(slot.lock().unwrap().loading);
+        slot.lock()
+            .unwrap()
+            .finish_load(next, "sensevoice", "replacement engine")
+            .unwrap();
+        assert_eq!(
+            slot.lock().unwrap().return_borrow(&old_lease, old_engine),
+            Err("first engine")
+        );
+        assert_eq!(slot.lock().unwrap().cached, Some("replacement engine"));
+    }
+
+    #[test]
+    fn failed_arming_cleanup_waits_for_background_load_then_unloads_its_session() {
+        let mut slot = EngineSlot::default();
+        let (generation, _) = slot.begin_load();
+        assert!(slot.conditional_unload(generation, || false).is_none());
+        slot.finish_load(generation, "sensevoice", "late background session")
+            .unwrap();
+        assert!(
+            slot.retry_deferred_unload(generation, || true).is_none(),
+            "a new recording preparing batch inference retains its warmed model"
+        );
+        assert!(slot.is_loaded());
+        assert_eq!(
+            slot.retry_deferred_unload(generation, || false),
+            Some("late background session")
+        );
+        assert!(!slot.is_loaded());
+        let (next, _) = slot.begin_load();
+        slot.finish_load(next, "sensevoice", "explicit new session")
+            .unwrap();
+        assert!(slot.retry_deferred_unload(generation, || false).is_none());
+        assert_eq!(slot.cached, Some("explicit new session"));
+    }
+
+    #[test]
+    fn conditional_unload_cannot_invalidate_a_new_borrow_after_its_preflight() {
+        let mut slot = EngineSlot::default();
+        let (loaded, _) = slot.begin_load();
+        slot.finish_load(loaded, "sensevoice", "existing session")
+            .unwrap();
+        let old_request = slot.generation;
+        let (engine, lease) = slot.borrow().unwrap();
+        assert!(
+            slot.is_loaded(),
+            "borrowed model remains loaded for F8 readiness"
+        );
+        assert!(slot.conditional_unload(old_request, || false).is_none());
+        assert!(
+            slot.is_loaded(),
+            "an old cleanup must not unload an in-flight model"
+        );
+        slot.return_borrow(&lease, engine).unwrap();
+        assert_eq!(slot.cached, Some("existing session"));
+        assert_eq!(slot.model_id.as_deref(), Some("sensevoice"));
+    }
+
+    #[test]
+    fn conditional_unload_cannot_remove_a_new_load_or_arming_session() {
+        let mut slot = EngineSlot::default();
+        let (first, _) = slot.begin_load();
+        slot.finish_load(first, "sensevoice", "old session")
+            .unwrap();
+        let old_request = slot.generation;
+        let (new_generation, _) = slot.begin_load();
+        slot.finish_load(new_generation, "sensevoice", "new session")
+            .unwrap();
+        assert!(slot.conditional_unload(old_request, || false).is_none());
+        assert_eq!(slot.cached, Some("new session"));
+        let request_before_f8 = slot.generation;
+        let arming = AtomicBool::new(true);
+        assert!(slot.is_loaded());
+        assert!(slot
+            .conditional_unload(request_before_f8, || arming.load(Ordering::Acquire))
+            .is_none());
+        assert_eq!(slot.cached, Some("new session"));
+        arming.store(false, Ordering::Release);
+        assert_eq!(
+            slot.conditional_unload(slot.generation, || false),
+            Some("new session")
+        );
+        assert!(
+            !slot.is_loaded(),
+            "normal idle Immediate unload remains effective"
+        );
+    }
+
+    #[test]
+    fn explicit_model_change_invalidates_old_borrow_even_with_the_same_model_id() {
+        let mut slot = EngineSlot::default();
+        let (first, _) = slot.begin_load();
+        slot.finish_load(first, "sensevoice", "old session")
+            .unwrap();
+        let (old_engine, old_lease) = slot.borrow().unwrap();
+        let (second, _) = slot.begin_load();
+        slot.finish_load(second, "sensevoice", "new session")
+            .unwrap();
+        assert_eq!(
+            slot.return_borrow(&old_lease, old_engine),
+            Err("old session")
+        );
+        assert!(!slot.abandon(old_lease.token));
+        assert_eq!(slot.cached, Some("new session"));
+        let (engine, lease) = slot.borrow().unwrap();
+        slot.invalidate();
+        assert_eq!(slot.return_borrow(&lease, engine), Err("new session"));
+        assert!(!slot.is_loaded());
+    }
+
+    #[test]
+    fn loaded_query_and_model_change_do_not_wait_for_a_borrowed_engine() {
+        let slot = Arc::new(Mutex::new(EngineSlot::default()));
+        let (first, _) = slot.lock().unwrap().begin_load();
+        slot.lock()
+            .unwrap()
+            .finish_load(first, "sensevoice", "session")
+            .unwrap();
+        let (engine, lease) = slot.lock().unwrap().borrow().unwrap();
+        let query_slot = slot.clone();
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut slot = query_slot.lock().unwrap();
+            tx.send(slot.is_loaded()).unwrap();
+            slot.invalidate();
+        });
+        assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        worker.join().unwrap();
+        assert_eq!(
+            slot.lock().unwrap().return_borrow(&lease, engine),
+            Err("session")
+        );
+    }
+
+    #[test]
+    fn immediate_unload_protects_arming_capture_tails_and_other_batch_work() {
+        for (batch, arming, microphone, defer) in [
+            (false, false, false, false), // normal completed processing
+            (false, true, false, true),   // capture slot claimed, mic not open yet
+            (false, false, true, true),   // stop is still sealing its audio tail
+            (true, false, false, true),   // another batch owns or awaits the engine
+        ] {
+            assert_eq!(defer_immediate_unload(batch, arming, microphone), defer);
+        }
+        let gate = BatchTranscriptionGate::default();
+        let permit = gate.acquire();
+        assert!(defer_immediate_unload(gate.has_work(), false, false));
+        drop(permit);
+        assert!(!defer_immediate_unload(gate.has_work(), false, false));
+    }
+
+    #[test]
+    fn batch_inference_waits_without_making_the_borrowed_model_look_unloaded() {
+        let gate = Arc::new(BatchTranscriptionGate::default());
+        let first = gate.acquire();
+        assert!(gate.is_active());
+        let second_gate = gate.clone();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (finished, observed) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let _second = second_gate.acquire();
+            finished.send(()).unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(observed.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(first);
+        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        assert!(!gate.is_active());
+    }
+
+    #[test]
+    fn batch_failure_and_unwind_release_active_model_borrow() {
+        let gate = BatchTranscriptionGate::default();
+        let failed = || -> std::result::Result<(), ()> {
+            let _permit = gate.acquire();
+            Err(())
+        };
+        assert!(failed().is_err());
+        assert!(!gate.is_active());
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _permit = gate.acquire();
+            panic!("synthetic engine unwind");
+        }));
+        assert!(!gate.is_active());
+        let next = gate.acquire();
+        assert!(gate.is_active());
+        drop(next);
+        assert!(!gate.is_active());
+    }
+
+    #[test]
+    fn meeting_preserves_remote_fillers_and_names_despite_personal_preferences() {
+        let settings = AppSettings {
+            custom_words: vec!["Brian".into()],
+            custom_filler_words: Some(vec!["okay".into()]),
+            word_correction_threshold: 0.5,
+            filler_word_removal_enabled: true,
+            translate_to_english: true,
+            selected_language: "en".into(),
+            ..Default::default()
+        };
+        let meeting = settings_for_transcription(&settings, TranscriptionPurpose::Meeting);
+        let result = post_process_transcription_text(
+            "okay Bryan joined".into(),
+            &meeting,
+            false,
+            &OutputLanguageEvidence::UserSelected("en".into()),
+            &languages(&["en", "zh"]),
+        );
+        assert_eq!(result, "okay Bryan joined");
+        assert!(!meeting.translate_to_english);
+        assert!(!meeting.filler_word_removal_enabled);
+        assert!(meeting.custom_words.is_empty());
+        assert!(meeting.custom_filler_words.is_none());
+        assert_eq!(settings.custom_words, ["Brian"]);
+        assert_eq!(settings.custom_filler_words, Some(vec!["okay".into()]));
+        assert!(settings.translate_to_english);
+    }
+
+    #[test]
+    fn ordinary_dictation_still_applies_personal_preferences() {
+        let settings = AppSettings {
+            custom_words: vec!["Brian".into()],
+            custom_filler_words: Some(vec!["okay".into()]),
+            word_correction_threshold: 0.5,
+            filler_word_removal_enabled: true,
+            translate_to_english: true,
+            selected_language: "en".into(),
+            ..Default::default()
+        };
+        let dictation = settings_for_transcription(&settings, TranscriptionPurpose::Dictation);
+        let result = post_process_transcription_text(
+            "okay Bryan joined".into(),
+            &dictation,
+            false,
+            &OutputLanguageEvidence::UserSelected("en".into()),
+            &languages(&["en", "zh"]),
+        );
+        assert_eq!(result, "Brian joined");
+        assert!(dictation.translate_to_english);
+    }
+
+    #[test]
+    fn meeting_keeps_explicit_language_and_chinese_script_preferences() {
+        let settings = AppSettings {
+            selected_language: "zh".into(),
+            chinese_script: ChineseScript::Traditional,
+            ..Default::default()
+        };
+        let meeting = settings_for_transcription(&settings, TranscriptionPurpose::Meeting);
+        let result = post_process_transcription_text(
+            "我们今天去学校。".into(),
+            &meeting,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".into()),
+            &languages(&["zh", "en"]),
+        );
+        assert_eq!(meeting.selected_language, "zh");
+        assert_eq!(meeting.chinese_script, ChineseScript::Traditional);
+        assert_eq!(result, "我們今天去學校。");
+    }
 
     fn languages(codes: &[&str]) -> Vec<String> {
         codes.iter().map(|code| (*code).to_string()).collect()

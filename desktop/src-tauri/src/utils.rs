@@ -84,6 +84,14 @@ fn native_windows_machine() -> Option<u16> {
 /// Centralized cancellation function that can be called from anywhere in the app.
 /// Handles cancelling both recording and transcription operations and updates UI state.
 pub fn cancel_current_operation(app: &AppHandle) {
+    let recording_id = app
+        .try_state::<TranscriptionCoordinator>()
+        .and_then(|coordinator| coordinator.current_recording_id());
+    let _capture_during_cancel =
+        app.try_state::<TranscriptionCoordinator>()
+            .and_then(|coordinator| {
+                recording_id.and_then(|id| coordinator.retain_recording_capture(id))
+            });
     info!("Initiating operation cancellation...");
     crate::actions::discard_pending_cleanup_sessions();
 
@@ -108,7 +116,7 @@ pub fn cancel_current_operation(app: &AppHandle) {
 
     // Notify coordinator so it can keep lifecycle state coherent.
     if let Some(coordinator) = app.try_state::<TranscriptionCoordinator>() {
-        coordinator.notify_cancel(recording_was_active);
+        coordinator.notify_cancel(recording_was_active, recording_id);
     }
 
     info!("Operation cancellation completed - returned to idle state");
