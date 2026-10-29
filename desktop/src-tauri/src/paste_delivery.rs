@@ -1,11 +1,23 @@
 //! Side-effect boundaries shared by the real dispatch/clipboard path and offline tests.
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Submission {
+    Cancelled,
+    ClipboardReadObserved,
+    UnicodeSubmitted,
+    LegacySubmitted,
+}
+
 /// Public event codes are a static whitelist; internal errors may contain details.
 pub fn paste_error_code(error: &str) -> &'static str {
     match error {
         "manual_paste_restore_failed" => "clipboard_restore_failed",
         "automatic_paste_unconfirmed" => "input_unconfirmed",
+        "rdp_input_uncertain" => "input_unconfirmed",
+        "rdp_input_submitted_copy_failed" => "clipboard_copy_failed",
+        "rdp_input_too_long" | "rdp_input_unsupported_text" => "input_requires_copy",
+        "input_target_changed" | "input_target_unavailable" => "input_target_unavailable",
         "keys_held" => "keys_held",
         "keyboard_unavailable" => "keyboard_unavailable",
         _ => "failed",
@@ -83,6 +95,31 @@ mod tests {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
+
+    #[test]
+    fn remote_input_events_distinguish_uncertainty_copy_failure_and_zero_input() {
+        assert_eq!(paste_error_code("rdp_input_uncertain"), "input_unconfirmed");
+        assert_eq!(
+            paste_error_code("rdp_input_submitted_copy_failed"),
+            "clipboard_copy_failed"
+        );
+        assert_eq!(
+            paste_error_code("rdp_input_too_long"),
+            "input_requires_copy"
+        );
+        assert_eq!(
+            paste_error_code("rdp_input_unsupported_text"),
+            "input_requires_copy"
+        );
+        assert_eq!(
+            paste_error_code("input_target_changed"),
+            "input_target_unavailable"
+        );
+        assert_eq!(
+            paste_error_code("input_target_unavailable"),
+            "input_target_unavailable"
+        );
+    }
 
     #[test]
     fn keyboard_gate_rejections_have_distinct_public_codes() {

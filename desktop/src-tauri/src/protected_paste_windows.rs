@@ -775,6 +775,74 @@ impl Drop for WinClipboard {
     }
 }
 
+/// Optional result copy after direct input; never publishes a temporary body.
+pub(crate) struct CopyLease {
+    clipboard: WinClipboard,
+    sequence: u32,
+    owner: Option<HWND>,
+}
+impl CopyLease {
+    pub(crate) fn prepare(text: &str) -> Result<Self, &'static str> {
+        let mut clipboard = WinClipboard::new(true)?;
+        clipboard.prepare(text)?;
+        let sequence = clipboard.current_sequence()?;
+        let owner = unsafe { GetClipboardOwner() }.ok();
+        // Snapshot and identity refer to the same lock. Never adopt a newer
+        // sequence after releasing it; even a close-time update invalidates copy.
+        clipboard.held.take().ok_or(UNAVAILABLE)?.close()?;
+        Ok(Self {
+            clipboard,
+            sequence,
+            owner,
+        })
+    }
+    pub(crate) fn finish(&mut self, cancelled: &dyn Fn() -> bool) -> Result<(), &'static str> {
+        let expected = std::mem::take(&mut self.sequence);
+        if expected == 0 {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let lock = loop {
+            match ClipboardLock::open(self.clipboard.window.hwnd) {
+                Ok(lock) => break lock,
+                Err(_) if started.elapsed() < OPEN_RESTORE_TIMEOUT => thread::sleep(POLL),
+                Err(_) => return Err(RESTORE_FAILED),
+            }
+        };
+        let current = self.clipboard.current_sequence()?;
+        let same_owner = unsafe { GetClipboardOwner() }.ok() == self.owner;
+        // Check source and cancellation under the very lock that will mutate.
+        if current != expected || !same_owner || cancelled() {
+            lock.close()?;
+            return Ok(());
+        }
+        let retained = self.clipboard.retained_text.take().ok_or(RESTORE_FAILED)?;
+        let mut mutated = false;
+        let result = (|| {
+            self.clipboard.empty()?;
+            mutated = true;
+            for (format, memory) in self.clipboard.markers.drain(..) {
+                memory.transfer(format)?;
+            }
+            retained.transfer(UNICODE_TEXT)
+        })();
+        if result.is_err() && mutated {
+            // A copy failure is reported after Unicode submission. Restore what
+            // was backed up, without ever sending or retrying keyboard input.
+            let _ = self.clipboard.empty();
+            for saved in &mut self.clipboard.saved {
+                let _ = saved.restore();
+            }
+        }
+        let closed = lock.close();
+        if result.is_err() || closed.is_err() {
+            Err(RESTORE_FAILED)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 pub(super) fn run(
     text: &str,
     inject: impl FnOnce() -> Result<(), String>,

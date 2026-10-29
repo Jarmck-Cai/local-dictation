@@ -43,6 +43,16 @@ assert.equal(
   true,
 );
 for (const outcome of [
+  "unicode_input_submitted",
+  "unicode_input_submitted_copy_failed",
+]) {
+  assert.equal(
+    isCompletedTiming(timing("unicode", 1000, { outcome })),
+    true,
+    "OS acceptance is a completed software input sample, with remote insertion still unmeasured",
+  );
+}
+for (const outcome of [
   "paste_skipped",
   "paste_unconfirmed",
   "unknown_future_failure",

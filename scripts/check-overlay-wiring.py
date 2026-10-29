@@ -141,6 +141,10 @@ fn main() {
     paste_error_scenario("state-unavailable", "keyboard_unavailable");
     paste_error_scenario("restore-failed", "manual_paste_restore_failed");
     paste_error_scenario("unconfirmed", "automatic_paste_unconfirmed");
+    paste_error_scenario("unicode-partial", "rdp_input_uncertain");
+    paste_error_scenario("unicode-copy-failed", "rdp_input_submitted_copy_failed");
+    paste_error_scenario("unicode-requires-copy", "rdp_input_too_long");
+    paste_error_scenario("target-changed", "input_target_changed");
     paste_error_scenario("unknown", "private synthetic detail");
 }
 '''.replace("NOTICE_PATH", notice_path).replace("DELIVERY_PATH", delivery_path).replace("SNAPSHOT", snapshot).replace("WRAPPERS", wrappers).replace("SYNC", sync).replace("ENTRY", entry)
@@ -230,6 +234,10 @@ expected_errors = {
     "state-unavailable": "keyboard_unavailable",
     "restore-failed": "clipboard_restore_failed",
     "unconfirmed": "input_unconfirmed",
+    "unicode-partial": "input_unconfirmed",
+    "unicode-copy-failed": "clipboard_copy_failed",
+    "unicode-requires-copy": "input_requires_copy",
+    "target-changed": "input_target_unavailable",
     "unknown": "failed",
 }
 assert {entry["name"] for entry in paste_errors} == set(expected_errors)
@@ -241,3 +249,24 @@ for entry in paste_errors:
         assert message and message.get("title") and message.get("description"), entry
     print(f"PASS paste-{entry['name']}: native={entry['code']}, frontend={entry['frontend']}, translated=en/zh")
 print(f"All {len(paste_errors)} actual paste-code/overlay/frontend whitelist checks passed; no clipboard or keyboard API executed.")
+
+# Exercise the same i18next fallback semantics as DictationTiming. New success
+# outcomes must display a submission status rather than the unknown/failure text.
+timing_program = r'''
+const fs = require("node:fs");
+const path = require("node:path");
+const root = process.argv[1];
+const i18next = require(path.join(root, "desktop/node_modules/i18next"));
+for (const language of ["en", "zh"]) {
+  const strings = JSON.parse(fs.readFileSync(path.join(root, "desktop/src/i18n/locales", language, "translation.json"), "utf8"));
+  const instance = i18next.createInstance();
+  instance.init({lng: language, initImmediate: false, resources: {[language]: {translation: strings}}});
+  const unknown = instance.t("dictation.timing.outcomes.unknown");
+  for (const outcome of ["unicode_input_submitted", "unicode_input_submitted_copy_failed"]) {
+    const actual = instance.t(`dictation.timing.outcomes.${outcome}`, {defaultValue: unknown});
+    if (actual === unknown) throw new Error(`${language}: submitted input displayed as unknown (${outcome})`);
+  }
+  console.log(`PASS timing outcomes: ${language}, software submission retains dedicated status`);
+}
+'''
+subprocess.run(["node", "-e", timing_program, str(ROOT)], check=True)

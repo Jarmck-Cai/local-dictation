@@ -78,6 +78,8 @@ struct SyntheticDesktop {
     settle_wait: u64, events: Vec<(&'static str, &'static str)>,
     preflight_wait: u64,
     copy_on_input_lock: bool,
+    rdp: bool,
+    unicode_calls: usize,
 }
 thread_local! { static DESKTOP: RefCell<SyntheticDesktop> = RefCell::new(SyntheticDesktop::default()); }
 fn advance(delta: u64) {
@@ -91,7 +93,13 @@ fn advance(delta: u64) {
         }
         let due: Vec<u64> = state.pending_reads.iter().copied().filter(|&at| at <= end).collect();
         for at in due {
-            let text = state.clipboard.clone(); state.received.push(text);
+            let text = state.clipboard.clone();
+            // Model only the observed failing transport boundary, not a claim
+            // about MSTSC's internal code page or conversion implementation.
+            let received = if state.rdp {
+                text.chars().map(|c| if c.is_ascii() { c } else { '?' }).collect()
+            } else { text };
+            state.received.push(received);
             if !state.ownership_lost && state.clipboard == state.published_text && state.read_at.is_none() {
                 state.read_at = Some(at);
             }
@@ -183,6 +191,9 @@ mod manual_paste {
         advance(DESKTOP.with(|s| s.borrow().preflight_wait));
         if any_keyboard_key_down().unwrap() { Err("keys_held".into()) } else { Ok(PreparedKeyboard) }
     }
+    pub(crate) fn keyboard_is_held(_: &AppHandle, _: &PreparedKeyboard) -> Result<bool, &'static str> {
+        any_keyboard_key_down()
+    }
     mod keyboard_state_windows {
         pub(super) fn fast_check(_: &super::PreparedKeyboard, _: u16) -> Result<bool, &'static str> {
             super::any_keyboard_key_down()
@@ -268,6 +279,11 @@ SAFE_TESTS = r'''
 #[cfg(test)]
 mod automatic_tests {
     use super::*;
+    // Older local-path assertions use a boolean. Production returns evidence;
+    // retain those assertions while testing the real coordinator unchanged.
+    fn paste_cancellable(text: String, app: AppHandle, cancelled: impl Fn() -> bool) -> Result<bool, String> {
+        super::paste_cancellable(text, app, cancelled).map(|e| e != Submission::Cancelled)
+    }
     fn app(delay: u64, method: PasteMethod, copy: bool) -> AppHandle {
         DESKTOP.with(|s| *s.borrow_mut() = SyntheticDesktop {
             clipboard: "synthetic-previous-transcript".into(), read_after_chord: delay, ..Default::default()
@@ -277,6 +293,56 @@ mod automatic_tests {
             ..Default::default() }, enigo: Arc::new(EnigoState(Mutex::new(Enigo))), lock_barrier: None }
     }
     fn cancelled() -> bool { DESKTOP.with(|s| s.borrow().cancelled) }
+    #[test]
+    fn mstsc_unicode_body_bypasses_the_observed_lossy_clipboard_boundary() {
+        let app = app(100, PasteMethod::CtrlV, false);
+        DESKTOP.with(|s| s.borrow_mut().rdp = true);
+        assert_eq!(super::paste_cancellable("轻述远程输入测试 RDP T1".into(), app, cancelled), Ok(Submission::UnicodeSubmitted));
+        DESKTOP.with(|s| { let s = s.borrow();
+            assert_eq!(s.received, ["轻述远程输入测试 RDP T1"]);
+            assert_eq!(s.protected_calls, 0);
+            assert!(s.writes.is_empty());
+            assert!(s.chord_times.is_empty());
+            assert_eq!(s.unicode_calls, 1);
+        });
+    }
+    #[test]
+    fn mstsc_manual_recovery_normalizes_text_and_ignores_automatic_copy_preference() {
+        let app = app(100, PasteMethod::CtrlV, true);
+        DESKTOP.with(|s| s.borrow_mut().rdp = true);
+        assert_eq!(paste_latest_preserving_clipboard("中\r\nA\t😀 C:\\tmp\\n".into(), app, cancelled), Ok(false));
+        DESKTOP.with(|s| { let s=s.borrow();
+            assert_eq!(s.received, ["中 A 😀 C:\\tmp\\n"]);
+            assert_eq!(s.clipboard, "synthetic-previous-transcript");
+            assert_eq!((s.unicode_calls,s.protected_calls,s.legacy_writes),(1,0,0));
+            assert!(s.chord_times.is_empty()); assert!(s.writes.is_empty());
+        });
+    }
+    #[test]
+    fn mstsc_cancel_during_preflight_has_no_input_or_clipboard_effect() {
+        let app = app(100, PasteMethod::CtrlV, false);
+        DESKTOP.with(|s| { let mut s=s.borrow_mut(); s.rdp=true; s.preflight_wait=60; s.cancel_at=Some(30); });
+        assert_eq!(super::paste_cancellable("中".into(),app,cancelled),Ok(Submission::Cancelled));
+        DESKTOP.with(|s| { let s=s.borrow(); assert_eq!((s.unicode_calls,s.protected_calls,s.legacy_writes),(0,0,0));
+            assert!(s.received.is_empty()); assert!(s.writes.is_empty()); });
+    }
+    #[test]
+    fn mstsc_large_text_refuses_before_any_submission_without_clipboard_fallback() {
+        let app = app(100, PasteMethod::CtrlV, false);
+        DESKTOP.with(|s| s.borrow_mut().rdp=true);
+        assert_eq!(super::paste_cancellable("中".repeat(4097),app,cancelled),Err("rdp_input_too_long".into()));
+        DESKTOP.with(|s| { let s=s.borrow(); assert_eq!((s.unicode_calls,s.protected_calls,s.legacy_writes),(0,0,0));
+            assert!(s.chord_times.is_empty()); });
+    }
+    #[test]
+    fn local_receipt_and_mstsc_disabled_mode_keep_distinct_evidence() {
+        let local=app(100,PasteMethod::CtrlV,false);
+        assert_eq!(super::paste_cancellable("中".into(),local,cancelled),Ok(Submission::ClipboardReadObserved));
+        let remote=app(100,PasteMethod::None,false);
+        DESKTOP.with(|s| s.borrow_mut().rdp=true);
+        assert_eq!(super::paste_cancellable("中".into(),remote,cancelled),Err("automatic_paste_disabled".into()));
+        DESKTOP.with(|s| assert_eq!(s.borrow().unicode_calls,0));
+    }
     #[test]
     fn regression_normal_completion_delivers_current_result_to_slow_reader() {
         for method in [PasteMethod::CtrlV, PasteMethod::CtrlShiftV, PasteMethod::ShiftInsert] {
@@ -525,6 +591,51 @@ mod synthetic_tests {
 '''
 
 
+def rdp_adapters(source):
+    policy = (source / "rdp_input.rs").read_text(encoding="utf-8")
+    policy = policy.replace('#[cfg(target_os = "windows")]\n#[path = "rdp_input_windows.rs"]\npub(crate) mod platform;\n', '')
+    return '\nmod rdp_input {\n' + policy + r'''
+pub(crate) mod platform {
+    use super::*;
+    use crate::{DESKTOP, advance};
+    pub(crate) struct Target;
+    pub(crate) fn capture() -> Result<Option<Target>, String> {
+        Ok(DESKTOP.with(|s| s.borrow().rdp).then_some(Target))
+    }
+    struct Adapter<P, K, C> { prepare: Option<K>, check: C, token: Option<P>,
+        copy: bool, original: String, events: Vec<UnicodeEvent> }
+    impl<P, K, C> Runtime for Adapter<P, K, C>
+    where K: FnOnce() -> Result<P, &'static str>, C: Fn(&P) -> Result<(), &'static str> {
+        fn prepare(&mut self, _: &str, events: &[UnicodeEvent]) -> Result<(), &'static str> {
+            self.events = events.into();
+            if self.copy { self.original = DESKTOP.with(|s| s.borrow().clipboard.clone()); }
+            self.token = Some(self.prepare.take().unwrap()()?); Ok(())
+        }
+        fn ready(&self) -> Result<(), &'static str> { (self.check)(self.token.as_ref().unwrap()) }
+        fn submit(&mut self) -> usize {
+            let units: Vec<_> = self.events.iter().filter(|e| !e.key_up).map(|e| e.unit).collect();
+            DESKTOP.with(|s| { let mut s = s.borrow_mut(); s.unicode_calls += 1;
+                s.received.push(String::from_utf16(&units).unwrap()); }); self.events.len()
+        }
+        fn finish_copy(&mut self, cancelled: &dyn Fn() -> bool) -> Result<(), &'static str> {
+            if self.copy && !cancelled() {
+                DESKTOP.with(|s| { let mut s = s.borrow_mut(); if s.clipboard == self.original {
+                    let text = s.received.last().unwrap().clone(); s.clipboard = text; }
+                });
+            }
+            Ok(())
+        }
+    }
+    pub(crate) fn submit<P>(_: Target, text: &str, copy: bool, cancelled: impl Fn() -> bool,
+        prepare: impl FnOnce() -> Result<P, &'static str>, check: impl Fn(&P) -> Result<(), &'static str>) -> Result<(), String> {
+        let mut runtime = Adapter { prepare: Some(prepare), check, token: None, copy, original: String::new(), events: Vec::new() };
+        super::run(&mut runtime, text, cancelled).map_err(String::from)
+    }
+}
+}
+'''
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--characterize", action="store_true")
@@ -543,7 +654,7 @@ def main() -> int:
     }
     baseline = args.legacy or args.characterize
     if not baseline:
-        selected["clipboard.rs"].extend(["paste_automatic_windows", "paste_latest_preserving_clipboard"])
+        selected["clipboard.rs"].extend(["paste_automatic_windows", "paste_latest_preserving_clipboard", "submit_mstsc"])
         selected["actions.rs"] = ["emit_paste_error"]
     functions = {}
     manifest = {"synthetic_only": True, "source_functions": {},
@@ -565,7 +676,7 @@ def main() -> int:
     safe_adapters = ""
     if not baseline:
         actions = (source / "actions.rs").read_text(encoding="utf-8")
-        assert actions.count("emit_paste_error(&ah_clone, &e)") == 2
+        assert actions.count("emit_paste_error(&ah_clone, &e)") == 3
         assert actions.count("emit_paste_error(&ah, &e)") == 1
         assert 'emit("paste-error", ())' not in actions
         windows_adapter = (source / "protected_paste_windows.rs").read_text(encoding="utf-8")
@@ -590,12 +701,12 @@ def main() -> int:
                 "crate::protected_policy::transact_with_preflight(&mut provider, text, preflight, inject, cancelled, copy)",
                 "crate::protected_policy::transact_with_retention(&mut provider, text, || { preflight()?; inject() }, cancelled, copy)")
     harness = (ADAPTERS + f'\n#[path = "{delivery}"] mod paste_delivery;\n'
-               + 'use paste_delivery::clipboard_submission;\n'
+               + 'use paste_delivery::{clipboard_submission, Submission};\n'
                + '\n'.join(functions["settings.rs"])
                + '\n'.join(functions["dictation_lifecycle.rs"])
                + '\nmod input { use super::*; pub struct EnigoState(pub Mutex<Enigo>);\n'
                + '\n'.join(functions["input.rs"]) + '\n}\n'
-               + safe_adapters + '\n'.join(functions["clipboard.rs"])
+               + safe_adapters + (rdp_adapters(source) if not baseline else '') + '\n'.join(functions["clipboard.rs"])
                + '\n'.join(functions.get("actions.rs", []))
                + (TESTS if baseline else SAFE_TESTS))
     out = ROOT / "outputs/automatic-paste-016-tests"

@@ -25,6 +25,8 @@ mod paste_tx;
 pub mod portable;
 mod protected_paste;
 mod recording_gate;
+#[cfg(any(target_os = "windows", test))]
+mod rdp_input;
 mod retention;
 mod secure_input;
 mod settings;

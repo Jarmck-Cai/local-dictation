@@ -30,6 +30,12 @@ Windows发布边界回归使用 `python scripts/check-win32-publication.py`，�
 
 `--build-automatic-rdp-probe <输出exe>` 需同时传 `--windows-rlib` 与 `--enigo-rlib`，也只构建。实际对照覆盖 Ctrl+V 后恢复/保留、扫描码，以及不经过剪贴板的单次固定 Unicode 文本；每轮须另获对应输入方式的具体测试窗口授权。只接受保持前台的系统 MSTSC 进程并保留生产键状态与单次提交保护；剪贴板模式还保留租约保护且不备份未知原内容。诊断不安装或改变应用配置，不能把手动测试许可扩大为自动发键，或把 Ctrl+V 许可扩大为 Unicode 字符提交。
 
+MSTSC Unicode 适配的离线检查为 `python scripts/check-rdp-input.py`。加 `--windows-rlib <windows-0.61.3.rlib>` 会编译实际原生模块，并在完全替换桌面 API 的合成边界中检查身份、焦点、UTF-16 事件和一次提交；不会调用真实 SendInput 或剪贴板。`check-automatic-paste.py` 同时覆盖实际自动/补贴路由、本机原路径、单行规范化和长度拒绝；`check-win32-publication.py --rdp` 覆盖复制偏好的真实租约方法，另由 `check-overlay-wiring.py` 核对原生浮窗、前端错误分类和中英文完成状态。
+
+该适配仅针对完整路径匹配系统目录的 MSTSC 前台进程，普通本机仍用原受保护剪贴板。Unicode 层只接受单行无控制字符，最多 4096 个 UTF-16 单元；超限在输入前停止，结果可从历史复制。默认不创建剪贴板对象；复制偏好在提交后按源租约结算，新复制和取消优先。返回全部事件数仅表示 OS 接受，部分接受不可重试或自动切回剪贴板。其他远控客户端和真实远端应用兼容性需单独验收。
+
+`check-rdp-input.py --windows-rlib <rlib> --build-mstsc-probe <输出exe>` 只构建复用正式适配器的 U2 固定样本工具，并保存生成源码及摘要；不自动运行有效模式。其 `--mstsc-unicode-u2 <pid>` 会在明确授权的测试窗口中倒计时后，向保持前台的指定系统 MSTSC 单次发送固定中英/非 BMP 样本，不碰剪贴板、录音、模型或 Return。无参、非法/零 PID 在桌面 API 前退出 2。该工具验证原生边界，不代替已安装应用的快捷键、识别、设置与完整投递路由验收。旧对照许可不得复用。
+
 用户可见功能或修复形成交付时，统一更新 `desktop/package.json`、`desktop/src-tauri/Cargo.toml`、`Cargo.lock` 中本包版本及 `tauri.conf.json`，并更新 README 和 `docs/releases.md`。检查通过后提交，建立不可变的 `vX.Y.Z` 标签，并推送提交与标签。后续修复使用新版本号。
 
 公开安装包只作为 GitHub Release 附件，源码 Git 不包含安装包、模型或运行数据。附件须核对版本、SHA-256、第三方资源许可及不含用户数据。

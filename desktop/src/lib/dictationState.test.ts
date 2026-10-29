@@ -8,6 +8,18 @@ import {
 } from "./dictationState";
 import type { DictationTiming } from "./dictationApi";
 
+for (const code of [
+  "clipboard_copy_failed",
+  "input_requires_copy",
+  "input_target_unavailable",
+]) {
+  assert.equal(
+    pasteErrorCode({ code }),
+    code,
+    "remote input states reach their dedicated recovery message",
+  );
+}
+
 assert.equal(
   pasteErrorCode({ code: "keys_held", detail: "private synthetic key detail" }),
   "keys_held",

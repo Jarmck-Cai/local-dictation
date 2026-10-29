@@ -7,6 +7,8 @@
 #[cfg(target_os = "windows")]
 #[path = "protected_paste_windows.rs"]
 mod platform;
+#[cfg(target_os = "windows")]
+pub(crate) use platform::CopyLease;
 #[cfg(any(target_os = "windows", test))]
 #[path = "protected_paste_policy.rs"]
 mod policy;

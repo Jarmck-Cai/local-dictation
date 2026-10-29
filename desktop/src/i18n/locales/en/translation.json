@@ -964,7 +964,9 @@
         "missing_claude_api_key": "Cloud credentials missing; local transcript used",
         "cloud_state_unavailable": "Cloud state unavailable; local transcript used",
         "paste_read_observed": "Target read observed; displayed text unverified",
-        "paste_unconfirmed": "Target read unconfirmed; check the input field",
+        "unicode_input_submitted": "System accepted input; remote insertion unconfirmed",
+        "unicode_input_submitted_copy_failed": "System accepted input; clipboard copy incomplete; check the remote field",
+        "paste_unconfirmed": "Complete text arrival unconfirmed; check the input field",
         "paste_skipped": "Automatic input skipped; copy from history"
       },
       "cleanupFallback": "Cleanup fallback: {{reason}}",
@@ -1076,6 +1078,18 @@
       }
     },
     "autoPaste": {
+      "clipboard_copy_failed": {
+        "title": "Input submitted; clipboard copy incomplete",
+        "description": "Check the remote input field and clipboard before trying again. The text remains in recent transcriptions."
+      },
+      "input_requires_copy": {
+        "title": "Copy this result manually",
+        "description": "This text exceeds the current remote input length or character range. No input was sent. Copy it from recent transcriptions and paste it."
+      },
+      "input_target_unavailable": {
+        "title": "Could not confirm the input target",
+        "description": "The current window changed or is unavailable. No input was sent. Place the cursor in the target field and use paste latest, or copy the result."
+      },
       "keys_held": {
         "title": "Keys are still held",
         "description": "A key was detected as held, so no text was inserted. Release all keys, place the cursor in the target field, then use your manual paste shortcut to continue. You can also copy the result."

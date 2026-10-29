@@ -74,6 +74,8 @@ struct SyntheticSystem {
     formats: Vec<u32>, body: &'static str, delayed: bool, synthesized: bool,
     close_synthesis: bool, context: usize, rendering: bool,
     copy_on_publish_close: bool, cancel_on_publish_close: bool,
+    copy_on_readonly_close: bool, copy_on_copy_open: bool, fail_marker: bool,
+    empty_calls: usize, fail_first_empty: bool,
     suppress_owner_notification: bool,
     copy_before_begin: bool, change_before_begin: bool,
     cancelled: bool, reader_pending: bool, copy_after_injection: bool,
@@ -117,6 +119,7 @@ unsafe fn GetLastError() -> u32 { ERROR_SUCCESS }
 unsafe fn SetClipboardData(format: u32, handle: Option<usize>) -> Result<usize, ()> {
     SYSTEM.with(|s| {
         let mut s = s.borrow_mut();
+        if format == 50002 && s.fail_marker { return Err(()); }
         if format == 13 && handle.is_some() && !s.rendering && s.fail_retention { return Err(()); }
         if !s.formats.contains(&format) { s.formats.push(format); }
         // Rendering callbacks fulfill an existing promise. Wine's Windows tests
@@ -131,10 +134,13 @@ unsafe fn SetClipboardData(format: u32, handle: Option<usize>) -> Result<usize, 
 }
 unsafe fn EmptyClipboard() -> Result<(), ()> {
     SYSTEM.with(|s| {
-        let mut s = s.borrow_mut(); s.owner = s.opened.expect("clipboard lock required");
+        let mut s = s.borrow_mut(); s.empty_calls += 1;
+        if s.fail_first_empty && s.empty_calls == 1 { return Err(()); }
+        s.owner = s.opened.expect("clipboard lock required");
         s.formats.clear(); s.sequence += 1; s.body = "empty";
         s.delayed = false; s.synthesized = false;
-    }); Ok(())
+        Ok(())
+    })
 }
 struct Global;
 impl Global {
@@ -183,6 +189,9 @@ fn snapshot() -> Result<Vec<Saved>, &'static str> {
 struct ClipboardLock;
 impl ClipboardLock {
     fn open(hwnd: HWND) -> Result<Self, &'static str> {
+        if SYSTEM.with(|s| std::mem::take(&mut s.borrow_mut().copy_on_copy_open)) {
+            new_user_copy(true);
+        }
         SYSTEM.with(|s| {
             let mut s = s.borrow_mut();
             if s.opened.is_some() { return Err("manual_paste_clipboard_busy"); }
@@ -203,7 +212,7 @@ impl ClipboardLock {
                 s.synthesized = true;
             }
             s.opened = None;
-            (publication && std::mem::take(&mut s.copy_on_publish_close),
+            (std::mem::take(&mut s.copy_on_readonly_close) || (publication && std::mem::take(&mut s.copy_on_publish_close)),
              publication && std::mem::take(&mut s.cancel_on_publish_close))
         });
         if copy { new_user_copy(true); }
@@ -500,6 +509,11 @@ def main() -> int:
     harness += "#[derive(Default)]\n" + definitions["Context"] + "\n" + definitions["WinClipboard"]
     harness += "\nimpl WinClipboard {\n" + "\n".join(bodies[name] for name in ["new", "current_sequence", "empty", "settle"]) + "\n}\n"
     harness += "impl Provider for WinClipboard {\n" + provider + "\n}\n" + bodies["render"] + TESTS
+    if not args.baseline:
+        copy_source = source[source.index("impl CopyLease {"):]
+        harness += declaration(source, "CopyLease") + "\nimpl CopyLease {\n"
+        harness += function(copy_source, "prepare") + "\n" + function(copy_source, "finish") + "\n}\n"
+        harness += (ROOT / "scripts/rdp-copy-cases.rs").read_text(encoding="utf-8")
     rdp_sources = {}
     if args.rdp:
         keyboard = (ROOT / "desktop/src-tauri/src/manual_paste_keyboard.rs").as_posix()
@@ -531,7 +545,7 @@ def main() -> int:
     compiled = subprocess.run([rustc, "--edition=2021", "--test", *cfg, str(rustfile), "-o", str(executable)], check=False)
     if compiled.returncode:
         return compiled.returncode
-    filters = [] if args.rdp else ["publication_tests::"]
+    filters = []
     result = subprocess.run([str(executable), *filters], capture_output=True, text=True, timeout=30)
     print(result.stdout, end="")
     print(result.stderr, end="")
