@@ -26,6 +26,8 @@ Windows发布边界回归使用 `python scripts/check-win32-publication.py`，�
 
 该检查的 `--rdp` 模式增加纯合成的远程剪贴板时序，并使用生产单次按键控制器，分别建模格式列表传播、本机正文请求和远端编辑器消费；覆盖预读、延后读取、取消、并发复制、恢复与不重复注入。通过表示实现符合这些特征断言，不表示真实 RDP 已落字。`--rdp --rdp-delivery-gate` 额外要求两个已知失败模型收到本次正文，当前应以两个断言失败退出，用于保留显式红灯；不作为默认成功检查。模型假设、官方依据与待实测步骤见 `docs/remote-dictation-plan.md`。
 
+`check-protected-paste.py --native-text-memory --windows-rlib <已构建windows-0.61.3.rlib>` 只执行生产 UTF-16 内存构造与固定代码页转换，不访问剪贴板、窗口、键盘或用户正文。`--build-manual-rdp-probe <输出exe>`（同样需 `--windows-rlib`）只构建手动对照诊断，不自动运行。其实际模式会替换当前剪贴板且不能恢复测试前原内容，必须先明确固定文本、受控编辑器和用户测试窗口；不发键、不读原正文，新复制优先，按固定基线结算。详见远程输入调查记录，不能用构建或内存检查代替真实落字验收。
+
 用户可见功能或修复形成交付时，统一更新 `desktop/package.json`、`desktop/src-tauri/Cargo.toml`、`Cargo.lock` 中本包版本及 `tauri.conf.json`，并更新 README 和 `docs/releases.md`。检查通过后提交，建立不可变的 `vX.Y.Z` 标签，并推送提交与标签。后续修复使用新版本号。
 
 公开安装包只作为 GitHub Release 附件，源码 Git 不包含安装包、模型或运行数据。附件须核对版本、SHA-256、第三方资源许可及不含用户数据。
