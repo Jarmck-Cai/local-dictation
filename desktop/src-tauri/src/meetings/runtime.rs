@@ -405,15 +405,40 @@ impl MeetingRuntime {
         &self,
         read: impl FnOnce() -> RuntimeResult<Vec<MeetingManifest>>,
     ) -> RuntimeResult<Vec<MeetingSummary>> {
+        let observed_revision = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| "meeting_lock")?
+            .revision;
         let manifests = read()?;
         let mut state = self.inner.state.lock().map_err(|_| "meeting_lock")?;
+        let disk_ids: HashSet<_> = manifests
+            .iter()
+            .map(|manifest| manifest.id.as_str())
+            .collect();
+        let active_id = state.active.as_ref().map(|active| active.id.clone());
+        // Daily maintenance can prune from another store instance. Keep only
+        // disk rows and snapshots published after this scan began (or active).
+        state.snapshots.retain(|id, value| {
+            disk_ids.contains(id.as_str())
+                || value.revision > observed_revision
+                || active_id.as_deref() == Some(id)
+        });
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|value| !state.snapshots.contains_key(&value.id))
+        {
+            state.current = None;
+        }
         for manifest in &manifests {
             if !state.deleted.contains(&manifest.id) && !state.snapshots.contains_key(&manifest.id)
             {
                 remember(&mut state, summary(manifest, None));
             }
         }
-        // Snapshots always win over disk: a concurrent stop/retry/create must
+        // Retained snapshots win over disk: a concurrent stop/retry/create must
         // retain its revision. Tombstones exclude a late read after deletion.
         let mut rows: Vec<_> = state.snapshots.values().cloned().collect();
         rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms).then(a.id.cmp(&b.id)));

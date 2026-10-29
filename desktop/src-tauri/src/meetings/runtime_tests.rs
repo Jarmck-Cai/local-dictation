@@ -7,6 +7,20 @@ const START: u64 = 1_000_000;
 const END: u64 = 1_200_000;
 
 #[test]
+fn runtime_list_drops_records_expired_by_background_maintenance() {
+    let f = Fixture::new();
+    f.recorded("synthetic");
+    let runtime = f.runtime(Mode::Good);
+    assert_eq!(runtime.list().unwrap().len(), 1);
+    let created = f.store.load("synthetic").unwrap().created_at_unix_secs;
+    f.store.prune(created + 8 * 86400).unwrap();
+    assert!(
+        runtime.list().unwrap().is_empty(),
+        "expired disk rows must not live forever in the snapshot cache"
+    );
+}
+
+#[test]
 #[cfg(windows)]
 fn runtime_retry_persists_first_fault_after_recovery_was_unwritable() {
     use std::os::windows::fs::OpenOptionsExt;
