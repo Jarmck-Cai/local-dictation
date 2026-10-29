@@ -1,13 +1,15 @@
 // Appended to a frozen copy of the production native adapter. Build-only by
 // default; the valid mode requires a separately agreed remote editor window.
 pub(crate) fn fixed_probe(pid: u32) -> Result<(), String> {
+    crate::keyboard_state_windows::start()?;
+    println!("countdown_seconds=5 fixed_case=U2 one_unicode_batch=true clipboard_untouched=true");
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    // Let the user return from the confirmation UI before capturing the actual
+    // current output target. The final production gates still run at submission.
     let target = capture()?.ok_or("probe_not_system_mstsc")?;
     if target.pid != pid {
         return Err("probe_target_pid_changed".into());
     }
-    crate::keyboard_state_windows::start()?;
-    println!("countdown_seconds=5 fixed_case=U2 one_unicode_batch=true clipboard_untouched=true");
-    std::thread::sleep(std::time::Duration::from_secs(5));
     if !target.current() {
         return Err("input_target_changed".into());
     }
