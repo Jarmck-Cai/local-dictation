@@ -6,6 +6,219 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 const START: u64 = 1_000_000;
 const END: u64 = 1_200_000;
 
+#[test]
+#[cfg(windows)]
+fn runtime_retry_persists_first_fault_after_recovery_was_unwritable() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = Fixture::new();
+    f.recorded("synthetic");
+    let runtime = f.runtime(Mode::Good);
+    let mut m = f.store.load("synthetic").unwrap();
+    m.status = MeetingStatus::Recording;
+    m.capture_complete = None;
+    m.capture_error = None;
+    m.chunks[0].finalized = false;
+    fs::write(
+        f.root.join("synthetic/manifest.json"),
+        serde_json::to_vec(&m).unwrap(),
+    )
+    .unwrap();
+    let (generation, _, completion) = runtime.reserve("synthetic", Activity::Recording).unwrap();
+    let mut value = summary(&m, None);
+    value.capture_error = Some("meeting_io".into());
+    publish(&runtime.inner, generation, value, false);
+    let held = OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(f.root.join("synthetic/manifest.json"))
+        .unwrap();
+    assert!(f
+        .store
+        .recover_capture_error("synthetic", Some("meeting_io".into()))
+        .is_err());
+    finish_runtime(
+        &runtime.inner,
+        generation,
+        Err("meeting_atomic_replace_win32_32".into()),
+        MeetingStatus::Interrupted,
+        &completion,
+    );
+    assert_eq!(
+        runtime.current().unwrap().unwrap().capture_error.as_deref(),
+        Some("meeting_io")
+    );
+    drop(held);
+    runtime
+        .export(
+            "synthetic",
+            &f.directory.join("before-retry.wav"),
+            "audio",
+            "en",
+        )
+        .unwrap();
+    runtime.transcribe("synthetic").unwrap();
+    wait_status(&runtime, MeetingStatus::Complete);
+    assert_eq!(
+        runtime.current().unwrap().unwrap().capture_error.as_deref(),
+        Some("meeting_io")
+    );
+    assert_eq!(
+        f.store.load("synthetic").unwrap().capture_error.as_deref(),
+        Some("meeting_io")
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn runtime_first_fault_survives_failed_finish_then_real_recovery() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = Fixture::new();
+    let runtime = f.runtime(Mode::Good);
+    let (generation, request, completion) =
+        runtime.reserve("synthetic", Activity::Recording).unwrap();
+    let mut writer = f
+        .store
+        .create("synthetic", "Synthetic", START, devices())
+        .unwrap();
+    writer.append(packet(Source::Microphone, 0)).unwrap();
+    publish(
+        &runtime.inner,
+        generation,
+        summary(writer.manifest(), None),
+        false,
+    );
+    let held = OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(f.root.join("synthetic/manifest.json"))
+        .unwrap();
+    let (sender, receiver) = capture_event_queue();
+    let mut invalid = packet(Source::Remote, 1);
+    invalid.frames = 0;
+    sender.try_send(CaptureEvent::Packet(invalid)).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let session = Box::new(FakeSession {
+        mode: Mode::Good,
+        sender,
+        _stop: stop.clone(),
+    });
+    let result = record_actor(
+        &runtime.inner,
+        generation,
+        writer,
+        session,
+        receiver,
+        stop,
+        request,
+        Box::new(()),
+    );
+    assert_eq!(
+        result.as_ref().err().map(String::as_str),
+        Some("meeting_packet")
+    );
+    assert_eq!(
+        runtime.current().unwrap().unwrap().capture_error.as_deref(),
+        Some("meeting_packet")
+    );
+    drop(held);
+    let recovered = f
+        .store
+        .recover_capture_error("synthetic", result.err())
+        .unwrap();
+    assert_eq!(recovered.capture_error.as_deref(), Some("meeting_packet"));
+    assert_eq!(recovered.status, MeetingStatus::Interrupted);
+    finish_runtime(
+        &runtime.inner,
+        generation,
+        Ok(summary(&recovered, None)),
+        MeetingStatus::Interrupted,
+        &completion,
+    );
+    runtime.transcribe("synthetic").unwrap();
+    wait_status(&runtime, MeetingStatus::Complete);
+    assert_eq!(
+        runtime.current().unwrap().unwrap().capture_error.as_deref(),
+        Some("meeting_packet")
+    );
+}
+
+#[test]
+fn runtime_old_summary_json_accepts_missing_capture_error() {
+    let f = Fixture::new();
+    f.recorded("synthetic");
+    let mut old = serde_json::to_value(summary(&f.store.load("synthetic").unwrap(), None)).unwrap();
+    old.as_object_mut().unwrap().remove("capture_error");
+    assert!(serde_json::from_value::<MeetingSummary>(old)
+        .unwrap()
+        .capture_error
+        .is_none());
+}
+
+#[test]
+fn runtime_late_list_keeps_concurrent_new_recording_and_newer_stop() {
+    let f = Fixture::new();
+    f.recorded("synthetic");
+    let runtime = f.runtime(Mode::Good);
+    let stale = f.store.list().unwrap();
+    let rows = runtime
+        .list_with(|| {
+            let started = runtime.start("new", "mic", "remote").unwrap();
+            runtime.stop(&started.id).unwrap();
+            Ok(stale)
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    let current = runtime.current().unwrap().unwrap();
+    assert!(rows.iter().any(|r| r.id == current.id
+        && r.revision == current.revision
+        && r.status == MeetingStatus::Recorded));
+}
+
+#[test]
+fn runtime_list_io_releases_state_and_late_list_cannot_resurrect_deleted() {
+    let f = Fixture::new();
+    f.recorded("synthetic");
+    let runtime = f.runtime(Mode::Good);
+    let manifests = f.store.list().unwrap();
+    let rows = runtime
+        .list_with(|| {
+            assert!(
+                runtime.inner.state.try_lock().is_ok(),
+                "disk IO must not hold runtime state"
+            );
+            runtime.delete("synthetic").unwrap();
+            Ok(manifests)
+        })
+        .unwrap();
+    assert!(rows.is_empty());
+    assert!(runtime.list().unwrap().is_empty());
+}
+
+#[test]
+fn runtime_summary_keeps_capture_cause_after_transcription() {
+    let f = Fixture::new();
+    f.recorded("synthetic");
+    let mut m = f.store.load("synthetic").unwrap();
+    m.capture_complete = Some(false);
+    m.capture_error = Some("meeting_io".into());
+    fs::write(
+        f.root.join("synthetic/manifest.json"),
+        serde_json::to_vec(&m).unwrap(),
+    )
+    .unwrap();
+    let runtime = f.runtime(Mode::Good);
+    assert_eq!(
+        serde_json::to_value(&runtime.list().unwrap()[0]).unwrap()["capture_error"],
+        "meeting_io"
+    );
+    runtime.transcribe("synthetic").unwrap();
+    wait_status(&runtime, MeetingStatus::Complete);
+    assert_eq!(
+        serde_json::to_value(runtime.current().unwrap().unwrap()).unwrap()["capture_error"],
+        "meeting_io"
+    );
+}
+
 struct Fixture {
     directory: PathBuf,
     root: PathBuf,
@@ -112,6 +325,7 @@ fn packet(source: Source, sequence: u64) -> CapturePacket {
 #[derive(Clone, Copy)]
 enum Mode {
     Good,
+    LastSenderStops,
     SourceFault,
     QueueFull,
     InvalidPacket,
@@ -182,6 +396,13 @@ impl CaptureSession for FakeSession {
         START
     }
     fn stop(self: Box<Self>) -> RuntimeResult<u64> {
+        if matches!(self.mode, Mode::LastSenderStops) {
+            drop(self.sender);
+            // Deterministically expose the gap between producer drop and the
+            // capture-stop thread publishing its joined result.
+            thread::sleep(Duration::from_millis(100));
+            return Ok(END);
+        }
         if matches!(self.mode, Mode::SlowDrain) {
             // More events than the complete queue: stop can only succeed while
             // the production writer actor is draining it concurrently.
@@ -230,6 +451,17 @@ impl CaptureSession for FakeSession {
         }
         Ok(END)
     }
+}
+
+#[test]
+fn runtime_normal_stop_last_sender_drop_is_not_capture_failure() {
+    let f = Fixture::new();
+    let runtime = f.runtime(Mode::LastSenderStops);
+    let row = runtime.start("Synthetic", "mic", "remote").unwrap();
+    let stopped = runtime.stop(&row.id).unwrap();
+    assert_eq!(stopped.status, MeetingStatus::Recorded);
+    assert_eq!(f.store.load(&row.id).unwrap().capture_complete, Some(true));
+    assert!(stopped.capture_error.is_none());
 }
 fn wait_status(runtime: &MeetingRuntime, status: MeetingStatus) -> MeetingSummary {
     let began = Instant::now();

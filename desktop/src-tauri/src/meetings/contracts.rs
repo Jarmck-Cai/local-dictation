@@ -13,6 +13,8 @@ pub struct MeetingSummary {
     pub duration_ms: u64,
     pub status: MeetingStatus,
     pub error: Option<String>,
+    #[serde(default)]
+    pub capture_error: Option<String>,
     pub progress_percent: Option<u8>,
     pub microphone_name: Option<String>,
     pub playback_name: Option<String>,

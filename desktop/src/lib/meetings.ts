@@ -28,6 +28,7 @@ export interface MeetingSummary {
   duration_ms: number;
   status: MeetingStatus;
   error: string | null;
+  capture_error?: string | null;
   progress_percent: number | null;
   microphone_name: string | null;
   playback_name: string | null;

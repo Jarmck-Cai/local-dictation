@@ -5,6 +5,135 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+#[cfg(windows)]
+fn failed_transcript_replace_retains_staged_copy() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    let original = br#"{"id":"synthetic","complete":false}"#;
+    writer.write_transcript(original).unwrap();
+    let path = f.root.join("synthetic/transcript.json");
+    let held = OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&path)
+        .unwrap();
+    assert!(writer
+        .write_transcript(br#"{"id":"synthetic","complete":true}"#)
+        .is_err());
+    assert_eq!(fs::read(path).unwrap(), original);
+    assert!(fs::read_dir(f.root.join("synthetic")).unwrap().any(|e| e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".transcript-")));
+    drop(held);
+}
+
+#[test]
+fn retained_atomic_backups_do_not_block_explicit_delete_or_expiry() {
+    for expire in [false, true] {
+        let f = Fixture::new();
+        f.writer()
+            .finish(MeetingStatus::Recorded, None, None)
+            .unwrap();
+        for name in [".manifest-123-4.backup", ".transcript-123-5.backup"] {
+            fs::write(f.root.join("synthetic").join(name), b"synthetic backup").unwrap();
+        }
+        if expire {
+            let created = f.store.load("synthetic").unwrap().created_at_unix_secs;
+            assert_eq!(
+                f.store.prune(created + RETENTION_SECS).unwrap(),
+                vec!["synthetic"]
+            );
+        } else {
+            f.store.delete("synthetic").unwrap();
+        }
+        assert!(!f.root.join("synthetic").exists());
+    }
+}
+
+#[test]
+fn recovery_keeps_legacy_saved_first_cause_over_later_actor_error() {
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    writer.append(packet(0)).unwrap();
+    drop(writer);
+    let path = f.root.join("synthetic/manifest.json");
+    let mut m = f.store.load("synthetic").unwrap();
+    m.status = MeetingStatus::Interrupted;
+    m.error = Some("meeting_io".into());
+    m.capture_error = None;
+    m.capture_complete = None;
+    fs::write(path, serde_json::to_vec(&m).unwrap()).unwrap();
+    let recovered = f
+        .store
+        .recover_capture_error("synthetic", Some("meeting_atomic_replace".into()))
+        .unwrap();
+    assert_eq!(recovered.capture_error.as_deref(), Some("meeting_io"));
+}
+
+#[test]
+#[cfg(windows)]
+fn state_io_default_reader_does_not_block_checkpoint() {
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    writer.append(packet(0)).unwrap();
+    let path = f.root.join("synthetic/manifest.json");
+    let mut reader = File::open(&path).unwrap();
+    writer
+        .checkpoint(MeetingStatus::Paused, None, None)
+        .unwrap();
+    assert_eq!(
+        f.store.load("synthetic").unwrap().status,
+        MeetingStatus::Paused
+    );
+    let mut old = String::new();
+    reader.read_to_string(&mut old).unwrap();
+    assert!(old.contains("recording"));
+}
+
+#[test]
+fn state_io_production_load_concurrent_with_one_hundred_commits() {
+    use std::sync::{atomic::AtomicBool, Arc, Barrier};
+    let f = Fixture::new();
+    let mut writer = f.writer();
+    let stop = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(Barrier::new(2));
+    let store = f.store.clone();
+    let signal = stop.clone();
+    let gate = barrier.clone();
+    let worker = std::thread::spawn(move || {
+        gate.wait();
+        let mut reads = 0;
+        while !signal.load(Ordering::Acquire) {
+            store.load("synthetic").unwrap();
+            reads += 1;
+        }
+        reads
+    });
+    barrier.wait();
+    let result = (|| {
+        for sequence in 0..100 {
+            writer.append(packet(sequence))?;
+            writer.checkpoint(MeetingStatus::Recording, None, None)?;
+        }
+        Ok::<_, &'static str>(())
+    })();
+    stop.store(true, Ordering::Release);
+    assert!(worker.join().unwrap() > 0);
+    result.unwrap();
+    assert_eq!(
+        writer
+            .finish(MeetingStatus::Recorded, Some(200000), None)
+            .unwrap()
+            .chunks[0]
+            .packets,
+        100
+    );
+}
+
+#[test]
 fn legacy_interruption_is_upgraded_before_processing_changes_its_status() {
     let f = Fixture::new();
     let mut writer = f.writer();

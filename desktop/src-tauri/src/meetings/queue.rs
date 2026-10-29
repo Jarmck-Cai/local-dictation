@@ -11,6 +11,8 @@ use std::{
 
 struct Budget {
     bytes: AtomicUsize,
+    #[cfg(test)]
+    peak_bytes: AtomicUsize,
     connected: AtomicBool,
 }
 #[derive(Clone)]
@@ -26,6 +28,8 @@ pub fn capture_event_queue() -> (CaptureSender, CaptureReceiver) {
     let (sender, receiver) = mpsc::sync_channel(MEETING_CAPTURE_QUEUE_CAPACITY);
     let budget = Arc::new(Budget {
         bytes: AtomicUsize::new(0),
+        #[cfg(test)]
+        peak_bytes: AtomicUsize::new(0),
         connected: AtomicBool::new(true),
     });
     (
@@ -37,24 +41,33 @@ pub fn capture_event_queue() -> (CaptureSender, CaptureReceiver) {
     )
 }
 impl CaptureSender {
+    #[cfg(test)]
+    pub fn peak_payload_bytes(&self) -> usize {
+        self.budget.peak_bytes.load(Ordering::Acquire)
+    }
     pub fn try_send(&self, event: CaptureEvent) -> Result<(), TrySendError<CaptureEvent>> {
         if !self.budget.connected.load(Ordering::Acquire) {
             return Err(TrySendError::Disconnected(event));
         }
         let bytes = payload_bytes(&event);
-        if self
-            .budget
-            .bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_add(bytes)
-                    .filter(|sum| *sum <= MEETING_CAPTURE_QUEUE_MAX_BYTES)
-            })
-            .is_err()
-        {
+        let reservation =
+            self.budget
+                .bytes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                    used.checked_add(bytes)
+                        .filter(|sum| *sum <= MEETING_CAPTURE_QUEUE_MAX_BYTES)
+                });
+        if reservation.is_err() {
             return Err(TrySendError::Full(event));
         }
         match self.sender.try_send(event) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                #[cfg(test)]
+                self.budget
+                    .peak_bytes
+                    .fetch_max(reservation.unwrap() + bytes, Ordering::AcqRel);
+                Ok(())
+            }
             Err(error) => {
                 self.budget.bytes.fetch_sub(bytes, Ordering::AcqRel);
                 Err(error)

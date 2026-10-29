@@ -65,6 +65,21 @@ export const meetingMessages = {
       "Check the original recording if the text looks incomplete or unexpected.",
     warningIncompleteRecording:
       "Recording was interrupted. Saved audio and text are kept, but they may not cover the entire meeting.",
+    captureDiagnostic: "Diagnostic code: {{code}}",
+    captureReasons: {
+      stateSave:
+        "Recording stopped because its saved state could not be updated.",
+      fileAccess:
+        "Recording stopped because access to its state file was blocked or conflicted with another operation.",
+      device: "Recording stopped because an audio device became unavailable.",
+      queue:
+        "Recording stopped because audio could not be saved fast enough and the capture queue filled up.",
+      capture: "Recording stopped because audio capture failed.",
+      storage:
+        "Recording stopped because local audio or recording data could not be read or written.",
+      unknown:
+        "The original reason for this recording interruption was not saved.",
+    },
     warningInputClamped:
       "Some input audio was too loud, which may reduce transcription accuracy. Replay the recording to check.",
     warningAttributionExperimental:
@@ -125,6 +140,16 @@ export const meetingMessages = {
     },
   },
   zh: {
+    captureDiagnostic: "诊断码：{{code}}",
+    captureReasons: {
+      stateSave: "录制状态无法保存，录音已中断。",
+      fileAccess: "录制状态文件访问被阻止或发生冲突，录音已中断。",
+      device: "音频设备不可用，录音已中断。",
+      queue: "音频未能及时保存，采集队列已满，录音已中断。",
+      capture: "音频采集发生异常，录音已中断。",
+      storage: "本地音频或录制数据读写失败，录音已中断。",
+      unknown: "原始中断原因未保存。",
+    },
     nav: "会议",
     title: "会议录音",
     beta: "Beta 试用",

@@ -3,11 +3,11 @@ use super::types::*;
 use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
-    io::{BufWriter, Read, Write},
+    io::{BufReader, BufWriter, Read, Write},
     path::{Component, Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -47,9 +47,40 @@ fn preserve_capture_provenance(manifest: &mut MeetingManifest) {
     }
 }
 
+fn apply_capture_error(manifest: &mut MeetingManifest, cause: String) -> StoreResult<()> {
+    if cause.len() > 96
+        || !cause.starts_with("meeting_")
+        || !cause
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return Err("meeting_error_code");
+    }
+    preserve_capture_provenance(manifest);
+    if manifest.capture_error.as_deref().is_none_or(|old| {
+        matches!(
+            old,
+            "meeting_capture_recovered" | "meeting_recovered" | "meeting_recording_interrupted"
+        )
+    }) {
+        manifest.capture_error = Some(cause);
+        manifest.capture_complete = Some(false);
+    }
+    Ok(())
+}
+
+fn staging_name(name: &str) -> bool {
+    [".manifest-", ".transcript-"].iter().any(|prefix| {
+        name.strip_prefix(prefix)
+            .and_then(|s| s.strip_suffix(".tmp").or_else(|| s.strip_suffix(".backup")))
+            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit() || b == b'-'))
+    })
+}
+
 #[derive(Clone)]
 pub struct MeetingStore {
     root: PathBuf,
+    metadata_io: Arc<Mutex<()>>,
 }
 pub struct MeetingWriter {
     store: MeetingStore,
@@ -305,7 +336,12 @@ impl MeetingStore {
         }
         Ok(Self {
             root: fs::canonicalize(root).map_err(|_| "meeting_path")?,
+            metadata_io: Arc::new(Mutex::new(())),
         })
+    }
+    fn save(&self, directory: &Path, manifest: &MeetingManifest) -> StoreResult<()> {
+        let _guard = self.metadata_io.lock().map_err(|_| "meeting_lock")?;
+        atomic_manifest(directory, manifest)
     }
     fn directory(&self, id: &str) -> StoreResult<PathBuf> {
         if !valid_id(id) {
@@ -350,7 +386,7 @@ impl MeetingStore {
             chunks: vec![],
             source_health: vec![],
         };
-        atomic_manifest(&directory, &manifest)?;
+        self.save(&directory, &manifest)?;
         Ok(MeetingWriter {
             store: self.clone(),
             directory,
@@ -409,14 +445,27 @@ impl MeetingStore {
         Ok(Some(bytes))
     }
     pub fn load(&self, id: &str) -> StoreResult<MeetingManifest> {
+        let guard = self.metadata_io.lock().map_err(|_| "meeting_lock")?;
         let directory = self.directory(id)?;
         let path = directory.join("manifest.json");
         if regular(&path)?.len() > MAX_MANIFEST_BYTES {
             return Err("meeting_manifest");
         }
+        let mut bytes = Vec::new();
+        BufReader::with_capacity(
+            64 * 1024,
+            File::open(path)
+                .map_err(|_| "meeting_io")?
+                .take(MAX_MANIFEST_BYTES + 1),
+        )
+        .read_to_end(&mut bytes)
+        .map_err(|_| "meeting_io")?;
+        drop(guard);
+        if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+            return Err("meeting_manifest");
+        }
         let manifest: MeetingManifest =
-            serde_json::from_reader(File::open(path).map_err(|_| "meeting_io")?)
-                .map_err(|_| "meeting_manifest")?;
+            serde_json::from_slice(&bytes).map_err(|_| "meeting_manifest")?;
         if manifest.schema_version != 1 || manifest.id != id || manifest.title.len() > 4096 {
             return Err("meeting_manifest");
         }
@@ -487,7 +536,28 @@ impl MeetingStore {
         ChunkReader::open(path, meta.clone())
     }
     pub fn recover(&self, id: &str) -> StoreResult<MeetingManifest> {
-        self.recover_with_scanner(id, |path, meta| {
+        self.recover_capture_error(id, None)
+    }
+    /// Persist an actor observation without changing raw data or processing state.
+    pub(crate) fn persist_capture_error(
+        &self,
+        id: &str,
+        cause: String,
+    ) -> StoreResult<MeetingManifest> {
+        let directory = self.directory(id)?;
+        let _lease = SessionLease::acquire(&directory)?;
+        let mut manifest = self.load(id)?;
+        apply_capture_error(&mut manifest, cause)?;
+        self.save(&directory, &manifest)?;
+        Ok(manifest)
+    }
+    /// The actor can know a first fault that its failed final commit never saved.
+    pub(crate) fn recover_capture_error(
+        &self,
+        id: &str,
+        capture_error: Option<String>,
+    ) -> StoreResult<MeetingManifest> {
+        self.recover_with_cause(id, capture_error, |path, meta| {
             let length = regular(path)?.len();
             scan_chunk(
                 File::open(path).map_err(|_| "meeting_io")?,
@@ -496,14 +566,28 @@ impl MeetingStore {
             )
         })
     }
+    #[cfg(test)]
     fn recover_with_scanner(
         &self,
         id: &str,
+        scanner: impl FnMut(&Path, &ChunkMeta) -> StoreResult<ChunkMeta>,
+    ) -> StoreResult<MeetingManifest> {
+        self.recover_with_cause(id, None, scanner)
+    }
+    fn recover_with_cause(
+        &self,
+        id: &str,
+        capture_error: Option<String>,
         mut scanner: impl FnMut(&Path, &ChunkMeta) -> StoreResult<ChunkMeta>,
     ) -> StoreResult<MeetingManifest> {
         let directory = self.directory(id)?;
         let _lease = SessionLease::acquire(&directory)?;
         let mut manifest = self.load(id)?;
+        // Promote legacy error before considering a later actor observation.
+        preserve_capture_provenance(&mut manifest);
+        if let Some(cause) = capture_error {
+            apply_capture_error(&mut manifest, cause)?;
+        }
         // Scan every chunk without mutation. A later read I/O failure must not truncate an earlier file.
         let mut lost_committed_audio = false;
         for meta in &mut manifest.chunks {
@@ -552,7 +636,7 @@ impl MeetingStore {
             (Some(committed), None) => Some(committed),
             (None, recovered) => recovered,
         };
-        atomic_manifest(&directory, &manifest)?;
+        self.save(&directory, &manifest)?;
         Ok(manifest)
     }
     pub fn delete(&self, id: &str) -> StoreResult<()> {
@@ -570,17 +654,7 @@ impl MeetingStore {
                 && name != "transcript.json"
                 && name != ".recording.lock"
                 && !chunk_name(name)
-                && !name
-                    .strip_prefix(".transcript-")
-                    .and_then(|s| s.strip_suffix(".tmp"))
-                    .is_some_and(|s| {
-                        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit() || b == b'-')
-                    })
-                && !(name.starts_with(".manifest-")
-                    && name.ends_with(".tmp")
-                    && name[10..name.len() - 4]
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || b == b'-'))
+                && !staging_name(name)
             {
                 return Err("meeting_path");
             }
@@ -639,6 +713,7 @@ impl MeetingWriter {
         let temporary = self
             .directory
             .join(format!(".transcript-{}-{sequence}.tmp", std::process::id()));
+        let mut replacing = false;
         let result = (|| {
             let mut file = OpenOptions::new()
                 .write(true)
@@ -648,9 +723,10 @@ impl MeetingWriter {
             file.write_all(bytes).map_err(|_| "meeting_io")?;
             file.sync_all().map_err(|_| "meeting_io")?;
             drop(file);
+            replacing = true;
             atomic_replace(&temporary, &target)
         })();
-        if result.is_err() {
+        if result.is_err() && !replacing {
             let _ = fs::remove_file(temporary);
         }
         result
@@ -825,7 +901,7 @@ impl MeetingWriter {
         next.status = status;
         next.end_qpc_100ns = end_qpc_100ns;
         next.error = error;
-        atomic_manifest(&self.directory, &next)?;
+        self.store.save(&self.directory, &next)?;
         self.manifest = next;
         self.last_checkpoint = Instant::now();
         Ok(())
@@ -967,6 +1043,7 @@ fn atomic_manifest(directory: &Path, manifest: &MeetingManifest) -> StoreResult<
     }
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = directory.join(format!(".manifest-{}-{sequence}.tmp", std::process::id()));
+    let mut replacing = false;
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
@@ -976,9 +1053,12 @@ fn atomic_manifest(directory: &Path, manifest: &MeetingManifest) -> StoreResult<
         serialize_manifest_to(&mut file, manifest)?;
         file.sync_all().map_err(|_| "meeting_io")?;
         drop(file);
+        replacing = true;
         atomic_replace(&temporary, &target)
     })();
-    if result.is_err() {
+    // Once native replacement starts, a partial failure may leave this as the
+    // only new copy. Retain staging/backup for diagnosis rather than unlinking.
+    if result.is_err() && !replacing {
         let _ = fs::remove_file(&temporary);
     }
     result
@@ -996,20 +1076,11 @@ fn serialize_manifest_to(writer: impl Write, manifest: &MeetingManifest) -> Stor
     buffered.flush().map_err(|_| "meeting_io")
 }
 #[cfg(windows)]
+#[path = "atomic_file.rs"]
+mod atomic_file;
+#[cfg(windows)]
 fn atomic_replace(from: &Path, to: &Path) -> StoreResult<()> {
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
-    }
-    let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
-    let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
-    // Replace in one operation, preserving the old manifest if replacement fails.
-    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) } == 0 {
-        Err("meeting_atomic_replace")
-    } else {
-        Ok(())
-    }
+    atomic_file::replace(from, to)
 }
 #[cfg(not(windows))]
 fn atomic_replace(from: &Path, to: &Path) -> StoreResult<()> {

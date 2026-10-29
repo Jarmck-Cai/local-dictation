@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Download, Mic, RefreshCw, Square, Trash2 } from "lucide-react";
+import { MeetingCaptureNotice } from "./MeetingCaptureNotice";
 import {
   MEETING_UPDATED_EVENT,
   meetingsApi,
@@ -513,9 +514,11 @@ export const Meetings = () => {
               )}
             </dl>
           )}
-          {selected.error && selected.status !== "interrupted" && (
-            <MeetingErrorMessage error={meetingErrorKey(selected.error)} />
-          )}
+          <MeetingCaptureNotice meeting={selected} />
+          {selected.error &&
+            (!selected.capture_error || selected.status === "failed") && (
+              <MeetingErrorMessage error={meetingErrorKey(selected.error)} />
+            )}
           {canTranscribeMeeting(selected) && (
             <p className="qs-meeting-caption">{t("meetings.savedHint")}</p>
           )}

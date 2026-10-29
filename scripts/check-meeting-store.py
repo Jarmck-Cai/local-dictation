@@ -38,7 +38,8 @@ def main():
     subprocess.run(command, check=True)
     run_command = [str(executable), "--test-threads=1"]
     if args.links: run_command.append("--include-ignored")
-    result = subprocess.run(run_command).returncode
+    # Resolve a relocated outputs junction before fixtures inspect ancestors.
+    result = subprocess.run(run_command, cwd=out.resolve()).returncode
     if result or not (args.build_soak or args.check_stalls):
         return result
     harness.write_text(f'#![allow(dead_code)]\nmod types;\n#[path = "{queue_source.as_posix()}"] mod queue;\n#[path = "{source.as_posix()}"] mod store;\ninclude!("{(root / "scripts/meeting-store-harness.rs").as_posix()}");\n', encoding="utf-8")

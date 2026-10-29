@@ -8,7 +8,7 @@ use super::{
     types::*,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{BufWriter, Write},
     path::{Component, Path, PathBuf},
@@ -113,6 +113,7 @@ struct State {
     generation: u64,
     revision: u64,
     snapshots: HashMap<String, MeetingSummary>,
+    deleted: HashSet<String>,
 }
 struct Inner {
     store: MeetingStore,
@@ -120,7 +121,12 @@ struct Inner {
     services: RuntimeServices,
     state: Mutex<State>,
     closing: AtomicBool,
+    #[cfg(test)]
+    observer: Mutex<Option<CaptureObserver>>,
 }
+#[cfg(test)]
+type CaptureObserver =
+    Arc<dyn Fn(Source, u64, u32, usize, u64, super::store::WriterStats) + Send + Sync>;
 pub struct MeetingRuntime {
     inner: Arc<Inner>,
 }
@@ -155,6 +161,7 @@ fn summary(manifest: &MeetingManifest, progress: Option<u8>) -> MeetingSummary {
         duration_ms: observed_end.saturating_sub(manifest.start_qpc_100ns) / 10_000,
         status: manifest.status,
         error: manifest.error.clone(),
+        capture_error: manifest.capture_error.clone(),
         progress_percent: progress,
         microphone_name: manifest
             .devices
@@ -262,6 +269,9 @@ fn finish_runtime(
             .map(|mut value| {
                 value.status = failed_status;
                 value.error = Some(static_error(error));
+                if failed_status == MeetingStatus::Interrupted && value.capture_error.is_none() {
+                    value.capture_error = Some(static_error(error));
+                }
                 value.progress_percent = None;
                 value
             }),
@@ -332,6 +342,28 @@ fn prepare_stored(
     Ok(manifest)
 }
 
+fn prepare_with_cause(
+    store: &MeetingStore,
+    manifest: MeetingManifest,
+    cause: Option<String>,
+) -> RuntimeResult<MeetingManifest> {
+    let manifest = if let Some(cause) = cause.filter(|_| {
+        manifest.capture_error.as_deref().is_none_or(|old| {
+            matches!(
+                old,
+                "meeting_capture_recovered" | "meeting_recovered" | "meeting_recording_interrupted"
+            )
+        })
+    }) {
+        store
+            .persist_capture_error(&manifest.id, cause)
+            .map_err(str::to_owned)?
+    } else {
+        manifest
+    };
+    prepare_stored(store, manifest)
+}
+
 impl MeetingRuntime {
     /// Recover only unfinished sessions, then enforce creation-time retention.
     pub fn new(
@@ -356,22 +388,36 @@ impl MeetingRuntime {
                 services,
                 state: Mutex::new(State::default()),
                 closing: AtomicBool::new(false),
+                #[cfg(test)]
+                observer: Mutex::new(None),
             }),
         })
     }
+    /// Narrow test adapter: no observer or per-packet timer in application builds.
+    #[cfg(test)]
+    pub fn observe_capture(&self, observer: CaptureObserver) {
+        *self.inner.observer.lock().unwrap() = Some(observer);
+    }
     pub fn list(&self) -> RuntimeResult<Vec<MeetingSummary>> {
+        self.list_with(|| self.inner.store.list().map_err(str::to_owned))
+    }
+    fn list_with(
+        &self,
+        read: impl FnOnce() -> RuntimeResult<Vec<MeetingManifest>>,
+    ) -> RuntimeResult<Vec<MeetingSummary>> {
+        let manifests = read()?;
         let mut state = self.inner.state.lock().map_err(|_| "meeting_lock")?;
-        let manifests = self.inner.store.list().map_err(str::to_owned)?;
-        Ok(manifests
-            .iter()
-            .map(|manifest| {
-                state
-                    .snapshots
-                    .get(&manifest.id)
-                    .cloned()
-                    .unwrap_or_else(|| remember(&mut state, summary(manifest, None)))
-            })
-            .collect())
+        for manifest in &manifests {
+            if !state.deleted.contains(&manifest.id) && !state.snapshots.contains_key(&manifest.id)
+            {
+                remember(&mut state, summary(manifest, None));
+            }
+        }
+        // Snapshots always win over disk: a concurrent stop/retry/create must
+        // retain its revision. Tombstones exclude a late read after deletion.
+        let mut rows: Vec<_> = state.snapshots.values().cloned().collect();
+        rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms).then(a.id.cmp(&b.id)));
+        Ok(rows)
     }
     pub fn current(&self) -> RuntimeResult<Option<MeetingSummary>> {
         Ok(self
@@ -383,8 +429,11 @@ impl MeetingRuntime {
             .clone())
     }
     fn stored_summary(&self, id: &str) -> RuntimeResult<MeetingSummary> {
-        let mut state = self.inner.state.lock().map_err(|_| "meeting_lock")?;
         let manifest = self.inner.store.load(id).map_err(str::to_owned)?;
+        let mut state = self.inner.state.lock().map_err(|_| "meeting_lock")?;
+        if state.deleted.contains(id) {
+            return Err("meeting_not_found".into());
+        }
         Ok(state
             .snapshots
             .get(id)
@@ -519,7 +568,7 @@ impl MeetingRuntime {
                         Ok(value) => Ok(value),
                         Err(error) => inner
                             .store
-                            .recover(&id)
+                            .recover_capture_error(&id, Some(static_error(&error)))
                             .map(|manifest| summary(&manifest, None))
                             .map_err(|_| error),
                     };
@@ -571,13 +620,21 @@ impl MeetingRuntime {
                 return Err("meeting_busy".into());
             }
         }
+        let known_cause = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| "meeting_lock")?
+            .snapshots
+            .get(id)
+            .and_then(|value| value.capture_error.clone());
         let (generation, cancel, completion) = self.reserve(id, Activity::Processing)?;
         let manifest = match self
             .inner
             .store
             .load(id)
             .map_err(str::to_owned)
-            .and_then(|manifest| prepare_stored(&self.inner.store, manifest))
+            .and_then(|manifest| prepare_with_cause(&self.inner.store, manifest, known_cause))
         {
             Ok(manifest) => manifest,
             Err(error) => {
@@ -653,6 +710,7 @@ impl MeetingRuntime {
             state.current = None;
         }
         state.snapshots.remove(id);
+        state.deleted.insert(id.into());
         Ok(())
     }
     /// Export original aligned audio or the saved transcript using a safe replacement.
@@ -671,9 +729,13 @@ impl MeetingRuntime {
             if state.active.as_ref().is_some_and(|active| active.id == id) {
                 return Err("meeting_active".into());
             }
-            prepare_stored(
+            prepare_with_cause(
                 &self.inner.store,
                 self.inner.store.load(id).map_err(str::to_owned)?,
+                state
+                    .snapshots
+                    .get(id)
+                    .and_then(|value| value.capture_error.clone()),
             )?;
             self.inner.store.edit(id).map_err(str::to_owned)?
         };
@@ -808,14 +870,51 @@ fn record_actor(
                 Ok(event) => Some(event),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => {
-                    error.get_or_insert_with(|| "meeting_capture_consumer_gone".into());
+                    if let Some(stopped) = &stopping {
+                        // Joined producers can close the event channel before
+                        // their stop thread delivers the result. Drain is done;
+                        // wait for that result instead of inventing a failure.
+                        match stopped.recv_timeout(Duration::from_millis(25)) {
+                            Ok(result) => terminal = Some(result),
+                            Err(RecvTimeoutError::Disconnected) => {
+                                terminal = Some(Err("meeting_capture_thread_panicked".into()))
+                            }
+                            Err(RecvTimeoutError::Timeout) => (),
+                        }
+                    } else {
+                        error.get_or_insert_with(|| "meeting_capture_consumer_gone".into());
+                    }
                     None
                 }
             }
         };
         if let Some(event) = event {
             let result = match event {
-                CaptureEvent::Packet(packet) => writer.append(packet),
+                CaptureEvent::Packet(packet) => {
+                    #[cfg(test)]
+                    let observation = (
+                        packet.source,
+                        packet.qpc_100ns,
+                        packet.frames,
+                        packet.data.len(),
+                        Instant::now(),
+                    );
+                    let result = writer.append(packet);
+                    #[cfg(test)]
+                    if result.is_ok() {
+                        if let Some(observer) = inner.observer.lock().ok().and_then(|o| o.clone()) {
+                            observer(
+                                observation.0,
+                                observation.1,
+                                observation.2,
+                                observation.3,
+                                observation.4.elapsed().as_micros() as u64,
+                                writer.stats(),
+                            );
+                        }
+                    }
+                    result
+                }
                 CaptureEvent::Heartbeat { source, qpc_100ns } => {
                     writer.heartbeat(source, 0, qpc_100ns)
                 }
@@ -856,7 +955,16 @@ fn record_actor(
     } else {
         MeetingStatus::Recorded
     };
-    let manifest = writer.finish(status, end, error).map_err(str::to_owned)?;
+    // Publish known provenance before finish: even permanent disk failure must
+    // leave the first fault visible for this application run.
+    if let Some(cause) = &error {
+        let mut value = summary(writer.manifest(), None);
+        value.capture_error.get_or_insert_with(|| cause.clone());
+        publish(inner, generation, value, false);
+    }
+    let manifest = writer
+        .finish(status, end, error.clone())
+        .map_err(|finish_error| error.unwrap_or_else(|| finish_error.into()))?;
     // finish releases the writer lease before recovery. Failed writes leave
     // their chunks unfinished, allowing only valid packet prefixes to survive.
     let manifest = prepare_stored(&inner.store, manifest)?;

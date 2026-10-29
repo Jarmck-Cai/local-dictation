@@ -99,6 +99,61 @@ export function meetingErrorKey(error: unknown): MeetingError {
     : "generic";
 }
 
+export type CaptureReason = {
+  reason:
+    | "stateSave"
+    | "fileAccess"
+    | "device"
+    | "queue"
+    | "capture"
+    | "storage"
+    | "unknown";
+  code?: string;
+};
+export function meetingCaptureReason(
+  meeting: MeetingSummary,
+): CaptureReason | null {
+  const cause =
+    meeting.capture_error ??
+    (meeting.status === "interrupted" ? meeting.error : null);
+  if (!cause && meeting.status !== "interrupted") return null;
+  const accessCodes = [
+    "meeting_atomic_replace_win32_5",
+    "meeting_atomic_replace_win32_32",
+    "meeting_atomic_replace_win32_33",
+  ];
+  if (cause && accessCodes.includes(cause))
+    return { reason: "fileAccess", code: cause };
+  const stateCodes = [
+    "meeting_atomic_replace",
+    "meeting_atomic_replace_exists",
+    "meeting_atomic_replace_win32_2",
+    "meeting_atomic_replace_win32_3",
+    "meeting_atomic_replace_win32_112",
+    "meeting_atomic_replace_win32_1175",
+    "meeting_atomic_replace_win32_1176",
+    "meeting_atomic_replace_win32_1177",
+  ];
+  if (cause && stateCodes.includes(cause))
+    return { reason: "stateSave", code: cause };
+  if (cause === "meeting_capture_queue_full")
+    return { reason: "queue", code: cause };
+  if (cause === "meeting_capture_device_removed")
+    return { reason: "device", code: cause };
+  const category = meetingErrorKey(cause);
+  const reason =
+    category === "devices"
+      ? "device"
+      : category === "capture"
+        ? "capture"
+        : category === "storage"
+          ? "storage"
+          : "unknown";
+  return reason === "unknown"
+    ? { reason }
+    : { reason, code: cause ?? undefined };
+}
+
 export type MeetingWarningKey =
   | "meetings.warnings"
   | "meetings.warningIncompleteRecording"

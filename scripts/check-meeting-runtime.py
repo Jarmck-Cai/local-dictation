@@ -43,6 +43,7 @@ def main():
         }
 ''' + anchor)
         source = source.replace('#[path = "store_tests.rs"]', f'#[path = "{(module_root / "store_tests.rs").as_posix()}"]')
+        source = source.replace('#[path = "atomic_file.rs"]', f'#[path = "{(module_root / "atomic_file.rs").as_posix()}"]')
         paths["store"] = out / "store.rs"
         paths["store"].write_text(source, encoding="utf-8")
     harness = out / "tests.rs"
@@ -70,7 +71,7 @@ mod capture {
         command += ["--extern", f"{name}={candidates[0]}"]
     subprocess.run(command, check=True, cwd=root)
     test_filter = args.filter or ("runtime_partial_packet_write" if args.partial_write else "")
-    return subprocess.run([str(executable), test_filter, "--test-threads=1", "--nocapture"] + (["--include-ignored"] if args.links or args.partial_write else []), cwd=root).returncode
+    return subprocess.run([str(executable), test_filter, "--test-threads=1", "--nocapture"] + (["--include-ignored"] if args.links or args.partial_write else []), cwd=out).returncode
 
 
 if __name__ == "__main__":

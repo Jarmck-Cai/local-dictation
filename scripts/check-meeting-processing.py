@@ -89,7 +89,7 @@ def main():
     shutil.copy2(args.ort / "onnxruntime.dll", out / "onnxruntime.dll")
     env = os.environ.copy()
     env["PATH"] = str(args.ort) + os.pathsep + env.get("PATH", "")
-    return subprocess.run([str(executable), args.filter, "--test-threads=1", "--nocapture"], cwd=root, env=env).returncode
+    return subprocess.run([str(executable), args.filter, "--test-threads=1", "--nocapture"], cwd=out, env=env).returncode
 
 
 if __name__ == "__main__":
