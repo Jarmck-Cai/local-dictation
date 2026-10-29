@@ -20,7 +20,7 @@ export const meetingMessages = {
     playbackHint:
       "All sounds played through the selected playback device will be recorded, including sounds from other apps. Choose the same device your meeting uses.",
     deviceHint:
-      "Choose both devices before recording. Device selection will stay fixed for this recording.",
+      "The first available microphone and playback device are selected automatically. Check that playback matches your meeting. Devices stay fixed during recording.",
     refreshDevices: "Refresh devices",
     loadingDevices: "Finding audio devices…",
     noMicrophone: "No microphone found. Connect one, then refresh devices.",
@@ -141,7 +141,8 @@ export const meetingMessages = {
     defaultDevice: "{{name}}（默认通话设备）",
     playbackHint:
       "所选播放设备发出的全部声音都会被录下，包括其他应用的声音。请选择会议正在使用的播放设备。",
-    deviceHint: "开始前请明确选择两台设备，本次录音期间保持使用这些设备。",
+    deviceHint:
+      "已默认选择首个麦克风和播放设备，请核对播放设备与会议一致。录音期间保持使用这些设备。",
     refreshDevices: "刷新设备",
     loadingDevices: "正在查找声音设备…",
     noMicrophone: "没有找到麦克风，请连接后刷新设备。",

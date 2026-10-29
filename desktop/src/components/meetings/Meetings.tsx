@@ -20,6 +20,7 @@ import {
   type MeetingError,
 } from "./meetingState";
 import "./meetings.css";
+import { resolveMeetingDeviceId } from "./meetingDevices";
 
 export function formatMeetingTime(milliseconds: number) {
   const seconds = Math.floor(Math.max(0, milliseconds) / 1000);
@@ -111,9 +112,12 @@ export const Meetings = () => {
   const playbackDevices = snapshot.devices.filter(
     (device) => device.source === "remote",
   );
-  const deviceSelectionValid =
-    microphoneDevices.some((device) => device.id === microphoneId) &&
-    playbackDevices.some((device) => device.id === renderId);
+  const effectiveMicrophoneId = resolveMeetingDeviceId(
+    microphoneDevices,
+    microphoneId,
+  );
+  const effectiveRenderId = resolveMeetingDeviceId(playbackDevices, renderId);
+  const deviceSelectionValid = !!effectiveMicrophoneId && !!effectiveRenderId;
   const blocked = !!snapshot.busy;
   const cancellationPending =
     !!snapshot.active && snapshot.cancellingId === snapshot.active.id;
@@ -194,7 +198,11 @@ export const Meetings = () => {
             event.preventDefault();
             if (recordingBlocked || !deviceSelectionValid) return;
             void perform((state) =>
-              state.start({ title: title.trim(), microphoneId, renderId }),
+              state.start({
+                title: title.trim(),
+                microphoneId: effectiveMicrophoneId,
+                renderId: effectiveRenderId,
+              }),
             );
           }}
         >
@@ -217,12 +225,7 @@ export const Meetings = () => {
               <select
                 id="meeting-microphone"
                 aria-labelledby="meeting-microphone-label"
-                value={
-                  deviceSelectionValid ||
-                  microphoneDevices.some((device) => device.id === microphoneId)
-                    ? microphoneId
-                    : ""
-                }
+                value={effectiveMicrophoneId}
                 disabled={recordingBlocked || snapshot.devicesLoading}
                 aria-describedby="meeting-device-hint"
                 onChange={(event) => setMicrophoneId(event.target.value)}
@@ -242,11 +245,7 @@ export const Meetings = () => {
               <select
                 id="meeting-playback"
                 aria-labelledby="meeting-playback-label"
-                value={
-                  playbackDevices.some((device) => device.id === renderId)
-                    ? renderId
-                    : ""
-                }
+                value={effectiveRenderId}
                 disabled={recordingBlocked || snapshot.devicesLoading}
                 aria-describedby="meeting-playback-hint"
                 onChange={(event) => setRenderId(event.target.value)}
