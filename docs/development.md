@@ -16,6 +16,8 @@
 
 按键状态回归使用 `python scripts/check-keyboard-state.py`，以合成原始输入和状态核对扩展键残留、真实按下、配置绑定、未知基线、设备/会话变化及同步代次；默认不监听本机键盘、不注册原始输入、不发键、不操作剪贴板。错误提示接线由 `python scripts/check-overlay-wiring.py` 核对，覆盖自动错误码、原生通知、前端白名单与中英文文案。原生观察器的注册和生命周期检查另行明确执行，不能用类型编译或合成状态代替实际API检查。
 
+会议占用录制时的普通听写回归使用 `python scripts/check-meeting-busy-feedback.py`，提取生产协调状态、共享录制许可和悬浮通知状态运行合成检查，覆盖拒绝时无录制副作用、重复按键与释放、结束会议后不自行开始，以及新按键恢复。该入口不使用麦克风、播放声音或发出系统按键；原生提示窗口及完整会议功能需另外验收。
+
 ## 正式交付
 
 Windows快照兼容回归使用 `python scripts/check-win32-snapshot.py`，默认只运行合成Win32适配器，不接触系统剪贴板。`--baseline`用于旧版失败对照。显式原生只备份诊断需额外传 `--native-snapshot --windows-rlib <已构建windows-0.61.3.rlib>`：仅在进程内读取/备份并释放，输出静态状态和格式数，不写剪贴板、不发键、不输出或保存正文；不能将其称为实际输入验证。`--build-native-only`只编译该诊断。

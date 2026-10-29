@@ -13,6 +13,7 @@ pub struct OverlayNotice {
 impl OverlayNotice {
     pub const PASTE: u8 = 1;
     pub const PLAYBACK: u8 = 2;
+    pub const CAPTURE_BUSY: u8 = 4;
 
     pub const fn new() -> Self {
         Self {
@@ -118,6 +119,23 @@ impl OverlayNotice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_busy_is_visible_without_creating_or_finishing_capture() {
+        let mut notice = OverlayNotice::new();
+        notice.report(OverlayNotice::CAPTURE_BUSY);
+        assert_eq!(notice.failures(), OverlayNotice::CAPTURE_BUSY);
+        assert_eq!(notice.progress(), None);
+        assert_eq!(notice.capture_generation(), 0);
+        assert!(!notice.capture_ready());
+        assert!(notice.hide_ticket().is_none());
+        let old = notice.failure_generation();
+        notice.report(OverlayNotice::CAPTURE_BUSY);
+        assert!(!notice.dismiss(old));
+        assert!(notice.dismiss(notice.failure_generation()));
+        assert!(notice.hide_ticket().is_some());
+        assert_eq!(notice.progress(), None);
+    }
 
     #[test]
     fn paste_reason_survives_playback_notice_and_clears_only_on_current_dismissal() {

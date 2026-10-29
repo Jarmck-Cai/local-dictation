@@ -748,6 +748,7 @@
     "retention": "Audio stays on this computer and expires after seven days. Text history also uses a seven-day default and can be deleted at any time.",
     "initializationFailed": "Shortcuts could not initialize. Please reopen the app.",
     "recordingFailed": "Recording could not start. Check your microphone and permissions.",
+    "meetingCaptureBusy": "A meeting is recording. Stop the recording to use keyboard dictation.",
     "transcriptionFailed": "Recognition did not finish. Check the model or microphone and try again.",
     "openMicrophoneSettings": "Open microphone settings",
     "muteFailed": "Playback muting or restoration did not finish. Check the system playback volume.",

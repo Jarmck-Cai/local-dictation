@@ -31,6 +31,14 @@ fn overlay_failures() -> u8 {
 
 fn register_failure_listeners(app_handle: &AppHandle) {
     let app = app_handle.clone();
+    app_handle.listen("dictation-capture-busy", move |_| {
+        OVERLAY_NOTICE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .report(OverlayNotice::CAPTURE_BUSY);
+        queue_overlay_update(&app);
+    });
+    let app = app_handle.clone();
     app_handle.listen("paste-error", move |event| {
         let payload = serde_json::from_str::<serde_json::Value>(event.payload()).ok();
         let code = payload

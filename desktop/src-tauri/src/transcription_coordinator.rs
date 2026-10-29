@@ -706,7 +706,7 @@ impl CaptureOwnership {
         hotkey: &str,
         start: impl FnOnce(&str, &str) -> bool,
         retry_unload: impl FnOnce(),
-    ) {
+    ) -> bool {
         let id = state.recording_id.unwrap_or(0);
         let mut action_ran = false;
         let active_capture = &self.active_capture;
@@ -731,6 +731,8 @@ impl CaptureOwnership {
         if !cancellation_retained_capture {
             self.retry_idle_unload(state, id, retry_unload);
         }
+        // A denied claim is the only path that never invokes the action.
+        !action_ran
     }
 
     fn cancel_completed(
@@ -1185,7 +1187,7 @@ fn run_effect(
             binding_id,
             hotkey_string,
         } => {
-            capture.start_recording(
+            let capture_busy = capture.start_recording(
                 state,
                 &binding_id,
                 &hotkey_string,
@@ -1195,6 +1197,9 @@ fn run_effect(
                         .maybe_unload_immediately("failed recording startup")
                 },
             );
+            if capture_busy {
+                let _ = app.emit("dictation-capture-busy", ());
+            }
         }
         Effect::Stop {
             binding_id,
@@ -1620,6 +1625,83 @@ mod recording_bridge_tests {
         assert!(gate.try_claim().is_none());
         finish_processing_capture(&mut state, &mut permit, id);
         assert!(gate.try_claim().is_some());
+    }
+
+    #[test]
+    fn meeting_rejection_reports_busy_without_side_effects_or_deferred_start() {
+        let gate = Arc::new(RecordingGate::default());
+        let meeting = gate.try_claim().unwrap();
+        for mode in [
+            ShortcutActivation::Toggle,
+            ShortcutActivation::PushToTalk,
+            ShortcutActivation::HoldOrToggle,
+        ] {
+            let mut capture = capture_for_test(&gate);
+            let mut state = CoordinatorState::new();
+            let now = Instant::now();
+            for n in 0..3 {
+                let event = |is_pressed| InputEvent {
+                    binding_id: "transcribe".into(),
+                    hotkey_string: "f8".into(),
+                    is_pressed,
+                    mode,
+                    hold_threshold: Duration::from_millis(200),
+                    external: false,
+                };
+                let now = now + Duration::from_secs(n);
+                assert!(matches!(
+                    state.on_input(event(true), now),
+                    Some(Effect::Start { .. })
+                ));
+                let rejected = capture.start_recording(
+                    &mut state,
+                    "transcribe",
+                    "f8",
+                    |_, _| panic!("meeting rejection must not load, mute, or capture"),
+                    || panic!("meeting rejection must not unload a model"),
+                );
+                assert!(rejected, "executor must report meeting rejection");
+                assert_eq!(state.stage, Stage::Idle);
+                assert!(state
+                    .on_input(event(false), now + Duration::from_millis(20))
+                    .is_none());
+                assert!(state.pending_press.is_none());
+                assert!(state.pending_release.is_none());
+                assert!(state.next_deadline().is_none());
+            }
+        }
+        // A key still held as the meeting ends must only release, never start.
+        let mut capture = capture_for_test(&gate);
+        let mut state = CoordinatorState::new();
+        let now = Instant::now();
+        let event = |is_pressed| InputEvent {
+            binding_id: "transcribe".into(),
+            hotkey_string: "f8".into(),
+            is_pressed,
+            mode: ShortcutActivation::PushToTalk,
+            hold_threshold: Duration::from_millis(200),
+            external: false,
+        };
+        assert!(state.on_input(event(true), now).is_some());
+        assert!(capture.start_recording(
+            &mut state,
+            "transcribe",
+            "f8",
+            |_, _| panic!(),
+            || panic!()
+        ));
+        drop(meeting);
+        assert!(state
+            .on_input(event(false), now + Duration::from_secs(1))
+            .is_none());
+        assert!(state.next_deadline().is_none());
+        assert_eq!(state.stage, Stage::Idle);
+        // A fresh press after the meeting can claim the slot normally.
+        assert!(state
+            .on_input(event(true), now + Duration::from_secs(2))
+            .is_some());
+        assert!(!capture.start_recording(&mut state, "transcribe", "f8", |_, _| true, || panic!()));
+        assert!(capture.permit.is_some());
     }
 
     #[test]

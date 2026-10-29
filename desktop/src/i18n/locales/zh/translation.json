@@ -748,6 +748,7 @@
     "retention": "录音只保存在本机，七天到期清理。文字历史暂按七天保留，可随时删除。",
     "initializationFailed": "快捷键初始化失败，请重新打开应用。",
     "recordingFailed": "录音未能开始，请检查麦克风与权限。",
+    "meetingCaptureBusy": "会议正在录音，结束录音后可使用按键听写。",
     "transcriptionFailed": "这次识别未完成，请检查模型或麦克风后重试。",
     "openMicrophoneSettings": "打开麦克风设置",
     "muteFailed": "播放静音或恢复未完成，请检查系统播放音量。",

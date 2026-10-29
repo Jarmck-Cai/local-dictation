@@ -239,18 +239,21 @@ const RecordingOverlay: React.FC = () => {
             </div>
           )}
           {(failures & 2) !== 0 && <p>{t("dictation.muteFailed")}</p>}
+          {(failures & 4) !== 0 && <p>{t("dictation.meetingCaptureBusy")}</p>}
           <div className="error-actions">
-            <button
-              disabled={copyState === "copying"}
-              aria-busy={copyState === "copying"}
-              onClick={() => void copyController.copy()}
-            >
-              {t(
-                copyState === "copied"
-                  ? "dictation.history.copied"
-                  : "dictation.history.copyFinal",
-              )}
-            </button>
+            {(failures & 3) !== 0 && (
+              <button
+                disabled={copyState === "copying"}
+                aria-busy={copyState === "copying"}
+                onClick={() => void copyController.copy()}
+              >
+                {t(
+                  copyState === "copied"
+                    ? "dictation.history.copied"
+                    : "dictation.history.copyFinal",
+                )}
+              </button>
+            )}
             <button onClick={() => void copyController.dismiss()}>
               {t("common.close")}
             </button>
