@@ -28,6 +28,8 @@ Windows发布边界回归使用 `python scripts/check-win32-publication.py`，�
 
 `check-protected-paste.py --native-text-memory --windows-rlib <已构建windows-0.61.3.rlib>` 只执行生产 UTF-16 内存构造与固定代码页转换，不访问剪贴板、窗口、键盘或用户正文。`--build-manual-rdp-probe <输出exe>`（同样需 `--windows-rlib`）只构建手动对照诊断，不自动运行。其实际模式会替换当前剪贴板且不能恢复测试前原内容，必须先明确固定文本、受控编辑器和用户测试窗口；不发键、不读原正文，新复制优先，按固定基线结算。详见远程输入调查记录，不能用构建或内存检查代替真实落字验收。
 
+`--build-automatic-rdp-probe <输出exe>` 需同时传 `--windows-rlib` 与 `--enigo-rlib`，也只构建。其两个实际模式分别为单次 Ctrl+V 后恢复固定基线或保留固定正文，必须另获自动输入的具体测试窗口授权；只接受保持前台的系统 MSTSC 进程并保留生产键状态、单次注入和剪贴板租约保护。它不备份未知原内容，不安装或改变应用配置，不能把此前手动测试许可扩大为自动发键。
+
 用户可见功能或修复形成交付时，统一更新 `desktop/package.json`、`desktop/src-tauri/Cargo.toml`、`Cargo.lock` 中本包版本及 `tauri.conf.json`，并更新 README 和 `docs/releases.md`。检查通过后提交，建立不可变的 `vX.Y.Z` 标签，并推送提交与标签。后续修复使用新版本号。
 
 公开安装包只作为 GitHub Release 附件，源码 Git 不包含安装包、模型或运行数据。附件须核对版本、SHA-256、第三方资源许可及不含用户数据。

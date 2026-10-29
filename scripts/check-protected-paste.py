@@ -73,6 +73,9 @@ def main() -> int:
     parser.add_argument("--native-text-memory", action="store_true")
     parser.add_argument("--build-manual-rdp-probe", type=Path,
                         help="build only; fixed-text clipboard probe requires separate explicit invocation")
+    parser.add_argument("--build-automatic-rdp-probe", type=Path,
+                        help="build only; one Ctrl+V to a separately authorized foreground MSTSC target")
+    parser.add_argument("--enigo-rlib", type=Path)
     args = parser.parse_args()
     if args.windows_rlib and os.name != "nt":
         parser.error("--windows-rlib requires a Windows host")
@@ -80,6 +83,10 @@ def main() -> int:
         parser.error("--native-text-memory requires --windows-rlib")
     if args.build_manual_rdp_probe and not args.windows_rlib:
         parser.error("--build-manual-rdp-probe requires --windows-rlib")
+    if args.build_automatic_rdp_probe and (not args.windows_rlib or not args.enigo_rlib):
+        parser.error("--build-automatic-rdp-probe requires --windows-rlib and --enigo-rlib")
+    if args.build_manual_rdp_probe and args.build_automatic_rdp_probe:
+        parser.error("build one probe kind at a time")
     root = Path(__file__).resolve().parents[1]
     rustc = shutil.which("rustc")
     if not rustc:
@@ -114,7 +121,7 @@ def main() -> int:
                 "-L", f"dependency={rlib.parent}", "-o", str(work / "windows_check.rmeta"),
             ], check=True)
             print("Win32 adapter metadata check passed; no clipboard APIs executed.")
-            if args.build_manual_rdp_probe:
+            if args.build_manual_rdp_probe or args.build_automatic_rdp_probe:
                 policy = (root / "desktop/src-tauri/src/protected_paste_policy.rs").as_posix()
                 native = (root / "desktop/src-tauri/src/protected_paste_windows.rs").read_text(encoding="utf-8")
                 start = native.index("    fn prepare(&mut self, text: &str)")
@@ -124,8 +131,29 @@ def main() -> int:
                 tail = (root / "scripts/manual-rdp-text-probe.rs").read_text(encoding="utf-8")
                 assert tail.count("// PRODUCTION_ALLOCATIONS") == 1
                 tail = tail.replace("// PRODUCTION_ALLOCATIONS", prefix[prefix.index("{") + 1:])
+                header = ''
+                automatic = ''
+                extra_link = []
+                auto_hashes = {}
+                if args.build_automatic_rdp_probe:
+                    enigo_rlib = args.enigo_rlib.resolve(strict=True)
+                    extra_link = ["--extern", f"enigo={enigo_rlib}", "-L", f"dependency={enigo_rlib.parent}"]
+                    for name in ["manual_paste_keyboard", "keyboard_state_policy", "keyboard_state_windows"]:
+                        filename = root / f"desktop/src-tauri/src/{name}.rs"
+                        alias = "keyboard" if name == "manual_paste_keyboard" else name
+                        header += f'#[path = "{filename.as_posix()}"] mod {alias};\n'
+                        auto_hashes[name] = hashlib.sha256(filename.read_bytes()).hexdigest()
+                    manual = (root / "desktop/src-tauri/src/manual_paste.rs").read_text(encoding="utf-8")
+                    adapter_start = manual.index("    struct Adapter<'a>")
+                    adapter_end = manual.index("    keyboard::inject_if_released(", adapter_start)
+                    adapter = manual[adapter_start:adapter_end]
+                    automatic = (root / "scripts/automatic-rdp-text-probe.rs").read_text(encoding="utf-8")
+                    assert automatic.count("// PRODUCTION_ENIGO_ADAPTER") == 1
+                    automatic = automatic.replace("// PRODUCTION_ENIGO_ADAPTER", adapter)
+                    auto_hashes["enigo_adapter"] = hashlib.sha256(adapter.encode()).hexdigest()
+                    auto_hashes["expanded_automatic_probe"] = hashlib.sha256(automatic.encode()).hexdigest()
                 source = ('#![allow(dead_code)]\n' + f'#[path = "{policy}"] mod policy;\n'
-                          + 'mod platform {\n' + native + '\n' + tail + '\n}\n'
+                          + header + 'mod platform {\n' + native + '\n' + tail + automatic + '\n}\n'
                           + r'''fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = match args.as_slice() {
@@ -140,15 +168,34 @@ def main() -> int:
     }
 }
 ''')
+                if args.build_automatic_rdp_probe:
+                    source = source[:source.index("fn main() -> std::process::ExitCode")] + r'''fn main() -> std::process::ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (retain, pid) = match args.as_slice() {
+        [mode, pid] if mode == "--automatic-rdp-restore" || mode == "--automatic-rdp-retain" => {
+            match pid.parse::<u32>() {
+                Ok(pid) if pid != 0 => (mode == "--automatic-rdp-retain", pid),
+                _ => { println!("NO native APIs called. Positive target PID required."); return std::process::ExitCode::from(2); }
+            }
+        },
+        _ => { println!("NO native APIs called. Explicit one-shot RDP mode and PID required."); return std::process::ExitCode::from(2); }
+    };
+    match platform::automatic_probe(pid, retain) {
+        Ok(()) => { println!("status=settled remote_insertion_requires_user_confirmation=true"); std::process::ExitCode::SUCCESS },
+        Err(code) => { println!("status=ended code={}", code); std::process::ExitCode::FAILURE },
+    }
+}
+'''
                 probe = work / "manual_rdp_probe.rs"
                 probe.write_text(source, encoding="utf-8")
-                binary = args.build_manual_rdp_probe.resolve()
+                binary = (args.build_automatic_rdp_probe or args.build_manual_rdp_probe).resolve()
                 binary.parent.mkdir(parents=True, exist_ok=True)
                 subprocess.run([rustc, "--edition=2021", str(probe), "--extern", f"windows={rlib}",
-                    "-L", f"dependency={rlib.parent}", "-o", str(binary)], check=True)
+                    "-L", f"dependency={rlib.parent}", *extra_link, "-o", str(binary)], check=True)
                 binary.with_suffix(".generated.rs").write_text(source, encoding="utf-8")
                 binary.with_suffix(".manifest.json").write_text(json.dumps({
-                    "built_only": True, "automatic_keys": False,
+                    "built_only": True, "automatic_keys": bool(args.build_automatic_rdp_probe),
+                    "automatic_probe_hashes": auto_hashes,
                     "reads_existing_clipboard_payload": False, "requires_explicit_test_consent": True,
                     "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
                     "production_windows_sha256": hashlib.sha256(native.encode()).hexdigest(),
@@ -156,7 +203,7 @@ def main() -> int:
                     "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                     "tail_sha256": hashlib.sha256(tail.encode()).hexdigest(),
                 }, indent=2), encoding="utf-8")
-                print(f"Manual fixed-text probe BUILT ONLY: {binary}. No clipboard APIs executed.")
+                print(f"Fixed-text probe BUILT ONLY: {binary}. No clipboard or keyboard APIs executed.")
             if args.native_text_memory:
                 policy = (root / "desktop/src-tauri/src/protected_paste_policy.rs").as_posix()
                 native = (root / "desktop/src-tauri/src/protected_paste_windows.rs").read_text(encoding="utf-8")
