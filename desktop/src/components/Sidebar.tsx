@@ -4,6 +4,7 @@ import {
   ChartNoAxesCombined,
   NotebookPen,
   Settings2,
+  UsersRound,
 } from "lucide-react";
 import { GeneralSettings } from "./settings/general/GeneralSettings";
 import { HistorySettings } from "./settings/history/HistorySettings";
@@ -12,6 +13,7 @@ import { SettingsGroup } from "./ui/SettingsGroup";
 import { VocabularyLearning } from "./settings/VocabularyLearning";
 import { UsageSettings } from "./settings/UsageOverview";
 import { QingshuLogo } from "./brand/QingshuLogo";
+import { Meetings } from "./meetings/Meetings";
 
 const VocabularySettings = () => {
   const { t } = useTranslation();
@@ -33,6 +35,11 @@ export const SECTIONS_CONFIG = {
     labelKey: "dictation.nav.history",
     icon: NotebookPen,
     component: HistorySettings,
+  },
+  meetings: {
+    labelKey: "meetings.nav",
+    icon: UsersRound,
+    component: Meetings,
   },
   vocabulary: {
     labelKey: "dictation.nav.vocabulary",
@@ -85,7 +92,7 @@ export const Sidebar = ({
         <span>{t("dictation.productName")}</span>
       </div>
       <nav aria-label={t("dictation.navigation")} className="space-y-1.5">
-        {(["history", "vocabulary", "usage"] as const).map(item)}
+        {(["history", "meetings", "vocabulary", "usage"] as const).map(item)}
       </nav>
       <nav aria-label={t("dictation.nav.general")} className="mt-auto pt-8">
         {item("general")}

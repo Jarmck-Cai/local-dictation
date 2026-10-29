@@ -21,4 +21,6 @@
 
 ## 安装包中的第三方许可
 
+会议处理使用固定 [webrtc-audio-processing 2.1](https://www.freedesktop.org/software/pulseaudio/webrtc-audio-processing/)（WebRTC APM / AEC3，M131）及 [Abseil 20240722.0](https://github.com/abseil/abseil-cpp/tree/20240722.0)。`scripts/prepare-meeting-apm.ps1` 在构建前显式准备Windows x64 MSVC /MD静态库，校验归档及编译契约；Cargo不会联网下载。安装包随附 `resources/webrtc-apm-licenses/` 下的WebRTC、Abseil与相关第三方许可、作者和专利文本。接口和构建说明见 `src-tauri/native/meeting_apm/README.md`。采用成熟AEC库不等于本应用的实际外放效果已经验收，Beta限制以版本说明为准。
+
 分发安装包须同时保留 `resources/THIRD-PARTY-RESOURCES.md` 及其中列出的许可。SenseVoiceSmall官方模型卡指向FunASR模型许可1.1，不能把代码仓库MIT许可当作权重许可；原模型名称、作者及固定资源出处随包保留。Silero VAD v4、ONNX Runtime 1.24.2及jieba-rs 0.11.0分别保留官方MIT文本，ONNX还保留其ThirdPartyNotices。以上为资源出处和许可文本记录，不新增模型或改变识别链路。

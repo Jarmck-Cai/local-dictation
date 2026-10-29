@@ -4,7 +4,9 @@ Windows 通用语音输入工具。本地 SenseVoice INT8 识别中英混合语�
 
 按住 **F8** 说话，松键后将结果一次粘贴到当前光标位置，由使用者自行发送。适用于编辑器、终端、聊天等普通输入场景，无需按应用安装插件。
 
-当前版本 **0.1.11**，属于 Windows 内测版。基于 [Handy v0.9.8](https://github.com/cjpais/Handy/releases/tag/v0.9.8) 改造，桌面端使用 Tauri 2、Rust 和 React，运行不依赖 Python。来源与许可见 [UPSTREAM.md](desktop/UPSTREAM.md) 和 [LICENSE](LICENSE)。
+当前预览版 **0.1.12-beta.1**，加入会议录音试用；此前日用版为 **0.1.11**。基于 [Handy v0.9.8](https://github.com/cjpais/Handy/releases/tag/v0.9.8) 改造，桌面端使用 Tauri 2、Rust 和 React，运行不依赖 Python。来源与许可见 [UPSTREAM.md](desktop/UPSTREAM.md) 和 [LICENSE](LICENSE)。
+
+会议 Beta：侧栏进入「会议」，选择麦克风及会议实际使用的播放设备，点击「开始录音」，结束后在本机转录；切换页面或隐藏主窗口仍继续录制，会议录制期间普通按键听写暂停。保留两路原音七天并可导出，文本按「麦克风／电脑声音」标记录音来源。外放回声、重复文字、接话与说话人区分尚未完成真实会议验收，不将这些来源标签当作可靠身份识别；真正重叠讲话后续改进。电脑声音包含所选设备上其他应用的播放。安装或启动应用不会自动开始会议录制。
 
 ## 功能
 

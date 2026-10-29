@@ -24,6 +24,10 @@ if (-not $CheckOnly) {
 $env:Path = (Split-Path -Parent $bunPath) + ';' + $cmakePath + ';' + $env:Path
 $env:ORT_LIB_LOCATION = $ortPath
 $env:ORT_PREFER_DYNAMIC_LINK = '1'
+$env:MEETING_APM_DIR = Join-Path $projectRoot '.cache\native\webrtc-apm-2.1-msvc-x64-md'
+if (-not (Test-Path -LiteralPath (Join-Path $env:MEETING_APM_DIR 'manifest.json'))) {
+    throw 'Run scripts/prepare-meeting-apm.ps1 first (meeting audio backend is not prepared).'
+}
 $env:GGML_NATIVE = 'OFF'
 $env:HANDY_DISABLE_UPDATER = '1'
 $vcInstall = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Redist\MSVC'

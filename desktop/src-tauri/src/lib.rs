@@ -244,6 +244,11 @@ fn initialize_core_logic(app_handle: &AppHandle) {
             log::warn!("Expired audio cleanup failed: {error}");
         }
         dictation_metrics::prune(&cleanup_app);
+        if let Ok(root) = crate::portable::app_data_dir(&cleanup_app) {
+            if meetings::commands::prune_data_root(&root).is_err() {
+                log::warn!("Expired meeting cleanup failed");
+            }
+        }
         vocabulary::schedule_collected_terms_refresh(&cleanup_app);
     });
     app_handle.manage(tray::TrayState::new());
@@ -676,6 +681,16 @@ pub fn run(cli_args: CliArgs) {
 
     let specta_builder = Builder::<tauri::Wry>::new()
         .commands(collect_commands![
+            meetings::commands::meeting_devices,
+            meetings::commands::meeting_list,
+            meetings::commands::meeting_current,
+            meetings::commands::meeting_start,
+            meetings::commands::meeting_stop,
+            meetings::commands::meeting_transcribe,
+            meetings::commands::meeting_cancel_transcription,
+            meetings::commands::meeting_transcript,
+            meetings::commands::meeting_delete,
+            meetings::commands::meeting_export,
             dictation_cleanup::get_dictation_config,
             dictation_cleanup::save_dictation_config,
             dictation_cleanup::set_claude_api_key,
@@ -968,13 +983,15 @@ pub fn run(cli_args: CliArgs) {
                         ).ok()
                     })
                     .is_some_and(|report| report.failed == 0);
+                let meeting_cleaned=crate::portable::app_data_dir(app.handle()).ok()
+                    .is_some_and(|root|meetings::commands::prune_data_root(&root).is_ok());
                 if let Some(path) = &cli_args.maintenance_report {
-                    let report = serde_json::json!({"key_imported": imported, "audio_cleanup_ok": cleaned});
+                    let report = serde_json::json!({"key_imported": imported, "audio_cleanup_ok": cleaned, "meeting_cleanup_ok":meeting_cleaned});
                     if let Ok(body) = serde_json::to_vec_pretty(&report) {
                         let _ = std::fs::write(path, body);
                     }
                 }
-                std::process::exit(if imported != Some(false) && cleaned { 0 } else { 1 });
+                std::process::exit(if imported != Some(false) && cleaned && meeting_cleaned { 0 } else { 1 });
             }
 
             // Configure before any VAD/ASR session is constructed. Shared pools
@@ -1118,6 +1135,9 @@ pub fn run(cli_args: CliArgs) {
             app.manage(TranscriptionCoordinator::new(app_handle.clone()));
 
             initialize_core_logic(&app_handle);
+            if meetings::commands::initialize(&app_handle).is_err() {
+                log::warn!("Meeting service unavailable; ordinary dictation remains available");
+            }
 
             // Secure Input monitor (macOS): detects stuck secure input that
             // silently blocks keyed shortcuts, warns the user, and activates
@@ -1222,6 +1242,7 @@ pub fn run(cli_args: CliArgs) {
         }
         // Teardown transcribe.cpp before exit
         tauri::RunEvent::Exit => {
+            meetings::commands::shutdown(app);
             if let Some(rm) = app.try_state::<Arc<AudioRecordingManager>>() {
                 rm.shutdown();
             }

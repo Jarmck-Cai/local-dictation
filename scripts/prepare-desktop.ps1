@@ -1,3 +1,5 @@
+[CmdletBinding()]
+param([string]$Python = 'python')
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 function Get-VerifiedFile([string]$Uri, [string]$RelativePath, [string]$Sha256) {
@@ -18,6 +20,8 @@ tar -xzf $modelArchive -C $modelDest 'sense-voice-int8/model.int8.onnx' 'sense-v
 if ($LASTEXITCODE -ne 0) { throw 'Model extraction failed' }
 $bunPath = Join-Path $projectRoot '.cache\tools\bun-windows-x64\bun.exe'
 $env:Path = (Split-Path -Parent $bunPath) + ';' + $env:Path
+& (Join-Path $PSScriptRoot 'prepare-meeting-apm.ps1') -Python $Python
+if ($LASTEXITCODE -ne 0) { throw 'Meeting audio backend preparation failed' }
 Push-Location (Join-Path $projectRoot 'desktop')
 try {
     & $bunPath install --frozen-lockfile

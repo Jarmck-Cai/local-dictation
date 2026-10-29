@@ -1,4 +1,5 @@
 import i18n from "i18next";
+import { meetingMessages } from "./meeting-translations";
 import { historyWorkspaceMessages } from "./features/historyWorkspace";
 import { collectedTermsMessages } from "./features/collectedTerms";
 import { initReactI18next } from "react-i18next";
@@ -25,6 +26,7 @@ for (const [path, module] of Object.entries(localeModules)) {
     resources[langCode] = {
       translation: {
         ...module.default,
+        meetings: meetingMessages[langCode as keyof typeof meetingMessages],
         dictation: {
           ...(module.default.dictation as Record<string, unknown>),
           collectedTerms:
