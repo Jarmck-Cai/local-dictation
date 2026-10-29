@@ -147,6 +147,30 @@ mod native_tests {
         });
     }
     #[test]
+    fn extension_ideograph_reaches_os_boundary_as_valid_high_low_pair() {
+        reset();
+        let target = capture().unwrap().unwrap();
+        assert_eq!(
+            submit(target, "𠀀", false, || false, || Ok(()), |_| Ok(())),
+            Ok(())
+        );
+        // U+20000 is D840 DC00, not two DC00 units. This checks the actual
+        // production INPUT construction, not remote rendering or copy return.
+        SYSTEM.with(|s| {
+            let s = s.borrow();
+            assert_eq!(
+                s.inputs,
+                [
+                    (0xd840, 4, 0),
+                    (0xd840, 6, 0),
+                    (0xdc00, 4, 0),
+                    (0xdc00, 6, 0)
+                ]
+            );
+            assert_eq!((s.calls, s.copy_prepares, s.copy_finishes), (1, 0, 0));
+        });
+    }
+    #[test]
     fn arbitrary_same_named_executable_and_other_clients_are_not_unicode_targets() {
         for image in [
             "C:\\Temp\\mstsc.exe",
