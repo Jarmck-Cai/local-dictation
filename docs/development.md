@@ -24,6 +24,18 @@ Windows快照兼容回归使用 `python scripts/check-win32-snapshot.py`，默�
 
 Windows发布边界回归使用 `python scripts/check-win32-publication.py`，提取实际适配器方法，合成CloseClipboard的系统文本格式转换，核对发布后许可与恢复；默认不调用系统剪贴板。`--baseline`读取v0.1.7，应复现相同断言失败。这与只备份检查覆盖不同边界，不能互相替代，也不能代替完整原生流程或目标应用验收。
 
+该检查的 `--rdp` 模式增加纯合成的远程剪贴板时序，并使用生产单次按键控制器，分别建模格式列表传播、本机正文请求和远端编辑器消费；覆盖预读、延后读取、取消、并发复制、恢复与不重复注入。通过表示实现符合这些特征断言，不表示真实 RDP 已落字。`--rdp --rdp-delivery-gate` 额外要求两个已知失败模型收到本次正文，当前应以两个断言失败退出，用于保留显式红灯；不作为默认成功检查。模型假设、官方依据与待实测步骤见 `docs/remote-dictation-plan.md`。
+
+`check-protected-paste.py --native-text-memory --windows-rlib <已构建windows-0.61.3.rlib>` 只执行生产 UTF-16 内存构造与固定代码页转换，不访问剪贴板、窗口、键盘或用户正文。`--build-manual-rdp-probe <输出exe>`（同样需 `--windows-rlib`）只构建手动对照诊断，不自动运行。其实际模式会替换当前剪贴板且不能恢复测试前原内容，必须先明确固定文本、受控编辑器和用户测试窗口；不发键、不读原正文，新复制优先，按固定基线结算。详见远程输入调查记录，不能用构建或内存检查代替真实落字验收。
+
+`--build-automatic-rdp-probe <输出exe>` 需同时传 `--windows-rlib` 与 `--enigo-rlib`，也只构建。实际对照覆盖 Ctrl+V 后恢复/保留、扫描码，以及不经过剪贴板的单次固定 Unicode 文本；每轮须另获对应输入方式的具体测试窗口授权。只接受保持前台的系统 MSTSC 进程并保留生产键状态与单次提交保护；剪贴板模式还保留租约保护且不备份未知原内容。诊断不安装或改变应用配置，不能把手动测试许可扩大为自动发键，或把 Ctrl+V 许可扩大为 Unicode 字符提交。
+
+MSTSC Unicode 适配的离线检查为 `python scripts/check-rdp-input.py`。加 `--windows-rlib <windows-0.61.3.rlib>` 会编译实际原生模块，并在完全替换桌面 API 的合成边界中检查身份、焦点、UTF-16 事件和一次提交；不会调用真实 SendInput 或剪贴板。`check-automatic-paste.py` 同时覆盖实际自动/补贴路由、本机原路径、单行规范化和长度拒绝；`check-win32-publication.py --rdp` 覆盖复制偏好的真实租约方法，另由 `check-overlay-wiring.py` 核对原生浮窗、前端错误分类和中英文完成状态。
+
+该适配仅针对完整路径匹配系统目录的 MSTSC 前台进程，普通本机仍用原受保护剪贴板。Unicode 层只接受单行无控制字符，最多 4096 个 UTF-16 单元。U2 实测发现 U+20000 自动输入损坏、手动 M3 往返完整，首版据此暂将自动输入上限收为 U+1FFFF：正文含更高平面字符或超长时，在任何输入/复制前整段停止并提示明确手动复制，不过滤、截断或先送前缀。该上限是兼容保护，不是 Windows/RDP 的规范限制；普通本机仍可使用完整字符范围。默认不创建剪贴板对象；复制偏好在提交后按源租约结算，新复制和取消优先。返回全部事件数仅表示 OS 接受，部分接受不可重试或自动切回剪贴板。其他远控客户端和真实远端应用兼容性需单独验收。
+
+`check-rdp-input.py --windows-rlib <rlib> --build-mstsc-probe <输出exe>` 只构建复用正式适配器的 B1 固定样本工具，并保存生成源码及摘要；不自动运行有效模式。其 `--mstsc-unicode-b1 <pid>` 会在明确授权的测试窗口中倒计时后，向保持前台的指定系统 MSTSC 单次发送固定中英/笑脸样本，不碰剪贴板、录音、模型或 Return。无参、非法/零 PID 在桌面 API 前退出 2。此前 U2 含 U+20000 的已执行产物应单独保留；当前 B1 必须使用新路径构建，不覆盖历史现场版本。该工具验证原生边界，不代替已安装应用的快捷键、识别、设置与完整投递路由验收。旧对照许可不得复用。
+
 用户可见功能或修复形成交付时，统一更新 `desktop/package.json`、`desktop/src-tauri/Cargo.toml`、`Cargo.lock` 中本包版本及 `tauri.conf.json`，并更新 README 和 `docs/releases.md`。检查通过后提交，建立不可变的 `vX.Y.Z` 标签，并推送提交与标签。后续修复使用新版本号。
 
 公开安装包只作为 GitHub Release 附件，源码 Git 不包含安装包、模型或运行数据。附件须核对版本、SHA-256、第三方资源许可及不含用户数据。

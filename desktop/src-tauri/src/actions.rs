@@ -632,23 +632,28 @@ impl ShortcutAction for TranscribeAction {
                                     }
 
                                     match utils::paste_cancellable(final_text, ah_clone.clone(), || rm_for_paste.was_cancelled_since(cancel_generation)) {
-                                        Ok(true) => {
-                                            #[cfg(target_os = "windows")]
-                                            {
-                                                timing.outcome = "paste_read_observed".into();
-                                                debug!("Clipboard read observed in {:?}; target insertion is unconfirmed", paste_time.elapsed());
-                                            }
-                                            #[cfg(not(target_os = "windows"))]
-                                            debug!("Paste chord sent in {:?}", paste_time.elapsed());
-                                            timing.paste_ms = Some(crate::dictation_metrics::elapsed_ms(paste_time));
-                                        }
-                                        Ok(false) => {
+                                        Ok(paste_delivery::Submission::Cancelled) => {
                                             timing.outcome = "cancelled".into();
                                             debug!("Transcription operation cancelled before key injection");
                                         }
-                                        Err(e) if e == "automatic_paste_unconfirmed" => {
+                                        Ok(evidence) => {
+                                            match evidence {
+                                                paste_delivery::Submission::ClipboardReadObserved => timing.outcome = "paste_read_observed".into(),
+                                                paste_delivery::Submission::UnicodeSubmitted => timing.outcome = "unicode_input_submitted".into(),
+                                                _ => {},
+                                            }
+                                            debug!("Input evidence {:?} in {:?}; target insertion is unconfirmed", evidence, paste_time.elapsed());
+                                            timing.paste_ms = Some(crate::dictation_metrics::elapsed_ms(paste_time));
+                                        }
+                                        Err(e) if e == "rdp_input_submitted_copy_failed" => {
+                                            timing.outcome = "unicode_input_submitted_copy_failed".into();
+                                            timing.paste_ms = Some(crate::dictation_metrics::elapsed_ms(paste_time));
+                                            warn!("Unicode input submitted; optional clipboard copy failed; not retrying");
+                                            emit_paste_error(&ah_clone, &e);
+                                        }
+                                        Err(e) if e == "automatic_paste_unconfirmed" || e == "rdp_input_uncertain" => {
                                             timing.outcome = "paste_unconfirmed".into();
-                                            warn!("Automatic clipboard read was not confirmed; not retrying");
+                                            warn!("Automatic input is unconfirmed; not retrying");
                                             emit_paste_error(&ah_clone, &e);
                                         }
                                         Err(e) if e == "automatic_paste_disabled" => {

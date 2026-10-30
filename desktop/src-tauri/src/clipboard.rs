@@ -1,4 +1,5 @@
 use crate::actions::paste_delivery::clipboard_submission;
+use crate::actions::paste_delivery::Submission;
 use crate::dictation_lifecycle::normalize_output;
 use crate::input::{self, EnigoState};
 #[cfg(target_os = "linux")]
@@ -802,7 +803,7 @@ pub(crate) fn paste_cancellable(
     text: String,
     app_handle: AppHandle,
     is_cancelled: impl Fn() -> bool,
-) -> Result<bool, String> {
+) -> Result<Submission, String> {
     // Windows automatic tasks use the synchronous protected transaction below,
     // including cancellation and restoration before the worker releases its guard.
     paste_with_cancellation(text, app_handle, is_cancelled, false)
@@ -815,15 +816,26 @@ fn paste_automatic_windows(
     paste_method: PasteMethod,
     copy_result: bool,
     is_cancelled: &impl Fn() -> bool,
-) -> Result<bool, String> {
+) -> Result<Submission, String> {
     with_enigo(app_handle, |enigo| {
         if is_cancelled() {
-            return Ok(false);
+            return Ok(Submission::Cancelled);
         }
         match crate::manual_paste::wait_before_automatic(app_handle, is_cancelled) {
             Ok(()) => {}
-            Err(code) if code == "manual_paste_cancelled" => return Ok(false),
+            Err(code) if code == "manual_paste_cancelled" => return Ok(Submission::Cancelled),
             Err(code) => return Err(code),
+        }
+        if let Some(target) = crate::rdp_input::platform::capture()? {
+            return submit_mstsc(target, text, app_handle, copy_result, is_cancelled)
+                .map(|()| Submission::UnicodeSubmitted)
+                .or_else(|code| {
+                    if code == "manual_paste_cancelled" {
+                        Ok(Submission::Cancelled)
+                    } else {
+                        Err(code)
+                    }
+                });
         }
         let prepared = std::cell::RefCell::new(None);
         // Acquire the keyboard lock before borrowing the clipboard: an Enigo
@@ -848,12 +860,38 @@ fn paste_automatic_windows(
             is_cancelled,
             copy_result,
         ) {
-            Ok(true) => Ok(true), // A consumer read is evidence, not proof of insertion.
+            Ok(true) => Ok(Submission::ClipboardReadObserved),
             Ok(false) => Err("automatic_paste_unconfirmed".into()),
-            Err(code) if code == "manual_paste_cancelled" => Ok(false),
+            Err(code) if code == "manual_paste_cancelled" => Ok(Submission::Cancelled),
             Err(code) => Err(code),
         }
     })
+}
+
+#[cfg(target_os = "windows")]
+fn submit_mstsc(
+    target: crate::rdp_input::platform::Target,
+    text: &str,
+    app: &AppHandle,
+    copy_result: bool,
+    cancelled: &impl Fn() -> bool,
+) -> Result<(), String> {
+    crate::rdp_input::platform::submit(
+        target,
+        text,
+        copy_result,
+        cancelled,
+        || {
+            crate::manual_paste::prepare_keyboard(app).map_err(|code| match code.as_str() {
+                "keys_held" => "keys_held",
+                _ => "keyboard_unavailable",
+            })
+        },
+        |prepared| match crate::manual_paste::keyboard_is_held(app, prepared)? {
+            true => Err("keys_held"),
+            false => Ok(()),
+        },
+    )
 }
 
 fn paste_with_cancellation(
@@ -861,9 +899,9 @@ fn paste_with_cancellation(
     app_handle: AppHandle,
     is_cancelled: impl Fn() -> bool,
     allow_reliable: bool,
-) -> Result<bool, String> {
+) -> Result<Submission, String> {
     if is_cancelled() {
-        return Ok(false);
+        return Ok(Submission::Cancelled);
     }
     let settings = get_settings(&app_handle);
     let paste_method = settings.paste_method;
@@ -933,7 +971,7 @@ fn paste_with_cancellation(
                         settings.auto_submit_key,
                         settings.clipboard_handling,
                     )
-                    .map(|()| true)
+                    .map(|()| Submission::LegacySubmitted)
                 });
             }
             if !paste_via_clipboard(
@@ -944,7 +982,7 @@ fn paste_with_cancellation(
                 paste_delay_after_ms,
                 &is_cancelled,
             )? {
-                return Ok(false);
+                return Ok(Submission::Cancelled);
             }
         }
     }
@@ -954,7 +992,7 @@ fn paste_with_cancellation(
         write_text_to_clipboard(&app_handle, &text)?;
     }
 
-    Ok(true)
+    Ok(Submission::LegacySubmitted)
 }
 
 /// Copy a recoverable latest body without reprocessing, pasting, or sending keys.
@@ -1001,6 +1039,18 @@ pub(crate) fn paste_latest_preserving_clipboard(
         // No mutex wait may sit between the final lease check and its chord.
         // A new copy while waiting here becomes the later snapshot instead.
         with_enigo(&app, |enigo| {
+            if let Some(target) = crate::rdp_input::platform::capture()? {
+                // Manual policy uses false for an accepted, unobserved input;
+                // true is reserved for a clipboard read receipt.
+                return submit_mstsc(target, &text, &app, false, &is_cancelled)
+                    .map(|()| false)
+                    .map_err(|code| match code.as_str() {
+                        "rdp_input_unsupported_text" | "rdp_input_too_long" => {
+                            "manual_paste_requires_copy".into()
+                        }
+                        _ => code,
+                    });
+            }
             let prepared = std::cell::RefCell::new(None);
             crate::protected_paste::run_with_preflight(
                 &text,

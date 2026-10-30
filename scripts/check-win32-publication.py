@@ -4,6 +4,12 @@ No native clipboard, keyboard, window, model, audio, or personal data APIs are
 linked or executed. This verifies the adapter's publication/lease/settlement
 contract, not that a real target inserts text. --baseline reads v0.1.7 and is
 expected to fail the same assertions, preserving the original red regression.
+--rdp additionally characterizes selected clipboard-redirection schedules using
+the same production methods and the production one-shot chord controller. These
+are possible schedules, not observations of Microsoft's RDP implementation.
+--rdp-delivery-gate adds delivery assertions for the known failing schedules;
+with the current algorithm this command MUST fail. A green characterization
+suite must never be confused with those hypothetical delivery gaps being fixed.
 
 The CloseClipboard synthesis model follows Wine's Windows compatibility tests:
 https://github.com/wine-mirror/wine/blob/master/dlls/user32/tests/clipboard.c
@@ -68,6 +74,8 @@ struct SyntheticSystem {
     formats: Vec<u32>, body: &'static str, delayed: bool, synthesized: bool,
     close_synthesis: bool, context: usize, rendering: bool,
     copy_on_publish_close: bool, cancel_on_publish_close: bool,
+    copy_on_readonly_close: bool, copy_on_copy_open: bool, fail_marker: bool,
+    empty_calls: usize, fail_first_empty: bool,
     suppress_owner_notification: bool,
     copy_before_begin: bool, change_before_begin: bool,
     cancelled: bool, reader_pending: bool, copy_after_injection: bool,
@@ -76,6 +84,12 @@ struct SyntheticSystem {
     partial_restore: bool,
     fail_retention: bool, cancel_on_settle: bool, fail_text_allocation: bool, text_allocations: usize,
     failed_payload_with_markers: bool,
+    rdp: bool, remote_formats_at: Option<u64>, remote_formats_ready: bool,
+    remote_request_at: Option<u64>, remote_request_delay: u64,
+    remote_consume_at: Option<u64>, remote_consume_delay: u64,
+    remote_buffer: Option<&'static str>, remote_result: Option<&'static str>,
+    remote_requests: usize, prefetch_before_begin: bool,
+    busy_before_begin_until: Option<u64>, copy_at: Option<u64>, cancel_at: Option<u64>,
 }
 thread_local! { static SYSTEM: RefCell<SyntheticSystem> = RefCell::new(SyntheticSystem::default()); }
 fn reset(synthesis: bool) {
@@ -105,6 +119,7 @@ unsafe fn GetLastError() -> u32 { ERROR_SUCCESS }
 unsafe fn SetClipboardData(format: u32, handle: Option<usize>) -> Result<usize, ()> {
     SYSTEM.with(|s| {
         let mut s = s.borrow_mut();
+        if format == 50002 && s.fail_marker { return Err(()); }
         if format == 13 && handle.is_some() && !s.rendering && s.fail_retention { return Err(()); }
         if !s.formats.contains(&format) { s.formats.push(format); }
         // Rendering callbacks fulfill an existing promise. Wine's Windows tests
@@ -119,10 +134,13 @@ unsafe fn SetClipboardData(format: u32, handle: Option<usize>) -> Result<usize, 
 }
 unsafe fn EmptyClipboard() -> Result<(), ()> {
     SYSTEM.with(|s| {
-        let mut s = s.borrow_mut(); s.owner = s.opened.expect("clipboard lock required");
+        let mut s = s.borrow_mut(); s.empty_calls += 1;
+        if s.fail_first_empty && s.empty_calls == 1 { return Err(()); }
+        s.owner = s.opened.expect("clipboard lock required");
         s.formats.clear(); s.sequence += 1; s.body = "empty";
         s.delayed = false; s.synthesized = false;
-    }); Ok(())
+        Ok(())
+    })
 }
 struct Global;
 impl Global {
@@ -171,9 +189,16 @@ fn snapshot() -> Result<Vec<Saved>, &'static str> {
 struct ClipboardLock;
 impl ClipboardLock {
     fn open(hwnd: HWND) -> Result<Self, &'static str> {
+        if SYSTEM.with(|s| std::mem::take(&mut s.borrow_mut().copy_on_copy_open)) {
+            new_user_copy(true);
+        }
         SYSTEM.with(|s| {
             let mut s = s.borrow_mut();
             if s.opened.is_some() { return Err("manual_paste_clipboard_busy"); }
+            if s.rdp && s.synthesized && s.injected == 0
+                && s.busy_before_begin_until.is_some_and(|until| s.now < until) {
+                return Err("manual_paste_clipboard_busy");
+            }
             if s.injected > 0 && s.cancel_on_settle { s.cancelled = true; }
             s.opened = Some(hwnd.0); Ok(Self)
         })
@@ -187,7 +212,7 @@ impl ClipboardLock {
                 s.synthesized = true;
             }
             s.opened = None;
-            (publication && std::mem::take(&mut s.copy_on_publish_close),
+            (std::mem::take(&mut s.copy_on_readonly_close) || (publication && std::mem::take(&mut s.copy_on_publish_close)),
              publication && std::mem::take(&mut s.cancel_on_publish_close))
         });
         if copy { new_user_copy(true); }
@@ -202,6 +227,7 @@ impl Window {
         Ok(Self { hwnd: HWND(1) })
     }
     fn pump(&self) {
+        redirect_tick(self.hwnd);
         let (owner_change, same_owner_change, read, context) = SYSTEM.with(|s| {
             let mut s = s.borrow_mut();
             (std::mem::take(&mut s.copy_before_begin),
@@ -216,6 +242,47 @@ impl Window {
             SYSTEM.with(|s| s.borrow_mut().rendering = false);
         }
     }
+}
+impl Drop for Window {
+    fn drop(&mut self) {
+        SYSTEM.with(|s| s.borrow_mut().context = 0);
+    }
+}
+
+// Only enabled by --rdp cases. Format advertisement, requesting bytes and the
+// remote editor consuming the response are intentionally separate events.
+fn redirect_tick(hwnd: HWND) {
+    let (copy, read, context) = SYSTEM.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.cancel_at.is_some_and(|at| at <= s.now) { s.cancelled = true; }
+        let copy = s.copy_at.is_some_and(|at| at <= s.now);
+        if copy { s.copy_at = None; }
+        if s.remote_formats_at.is_some_and(|at| at <= s.now) {
+            s.remote_formats_ready = true; s.remote_formats_at = None;
+        }
+        let read = s.remote_request_at.is_some_and(|at| at <= s.now);
+        if read { s.remote_request_at = None; s.remote_requests += 1; }
+        let prefetch = std::mem::take(&mut s.prefetch_before_begin);
+        (copy, read || prefetch, s.context)
+    });
+    if copy { new_user_copy(true); }
+    if read && context != 0 {
+        SYSTEM.with(|s| s.borrow_mut().rendering = true);
+        unsafe { render(hwnd, &*(context as *const Context), true); }
+        SYSTEM.with(|s| s.borrow_mut().rendering = false);
+    }
+    SYSTEM.with(|s| {
+        let mut s = s.borrow_mut();
+        // The synthetic endpoint copies bytes into its response before letting
+        // the remote editor consume them. No claim about real network latency.
+        if s.remote_requests > 0 && s.remote_buffer.is_none() {
+            s.remote_buffer = Some(s.body);
+            s.remote_consume_at = Some(s.now + s.remote_consume_delay);
+        }
+        if s.remote_consume_at.is_some_and(|at| at <= s.now) {
+            s.remote_result = s.remote_buffer; s.remote_consume_at = None;
+        }
+    });
 }
 '''
 
@@ -412,7 +479,11 @@ mod publication_tests {
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", action="store_true")
+    parser.add_argument("--rdp", action="store_true", help="also run synthetic redirection schedules")
+    parser.add_argument("--rdp-delivery-gate", action="store_true", help="assert delivery for known failing schedules (expected red)")
     args = parser.parse_args()
+    if args.rdp_delivery_gate and not args.rdp:
+        parser.error("--rdp-delivery-gate requires --rdp")
     filename = "desktop/src-tauri/src/protected_paste_windows.rs"
     source = (subprocess.check_output(["git", "show", f"v0.1.7:{filename}"], cwd=ROOT, text=True, encoding="utf-8")
               if args.baseline else (ROOT / filename).read_text(encoding="utf-8"))
@@ -438,24 +509,44 @@ def main() -> int:
     harness += "#[derive(Default)]\n" + definitions["Context"] + "\n" + definitions["WinClipboard"]
     harness += "\nimpl WinClipboard {\n" + "\n".join(bodies[name] for name in ["new", "current_sequence", "empty", "settle"]) + "\n}\n"
     harness += "impl Provider for WinClipboard {\n" + provider + "\n}\n" + bodies["render"] + TESTS
+    if not args.baseline:
+        copy_source = source[source.index("impl CopyLease {"):]
+        harness += declaration(source, "CopyLease") + "\nimpl CopyLease {\n"
+        harness += function(copy_source, "prepare") + "\n" + function(copy_source, "finish") + "\n}\n"
+        harness += (ROOT / "scripts/rdp-copy-cases.rs").read_text(encoding="utf-8")
+    rdp_sources = {}
+    if args.rdp:
+        keyboard = (ROOT / "desktop/src-tauri/src/manual_paste_keyboard.rs").as_posix()
+        harness += f'\n#[path = "{keyboard}"] mod keyboard;\n'
+        cases = ROOT / "scripts/rdp-paste-cases.rs"
+        harness += cases.read_text(encoding="utf-8")
+        rdp_sources = {"keyboard_sha256": hashlib.sha256(Path(keyboard).read_bytes()).hexdigest(),
+                       "cases_sha256": hashlib.sha256(cases.read_bytes()).hexdigest()}
     out = ROOT / "outputs/win32-publication-018-tests"
     out.mkdir(parents=True, exist_ok=True)
-    label = "baseline" if args.baseline else "current"
+    label = ("baseline" if args.baseline else "current") + ("-rdp" if args.rdp else "")
+    if args.rdp_delivery_gate:
+        label += "-delivery-gate"
     rustfile = out / f"publication_{label}.rs"
     rustfile.write_text(harness, encoding="utf-8")
     (out / f"manifest_{label}.json").write_text(json.dumps({
         "synthetic_only": True, "native_api_calls": False, "target_insertion_tested": False,
         "source_ref": "v0.1.7" if args.baseline else "working tree",
+        "synthetic_rdp_schedules": args.rdp,
+        "requires_synthetic_remote_delivery": args.rdp_delivery_gate,
+        "rdp_sources": rdp_sources,
         "source_functions": {name: hashlib.sha256(body.encode()).hexdigest() for name, body in bodies.items()},
         "source_structs": {name: hashlib.sha256(body.encode()).hexdigest() for name, body in definitions.items()},
         "policy_sha256": hashlib.sha256(Path(policy).read_bytes()).hexdigest(),
     }, indent=2), encoding="utf-8")
     rustc = shutil.which("rustc") or str(Path.home() / ".cargo/bin/rustc.exe")
     executable = out / (f"publication_{label}.exe" if os.name == "nt" else f"publication_{label}")
-    compiled = subprocess.run([rustc, "--edition=2021", "--test", str(rustfile), "-o", str(executable)], check=False)
+    cfg = ["--cfg", "rdp_delivery_gate"] if args.rdp_delivery_gate else []
+    compiled = subprocess.run([rustc, "--edition=2021", "--test", *cfg, str(rustfile), "-o", str(executable)], check=False)
     if compiled.returncode:
         return compiled.returncode
-    result = subprocess.run([str(executable), "publication_tests::"], capture_output=True, text=True, timeout=30)
+    filters = []
+    result = subprocess.run([str(executable), *filters], capture_output=True, text=True, timeout=30)
     print(result.stdout, end="")
     print(result.stderr, end="")
     (out / f"{label}-result.txt").write_text(result.stdout + result.stderr, encoding="utf-8")

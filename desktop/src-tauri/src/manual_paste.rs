@@ -285,6 +285,14 @@ pub(crate) fn prepare_keyboard(app: &AppHandle) -> Result<PreparedKeyboard, Stri
 }
 
 #[cfg(target_os = "windows")]
+pub(crate) fn keyboard_is_held(
+    app: &AppHandle,
+    prepared: &PreparedKeyboard,
+) -> Result<bool, &'static str> {
+    keyboard_state_windows::fast_check(prepared, bound_high_keys(&settings::get_settings(app)))
+}
+
+#[cfg(target_os = "windows")]
 pub(crate) fn wait_before_automatic(
     app: &AppHandle,
     cancelled: impl Fn() -> bool,
@@ -363,12 +371,7 @@ pub(crate) fn send_paste_chord(
     keyboard::inject_if_released(
         &mut Adapter(enigo),
         chord,
-        || {
-            keyboard_state_windows::fast_check(
-                prepared,
-                bound_high_keys(&settings::get_settings(app)),
-            )
-        },
+        || keyboard_is_held(app, prepared),
         is_cancelled,
         || std::thread::sleep(Duration::from_millis(100)),
     )

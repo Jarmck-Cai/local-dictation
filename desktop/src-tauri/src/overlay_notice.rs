@@ -40,6 +40,9 @@ impl OverlayNotice {
         self.report(Self::PASTE);
         self.paste_error_code = match code {
             "clipboard_restore_failed" => Some("clipboard_restore_failed"),
+            "clipboard_copy_failed" => Some("clipboard_copy_failed"),
+            "input_requires_copy" => Some("input_requires_copy"),
+            "input_target_unavailable" => Some("input_target_unavailable"),
             "input_unconfirmed" => Some("input_unconfirmed"),
             "keys_held" => Some("keys_held"),
             "keyboard_unavailable" => Some("keyboard_unavailable"),

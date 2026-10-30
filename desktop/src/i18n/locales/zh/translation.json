@@ -964,7 +964,9 @@
         "missing_claude_api_key": "未配置云端凭据，使用本地转录",
         "cloud_state_unavailable": "云端状态无法读取，使用本地转录",
         "paste_read_observed": "已观察到目标读取，屏幕落字未核实",
-        "paste_unconfirmed": "未能观察到目标读取，请检查输入框",
+        "unicode_input_submitted": "系统已接受输入，远端落字未确认",
+        "unicode_input_submitted_copy_failed": "系统已接受输入，但复制未完成；请检查远端输入框",
+        "paste_unconfirmed": "文字是否完整到达尚未确认，请检查输入框",
         "paste_skipped": "已跳过自动输入，可从历史复制"
       },
       "cleanupFallback": "整理回退：{{reason}}",
@@ -1027,6 +1029,7 @@
       "bindingCheckFailed": "暂时无法确认补贴快捷键状态，请重新打开设置查看。",
       "errors": {
         "manual_paste_cancelled": "已取消补贴；已发送的输入无法撤回。",
+        "manual_paste_requires_copy": "这段文字超出当前远程输入的长度或字符范围，本次尚未输入。请从最近转录复制后手动粘贴。",
         "manual_paste_injection_failed": "输入动作未能完成，请检查输入框；不会自动重试。",
         "manual_paste_restore_failed": "未能完整恢复原剪贴板，请检查剪贴板；补贴结果仍在历史中。",
         "manual_paste_backup_too_large": "原剪贴板内容超出安全备份大小，本次未补贴。",
@@ -1076,6 +1079,18 @@
       }
     },
     "autoPaste": {
+      "clipboard_copy_failed": {
+        "title": "输入已提交，但复制未完成",
+        "description": "请检查远端输入框与剪贴板，避免重复输入；正文仍保留在最近转录。"
+      },
+      "input_requires_copy": {
+        "title": "请手动复制这段结果",
+        "description": "这段文字超出当前远程输入的长度或字符范围，本次尚未输入。请从最近转录复制后粘贴。"
+      },
+      "input_target_unavailable": {
+        "title": "无法确认输入目标",
+        "description": "当前窗口发生变化或暂时不可用，本次尚未输入。请将光标放在目标输入框后使用补贴，或复制结果。"
+      },
       "keys_held": {
         "title": "按键尚未松开",
         "description": "检测到按键尚未松开，本次尚未输入。松开全部按键后，将光标放在目标输入框，使用补贴快捷键继续；也可复制结果。"
@@ -1090,7 +1105,7 @@
       },
       "input_unconfirmed": {
         "title": "尚未确认输入结果",
-        "description": "未能确认目标应用已读取本次文字，请检查输入框，避免重复输入；结果仍保留在最近转录。"
+        "description": "未能确认本次文字是否完整到达，请检查输入框，避免重复输入；结果仍保留在最近转录。"
       }
     }
   }

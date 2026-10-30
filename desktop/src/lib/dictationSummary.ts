@@ -32,6 +32,8 @@ const COMPLETED_OUTCOMES = new Set([
   "ready",
   "off",
   "paste_read_observed",
+  "unicode_input_submitted",
+  "unicode_input_submitted_copy_failed",
   ...FALLBACK_REASONS,
 ]);
 

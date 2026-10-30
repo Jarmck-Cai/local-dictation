@@ -4,6 +4,9 @@ export function pasteErrorCode(
   payload: unknown,
 ):
   | "clipboard_restore_failed"
+  | "clipboard_copy_failed"
+  | "input_requires_copy"
+  | "input_target_unavailable"
   | "input_unconfirmed"
   | "keys_held"
   | "keyboard_unavailable"
@@ -14,6 +17,9 @@ export function pasteErrorCode(
       : undefined;
   if (
     code === "clipboard_restore_failed" ||
+    code === "clipboard_copy_failed" ||
+    code === "input_requires_copy" ||
+    code === "input_target_unavailable" ||
     code === "input_unconfirmed" ||
     code === "keys_held" ||
     code === "keyboard_unavailable"
