@@ -914,3 +914,215 @@ assert.deepEqual(
   ["meetings.warningAttributionExperimental"],
   "Beta attribution limits must remain visible without exposing raw warning text",
 );
+
+// Workspace reconciliation is quiet, coalesced and still authoritative for expiry.
+{
+  const pending = deferred<MeetingSummary[]>();
+  let reads = 0;
+  const state = new MeetingsState(
+    transport({
+      list: () => {
+        reads++;
+        return pending.promise;
+      },
+    }),
+    () => {},
+  );
+  state.receive({ ...summary("workspace-idle", "complete"), revision: 1000 });
+  const background = state.refreshList({ background: true });
+  assert.equal(
+    state.snapshot.listLoading,
+    false,
+    "background reads stay quiet",
+  );
+  const overlapping = state.refreshList({ background: true });
+  const manual = state.refreshList();
+  assert.equal(reads, 1, "manual refresh joins the existing background read");
+  assert.equal(state.snapshot.listLoading, true);
+  state.receive(summary("workspace-live", "recorded"));
+  pending.resolve([]);
+  await Promise.all([background, overlapping, manual]);
+  assert.equal(state.snapshot.listLoading, false);
+  assert.equal(state.snapshot.meetings[0]?.id, "workspace-live");
+}
+
+{
+  let fail = true;
+  const state = new MeetingsState(
+    transport({
+      list: async () => {
+        if (fail) throw "meeting_io";
+        return [];
+      },
+    }),
+    () => {},
+  );
+  await state.refreshList();
+  assert.equal(state.snapshot.listError, "storage");
+  await state.refreshList({ background: true });
+  assert.equal(
+    state.snapshot.listError,
+    "storage",
+    "background failure preserves manual errors",
+  );
+  fail = false;
+  await state.refreshList({ background: true });
+  assert.equal(
+    state.snapshot.listError,
+    "storage",
+    "quiet success cannot dismiss a manual error",
+  );
+  await state.refreshList();
+  assert.equal(state.snapshot.listError, null);
+}
+
+{
+  const pending = deferred<MeetingSummary[]>();
+  const state = new MeetingsState(
+    transport({ list: () => pending.promise }),
+    () => {},
+  );
+  state.receive(summary("workspace-expired", "complete"));
+  await state.select("workspace-expired");
+  const loading = state.refreshList({ background: true });
+  pending.resolve([]);
+  await loading;
+  assert.equal(state.snapshot.selectedId, null);
+  assert.equal(state.snapshot.transcript, null);
+}
+
+{
+  const pending = deferred<MeetingSummary[]>();
+  const state = new MeetingsState(
+    transport({ list: () => pending.promise }),
+    () => {},
+  );
+  state.receive(summary("workspace-deleted", "complete"));
+  await state.select("workspace-deleted");
+  const loading = state.refreshList({ background: true });
+  await state.remove("workspace-deleted");
+  pending.resolve([summary("workspace-deleted", "complete")]);
+  await loading;
+  assert.equal(
+    state.snapshot.meetings.length,
+    0,
+    "stale list cannot resurrect local deletion",
+  );
+}
+
+{
+  const state = new MeetingsState(
+    transport({ transcript: async () => transcript("wrong-id") }),
+    () => {},
+  );
+  state.receive(summary("workspace-requested", "complete"));
+  await state.select("workspace-requested");
+  assert.equal(
+    state.snapshot.transcript,
+    null,
+    "transport ID mismatch cannot show another meeting",
+  );
+  assert.equal(state.snapshot.transcriptError, "missing");
+}
+
+{
+  const pending = deferred<MeetingTranscript | null>();
+  const state = new MeetingsState(
+    transport({ transcript: () => pending.promise }),
+    () => {},
+  );
+  state.receive(summary("workspace-back", "complete"));
+  state.receive({
+    ...summary("workspace-active", "processing"),
+    revision: 1001,
+  });
+  const loading = state.select("workspace-back");
+  state.clearSelection();
+  pending.resolve(transcript("workspace-back"));
+  await loading;
+  assert.equal(state.snapshot.selectedId, null);
+  assert.equal(state.snapshot.transcript, null);
+  assert.equal(
+    state.snapshot.active?.id,
+    "workspace-active",
+    "Back never cancels active work",
+  );
+}
+
+{
+  const pending = deferred<MeetingSummary[]>();
+  let updates = 0;
+  const state = new MeetingsState(
+    transport({ list: () => pending.promise }),
+    () => {
+      updates++;
+    },
+  );
+  const loading = state.refreshList({ background: true });
+  state.dispose();
+  const before = updates;
+  pending.resolve([summary("workspace-disposed", "complete")]);
+  await loading;
+  assert.equal(updates, before);
+}
+
+{
+  let reads = 0;
+  const terminal = {
+    ...summary("workspace-terminal-poll", "complete"),
+    revision: 1003,
+  };
+  const state = new MeetingsState(
+    transport({
+      current: async () => terminal,
+      list: async () => [terminal],
+      transcript: async (id) => {
+        reads++;
+        return transcript(id);
+      },
+    }),
+    () => {},
+  );
+  state.receive({ ...terminal, status: "processing", revision: 1002 });
+  await state.select(terminal.id);
+  await state.pollCurrent();
+  assert.equal(
+    reads,
+    2,
+    "terminal polling only reloads the selected transcript once",
+  );
+}
+console.log(
+  "meeting workspace: quiet reconciliation, expiry, ID and Back guards passed",
+);
+
+{
+  let fail = true;
+  const state = new MeetingsState(
+    transport({
+      start: async () => {
+        if (fail) throw "meeting_device_unavailable";
+        return { ...summary("workspace-start", "recording"), revision: 1004 };
+      },
+    }),
+    () => {},
+  );
+  await state.loadDevices();
+  assert.equal(
+    await state.start({
+      title: "Keep this title",
+      microphoneId: "mic",
+      renderId: "speaker",
+    }),
+    false,
+  );
+  fail = false;
+  assert.equal(
+    await state.start({
+      title: "Keep this title",
+      microphoneId: "mic",
+      renderId: "speaker",
+    }),
+    true,
+  );
+}

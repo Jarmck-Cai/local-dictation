@@ -373,6 +373,8 @@ export class MeetingsState {
   private transcriptTicket = 0;
   private currentTicket = 0;
   private polling = false;
+  private listRead: Promise<void> | null = null;
+  private listReadVisible = false;
   private changes = new Map<
     string,
     { revision: number; summary: MeetingSummary | null }
@@ -414,11 +416,23 @@ export class MeetingsState {
     }
   }
 
-  async refreshList() {
-    if (!this.alive) return;
+  refreshList(options: { background?: boolean } = {}): Promise<void> {
+    if (!this.alive) return Promise.resolve();
+    if (!options.background) {
+      this.listReadVisible = true;
+      this.update({ listLoading: true, listError: null });
+    }
+    if (this.listRead) return this.listRead;
+    this.listRead = this.readList().finally(() => {
+      this.listRead = null;
+      this.listReadVisible = false;
+    });
+    return this.listRead;
+  }
+
+  private async readList() {
     const ticket = ++this.listTicket;
     const since = this.revision;
-    this.update({ listLoading: true, listError: null });
     try {
       let meetings = await this.api.list();
       if (!this.alive || ticket !== this.listTicket) return;
@@ -472,7 +486,12 @@ export class MeetingsState {
       }
     } catch (error) {
       if (this.alive && ticket === this.listTicket)
-        this.update({ listLoading: false, listError: meetingErrorKey(error) });
+        this.update({
+          listLoading: false,
+          ...(this.listReadVisible
+            ? { listError: meetingErrorKey(error) }
+            : {}),
+        });
     }
   }
 
@@ -517,10 +536,14 @@ export class MeetingsState {
       return;
     this.polling = true;
     const previous = this.snapshot.active;
+    const transcriptAtRead = this.transcriptTicket;
     await this.loadCurrent();
     if (this.alive && previous && !this.snapshot.active) {
-      await this.refreshList();
-      if (this.snapshot.selectedId === previous.id)
+      await this.refreshList({ background: true });
+      if (
+        this.snapshot.selectedId === previous.id &&
+        transcriptAtRead === this.transcriptTicket
+      )
         await this.select(previous.id);
     }
     this.polling = false;
@@ -577,6 +600,7 @@ export class MeetingsState {
     try {
       const transcript = await this.api.transcript(id);
       if (!this.alive || ticket !== this.transcriptTicket) return;
+      if (transcript && transcript.id !== id) throw "meeting_not_found";
       this.update({ transcript, transcriptLoading: false });
     } catch (error) {
       if (this.alive && ticket === this.transcriptTicket)
@@ -587,20 +611,33 @@ export class MeetingsState {
     }
   }
 
+  clearSelection() {
+    ++this.transcriptTicket;
+    this.update({
+      selectedId: null,
+      transcript: null,
+      transcriptLoading: false,
+      transcriptError: null,
+      exported: false,
+    });
+  }
+
   private async mutate(kind: MeetingOperation, operation: () => Promise<void>) {
-    if (!this.alive || this.snapshot.busy) return;
+    if (!this.alive || this.snapshot.busy) return false;
     this.update({ busy: kind, error: null, exported: false });
     try {
       await operation();
+      return true;
     } catch (error) {
       this.update({ error: meetingErrorKey(error) });
+      return false;
     } finally {
       this.update({ busy: null });
     }
   }
 
   start(options: MeetingStartOptions) {
-    if (this.snapshot.active) return Promise.resolve();
+    if (this.snapshot.active) return Promise.resolve(false);
     const microphone = this.snapshot.devices.some(
       (device) =>
         device.source === "microphone" && device.id === options.microphoneId,
@@ -610,7 +647,7 @@ export class MeetingsState {
     );
     if (!microphone || !playback) {
       this.update({ error: "devices" });
-      return Promise.resolve();
+      return Promise.resolve(false);
     }
     return this.mutate("start", async () => {
       const since = this.revision;

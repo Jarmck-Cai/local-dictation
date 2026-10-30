@@ -207,7 +207,10 @@ function App() {
               {t(SECTIONS_CONFIG[currentSection].labelKey)}
             </h1>
           </header>
-          <div ref={scrollRef} className="qs-content flex-1 overflow-y-auto">
+          <div
+            ref={scrollRef}
+            className={`qs-content flex-1 overflow-y-auto${currentSection === "meetings" ? " qs-meeting-container" : ""}`}
+          >
             {microphoneDenied && (
               <div className="max-w-3xl mx-auto mb-5 rounded-lg border border-warning/25 bg-warning/10 p-4 space-y-3">
                 <p className="text-sm">
@@ -235,7 +238,13 @@ function App() {
             {Object.entries(SECTIONS_CONFIG).map(([id, section]) => {
               const Section = section.component;
               return (
-                <div key={id} hidden={currentSection !== id}>
+                <div
+                  key={id}
+                  hidden={currentSection !== id}
+                  className={
+                    id === "meetings" ? "qs-meeting-section" : undefined
+                  }
+                >
                   <Section />
                 </div>
               );

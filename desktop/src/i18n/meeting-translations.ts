@@ -1,6 +1,13 @@
 /** Complete root `meetings` subtree, registered by i18n/index.ts. */
 export const meetingMessages = {
   en: {
+    back: "Back to meetings",
+    close: "Close",
+    untitledDate: "Meeting · {{date}}",
+    filterLabel: "Filter meetings",
+    filters: { all: "All", complete: "Completed", pending: "Pending" },
+    emptyFilter:
+      "No meetings in this view. Try another filter or start a recording.",
     dateUnavailable: "Recording date unavailable",
     nav: "Meetings",
     title: "Meeting recording",
@@ -48,15 +55,14 @@ export const meetingMessages = {
     recent: "Recent meetings",
     refresh: "Refresh",
     loading: "Loading meetings…",
-    empty:
-      "No meetings yet. Choose your audio devices above to start your first recording.",
+    empty: "No meetings yet. Choose New recording to start your first meeting.",
     selectHint: "Select a meeting to view its transcript and export options.",
     detail: "Meeting details",
     recordedWith: "Audio devices",
     transcript: "Transcript",
     loadingTranscript: "Loading transcript…",
     noTranscript:
-      "No transcript yet. The saved recording can be transcribed below.",
+      "No transcript yet. Use Transcribe recording above to process the saved audio.",
     waitingTranscript:
       "The transcript will be available here when processing finishes.",
     noSpeech: "No speech was recognized in this recording.",
@@ -147,6 +153,12 @@ export const meetingMessages = {
     },
   },
   zh: {
+    back: "返回会议列表",
+    close: "关闭",
+    untitledDate: "会议 · {{date}}",
+    filterLabel: "筛选会议",
+    filters: { all: "全部", complete: "已完成", pending: "待处理" },
+    emptyFilter: "此分类还没有会议，可以切换筛选或新建录音。",
     dateUnavailable: "录制时间暂不可用",
     captureDiagnostic: "诊断码：{{code}}",
     captureReasons: {
@@ -199,13 +211,13 @@ export const meetingMessages = {
     recent: "近期会议",
     refresh: "刷新",
     loading: "正在读取会议…",
-    empty: "还没有会议记录。在上方选择声音设备，即可开始第一场录音。",
+    empty: "还没有会议记录。点击“新建录音”，开始第一场会议。",
     selectHint: "选择一场会议，查看文字和导出选项。",
     detail: "会议详情",
     recordedWith: "录音设备",
     transcript: "转录文字",
     loadingTranscript: "正在读取文字…",
-    noTranscript: "还没有转录文字，可以在下方转录已保存的录音。",
+    noTranscript: "还没有转录文字，可以点击上方“转录录音”处理已保存的录音。",
     waitingTranscript: "转录完成后，文字会显示在这里。",
     noSpeech: "这段录音没有识别到讲话。",
     partial: "这份文字尚未转录完整。可以导出已有文字，或从保留的录音重新转录。",
