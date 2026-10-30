@@ -1042,7 +1042,14 @@ pub(crate) fn paste_latest_preserving_clipboard(
             if let Some(target) = crate::rdp_input::platform::capture()? {
                 // Manual policy uses false for an accepted, unobserved input;
                 // true is reserved for a clipboard read receipt.
-                return submit_mstsc(target, &text, &app, false, &is_cancelled).map(|()| false);
+                return submit_mstsc(target, &text, &app, false, &is_cancelled)
+                    .map(|()| false)
+                    .map_err(|code| match code.as_str() {
+                        "rdp_input_unsupported_text" | "rdp_input_too_long" => {
+                            "manual_paste_requires_copy".into()
+                        }
+                        _ => code,
+                    });
             }
             let prepared = std::cell::RefCell::new(None);
             crate::protected_paste::run_with_preflight(

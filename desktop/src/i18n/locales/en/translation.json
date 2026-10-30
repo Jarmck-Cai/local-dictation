@@ -1029,6 +1029,7 @@
       "bindingCheckFailed": "Could not confirm the manual-paste shortcut status. Reopen settings to check.",
       "errors": {
         "manual_paste_cancelled": "Paste cancelled. Input already sent cannot be recalled.",
+        "manual_paste_requires_copy": "This text exceeds the current remote input length or character range. No input was sent. Copy it from recent transcriptions and paste it manually.",
         "manual_paste_injection_failed": "Input could not finish. Check the field; it will not be retried automatically.",
         "manual_paste_restore_failed": "The original clipboard could not be fully restored. Check it; the result remains in history.",
         "manual_paste_backup_too_large": "The clipboard exceeds the safe backup size. No paste was made.",

@@ -81,7 +81,7 @@ mod protected_paste {{
           ["protected_paste.rs", "keyboard_state_policy.rs", "keyboard_state_windows.rs"]],
         '''fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let pid = if args.len() == 3 && args[1] == "--mstsc-unicode-u2" {
+    let pid = if args.len() == 3 && args[1] == "--mstsc-unicode-b1" {
         args[2].parse::<u32>().ok().filter(|pid| *pid > 0)
     } else { None };
     let Some(pid) = pid else { std::process::exit(2); };
@@ -92,13 +92,13 @@ mod protected_paste {{
     subprocess.run([rustc, *flags, "--crate-name=mstsc_unicode_probe", str(root_probe), "-o", str(executable)], check=True)
     files = ["rdp_input.rs", "rdp_input_windows.rs", "protected_paste.rs", "protected_paste_windows.rs",
              "protected_paste_policy.rs", "keyboard_state_policy.rs", "keyboard_state_windows.rs"]
-    manifest = {"build_only": True, "valid_mode_executed": False,
+    manifest = {"build_only": True, "valid_mode_executed": False, "fixed_case": "B1",
                 "sources": {name: hashlib.sha256((source_dir / name).read_bytes()).hexdigest() for name in files},
                 "probe_sha256": hashlib.sha256((ROOT / "scripts/mstsc-unicode-probe.rs").read_bytes()).hexdigest(),
                 "generated_sha256": {file.name: hashlib.sha256(file.read_bytes()).hexdigest() for file in [root_probe, policy_probe, native_probe]},
                 "binary_sha256": hashlib.sha256(executable.read_bytes()).hexdigest()}
     executable.with_suffix(".manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    print("Built fixed-case U2 probe only; no valid input mode was executed.", flush=True)
+    print("Built fixed-case B1 probe only; no valid input mode was executed.", flush=True)
     return 0
 
 if __name__ == "__main__":

@@ -335,6 +335,35 @@ mod automatic_tests {
             assert!(s.chord_times.is_empty()); });
     }
     #[test]
+    fn mstsc_higher_plane_body_is_retained_for_copy_without_partial_prefix_or_fallback() {
+        let app = app(100, PasteMethod::CtrlV, true);
+        DESKTOP.with(|s| s.borrow_mut().rdp=true);
+        assert_eq!(super::paste_cancellable("中文😀𠀀 END".into(),app,cancelled),Err("rdp_input_unsupported_text".into()));
+        DESKTOP.with(|s| { let s=s.borrow(); assert_eq!((s.unicode_calls,s.protected_calls,s.legacy_writes),(0,0,0));
+            assert!(s.received.is_empty()); assert!(s.writes.is_empty()); assert!(s.chord_times.is_empty());
+            assert_eq!(s.clipboard,"synthetic-previous-transcript"); });
+    }
+    #[test]
+    fn mstsc_higher_plane_manual_recovery_requests_explicit_copy_without_input() {
+        let app=app(100,PasteMethod::CtrlV,true);
+        DESKTOP.with(|s| s.borrow_mut().rdp=true);
+        assert_eq!(paste_latest_preserving_clipboard("中文𠀀 END".into(),app,cancelled),Err("manual_paste_requires_copy".into()));
+        DESKTOP.with(|s| { let s=s.borrow(); assert_eq!((s.unicode_calls,s.protected_calls,s.legacy_writes),(0,0,0));
+            assert!(s.received.is_empty()); assert_eq!(s.clipboard,"synthetic-previous-transcript"); });
+    }
+    #[test]
+    fn compatibility_guard_keeps_local_higher_plane_text_and_remote_emoji_working() {
+        let local=app(100,PasteMethod::CtrlV,false);
+        assert_eq!(super::paste_cancellable("中文😀𠀀 END".into(),local,cancelled),Ok(Submission::ClipboardReadObserved));
+        DESKTOP.with(|s| { let s=s.borrow(); assert_eq!(s.received,["中文😀𠀀 END"]);
+            assert_eq!((s.protected_calls,s.unicode_calls),(1,0)); });
+        let remote=app(100,PasteMethod::CtrlV,false);
+        DESKTOP.with(|s| s.borrow_mut().rdp=true);
+        assert_eq!(super::paste_cancellable("中文😀 END".into(),remote,cancelled),Ok(Submission::UnicodeSubmitted));
+        DESKTOP.with(|s| { let s=s.borrow(); assert_eq!(s.received,["中文😀 END"]);
+            assert_eq!((s.protected_calls,s.unicode_calls,s.legacy_writes),(0,1,0)); });
+    }
+    #[test]
     fn local_receipt_and_mstsc_disabled_mode_keep_distinct_evidence() {
         let local=app(100,PasteMethod::CtrlV,false);
         assert_eq!(super::paste_cancellable("中".into(),local,cancelled),Ok(Submission::ClipboardReadObserved));

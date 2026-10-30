@@ -1029,6 +1029,7 @@
       "bindingCheckFailed": "暂时无法确认补贴快捷键状态，请重新打开设置查看。",
       "errors": {
         "manual_paste_cancelled": "已取消补贴；已发送的输入无法撤回。",
+        "manual_paste_requires_copy": "这段文字超出当前远程输入的长度或字符范围，本次尚未输入。请从最近转录复制后手动粘贴。",
         "manual_paste_injection_failed": "输入动作未能完成，请检查输入框；不会自动重试。",
         "manual_paste_restore_failed": "未能完整恢复原剪贴板，请检查剪贴板；补贴结果仍在历史中。",
         "manual_paste_backup_too_large": "原剪贴板内容超出安全备份大小，本次未补贴。",

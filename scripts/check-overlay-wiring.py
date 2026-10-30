@@ -266,6 +266,9 @@ for (const language of ["en", "zh"]) {
     const actual = instance.t(`dictation.timing.outcomes.${outcome}`, {defaultValue: unknown});
     if (actual === unknown) throw new Error(`${language}: submitted input displayed as unknown (${outcome})`);
   }
+  const manualFallback = instance.t("dictation.manualPaste.failed");
+  const manual = instance.t("dictation.manualPaste.errors.manual_paste_requires_copy", {defaultValue: manualFallback});
+  if (manual === manualFallback) throw new Error(`${language}: unsupported manual input lacks explicit copy guidance`);
   console.log(`PASS timing outcomes: ${language}, software submission retains dedicated status`);
 }
 '''

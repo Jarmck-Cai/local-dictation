@@ -6,6 +6,9 @@ pub(crate) mod platform;
 pub(crate) const MAX_UTF16_UNITS: usize = 4096;
 pub(crate) const CANCELLED: &str = "manual_paste_cancelled";
 pub(crate) const COPY_FAILED: &str = "rdp_input_submitted_copy_failed";
+// Compatibility ceiling after the U+20000 field failure. This is not a Win32
+// limit: keep higher-plane bodies intact for explicit clipboard recovery.
+const MAX_MSTSC_SCALAR: u32 = 0x1ffff;
 
 pub(crate) fn is_system_mstsc(image: &str, system_directory: &str) -> bool {
     image.eq_ignore_ascii_case(&format!(
@@ -32,9 +35,9 @@ pub(crate) trait Runtime {
 
 pub(crate) fn events(text: &str) -> Result<Vec<UnicodeEvent>, &'static str> {
     if text.is_empty()
-        || text
-            .chars()
-            .any(|c| c.is_control() || (c.is_whitespace() && c != ' '))
+        || text.chars().any(|c| {
+            c as u32 > MAX_MSTSC_SCALAR || c.is_control() || (c.is_whitespace() && c != ' ')
+        })
     {
         return Err("rdp_input_unsupported_text");
     }
@@ -135,9 +138,9 @@ mod tests {
     }
     #[test]
     fn supplementary_and_combining_characters_keep_each_utf16_unit_and_release() {
-        let got = events("😀𠀀e\u{301}").unwrap();
-        let literal = [0xd83d, 0xde00, 0xd840, 0xdc00, 0x65, 0x301];
-        assert_eq!(got.len(), 12);
+        let got = events("😀e\u{301}").unwrap();
+        let literal = [0xd83d, 0xde00, 0x65, 0x301];
+        assert_eq!(got.len(), 8);
         for (pair, unit) in got.chunks_exact(2).zip(literal) {
             assert_eq!(
                 pair,
@@ -154,6 +157,20 @@ mod tests {
     #[test]
     fn controls_and_line_separators_are_rejected_before_preparation() {
         for text in ["", "x\n", "x\r\n", "x\t", "x\0", "x\u{7f}", "x\u{2028}"] {
+            let mut runtime = Fake::default();
+            assert_eq!(
+                run(&mut runtime, text, || false),
+                Err("rdp_input_unsupported_text")
+            );
+            assert_eq!(
+                (runtime.prepares, runtime.submissions, runtime.copies),
+                (0, 0, 0)
+            );
+        }
+    }
+    #[test]
+    fn higher_unicode_planes_refuse_the_whole_body_before_any_side_effect() {
+        for text in ["prefix𠀀suffix", "😀𠮷END", "中\u{30000}", "字\u{e0100}"] {
             let mut runtime = Fake::default();
             assert_eq!(
                 run(&mut runtime, text, || false),

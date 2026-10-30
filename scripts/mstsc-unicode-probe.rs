@@ -2,7 +2,7 @@
 // default; the valid mode requires a separately agreed remote editor window.
 pub(crate) fn fixed_probe(pid: u32) -> Result<(), String> {
     crate::keyboard_state_windows::start()?;
-    println!("countdown_seconds=5 fixed_case=U2 one_unicode_batch=true clipboard_untouched=true");
+    println!("countdown_seconds=5 fixed_case=B1 one_unicode_batch=true clipboard_untouched=true");
     std::thread::sleep(std::time::Duration::from_secs(5));
     // Let the user return from the confirmation UI before capturing the actual
     // current output target. The final production gates still run at submission.
@@ -15,7 +15,7 @@ pub(crate) fn fixed_probe(pid: u32) -> Result<(), String> {
     }
     submit(
         target,
-        "轻述远程输入测试 RDP U2 😀 𠀀",
+        "轻述远程输入测试 RDP B1 😀 END",
         false,
         || false,
         || crate::keyboard_state_windows::prepare(0),
