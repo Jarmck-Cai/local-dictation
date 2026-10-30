@@ -175,6 +175,24 @@ fn summary(manifest: &MeetingManifest, progress: Option<u8>) -> MeetingSummary {
             .map(|device| device.name.clone()),
     }
 }
+fn disk_summary(manifest: &MeetingManifest, owned: bool) -> MeetingSummary {
+    let mut value = summary(manifest, None);
+    if !owned {
+        // A checkpoint discovered from disk cannot revive a job that this
+        // runtime does not own. Keep raw repair on explicit transcribe/export.
+        match value.status {
+            MeetingStatus::Recording | MeetingStatus::Paused => {
+                value.status = MeetingStatus::Interrupted;
+            }
+            MeetingStatus::Processing => {
+                value.status = MeetingStatus::Failed;
+                value.error = Some("meeting_processing_interrupted".into());
+            }
+            _ => (),
+        }
+    }
+    value
+}
 fn static_error(error: &str) -> String {
     if error.starts_with("meeting_")
         && error.len() <= 96
@@ -433,10 +451,49 @@ impl MeetingRuntime {
             state.current = None;
         }
         for manifest in &manifests {
+            if let Some(previous) = state.snapshots.get(&manifest.id).cloned() {
+                let unavailable = manifest.schema_version == 0;
+                let was_unavailable = previous.created_at_ms == 0
+                    && previous
+                        .error
+                        .as_deref()
+                        .is_some_and(super::store::is_manifest_restore_error);
+                if (unavailable || was_unavailable)
+                    && previous.revision <= observed_revision
+                    && active_id.as_deref() != Some(manifest.id.as_str())
+                    && (unavailable != was_unavailable
+                        || previous.error != manifest.error
+                        || previous.status != manifest.status)
+                {
+                    let mut value = disk_summary(manifest, false);
+                    if unavailable || (was_unavailable && value.capture_error.is_none()) {
+                        value.capture_error = previous.capture_error;
+                    }
+                    let value = remember(&mut state, value);
+                    if state
+                        .current
+                        .as_ref()
+                        .is_some_and(|current| current.id == manifest.id)
+                    {
+                        state.current = Some(value);
+                    }
+                }
+            }
             if !state.deleted.contains(&manifest.id) && !state.snapshots.contains_key(&manifest.id)
             {
-                remember(&mut state, summary(manifest, None));
+                remember(
+                    &mut state,
+                    disk_summary(manifest, active_id.as_deref() == Some(manifest.id.as_str())),
+                );
             }
+        }
+        if let Some(active) = state.current.clone().filter(|value| {
+            active_id.as_deref() == Some(value.id.as_str()) && value.revision < state.revision
+        }) {
+            // History repair advances the global revision. Publish the still
+            // current activity last so list consumers cannot interpret that
+            // newer historical terminal row as an authoritative idle state.
+            state.current = Some(remember(&mut state, active));
         }
         // Retained snapshots win over disk: a concurrent stop/retry/create must
         // retain its revision. Tombstones exclude a late read after deletion.

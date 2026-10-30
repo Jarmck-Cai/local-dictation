@@ -114,7 +114,13 @@ impl Operations for Native {
 }
 
 pub(super) fn replace(source: &Path, target: &Path) -> Result<(), &'static str> {
-    commit(&Native, source, target).map_err(|code| match code {
+    commit(&Native, source, target).map_err(static_code)
+}
+pub(super) fn install_new(source: &Path, target: &Path) -> Result<(), &'static str> {
+    Native.move_new(source, target).map_err(static_code)
+}
+fn static_code(code: u32) -> &'static str {
+    match code {
         2 => "meeting_atomic_replace_win32_2",
         3 => "meeting_atomic_replace_win32_3",
         5 => "meeting_atomic_replace_win32_5",
@@ -126,7 +132,7 @@ pub(super) fn replace(source: &Path, target: &Path) -> Result<(), &'static str> 
         1176 => "meeting_atomic_replace_win32_1176",
         1177 => "meeting_atomic_replace_win32_1177",
         _ => "meeting_atomic_replace",
-    })
+    }
 }
 
 #[cfg(test)]

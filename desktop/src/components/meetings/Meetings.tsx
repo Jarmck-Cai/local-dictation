@@ -162,12 +162,14 @@ export const Meetings = () => {
   const meetingTitle = (meeting: MeetingSummary) =>
     meeting.title || t("meetings.untitled");
   const date = (meeting: MeetingSummary) =>
-    new Date(meeting.created_at_ms).toLocaleString(i18n.language, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    meeting.created_at_ms === 0
+      ? t("meetings.dateUnavailable")
+      : new Date(meeting.created_at_ms).toLocaleString(i18n.language, {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
 
   return (
     <div className="qs-page qs-meetings space-y-6">
