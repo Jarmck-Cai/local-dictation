@@ -16,6 +16,7 @@ pub type StoreResult<T> = Result<T, &'static str>;
 pub const MAX_PACKET_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
+const RESTORE_STAGING_SLOTS: u8 = 4;
 const MAX_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 const MAGIC: &[u8; 8] = b"QSMEET01";
 const RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
@@ -70,18 +71,115 @@ fn apply_capture_error(manifest: &mut MeetingManifest, cause: String) -> StoreRe
 }
 
 fn staging_name(name: &str) -> bool {
-    [".manifest-", ".transcript-"].iter().any(|prefix| {
-        name.strip_prefix(prefix)
-            .and_then(|s| s.strip_suffix(".tmp").or_else(|| s.strip_suffix(".backup")))
-            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit() || b == b'-'))
-    })
+    restore_staging_name(name)
+        || [".manifest-", ".transcript-"].iter().any(|prefix| {
+            name.strip_prefix(prefix)
+                .and_then(|s| s.strip_suffix(".tmp").or_else(|| s.strip_suffix(".backup")))
+                .is_some_and(|s| {
+                    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+                })
+        })
+}
+fn restore_staging_name(name: &str) -> bool {
+    name.strip_prefix(".manifest-recovery-")
+        .and_then(|name| name.strip_suffix(".tmp"))
+        .is_some_and(|slot| {
+            slot.len() == 1
+                && slot.as_bytes()[0] < b'0' + RESTORE_STAGING_SLOTS
+                && slot.as_bytes()[0] >= b'0'
+        })
+}
+
+fn manifest_backup_name(name: &str) -> bool {
+    name.strip_prefix(".manifest-")
+        .and_then(|n| n.strip_suffix(".backup"))
+        .and_then(|n| n.split_once('-'))
+        .is_some_and(|(pid, seq)| {
+            !pid.is_empty()
+                && !seq.is_empty()
+                && pid.bytes().all(|b| b.is_ascii_digit())
+                && seq.bytes().all(|b| b.is_ascii_digit())
+                && pid.parse::<u32>().is_ok_and(|p| p != 0)
+                && seq.parse::<u64>().is_ok()
+        })
+}
+
+pub(crate) fn is_manifest_restore_error(code: &str) -> bool {
+    matches!(
+        code,
+        "meeting_manifest_restore_missing"
+            | "meeting_manifest_restore_blocked"
+            | "meeting_manifest_restore_busy"
+            | "meeting_manifest_restore_invalid"
+            | "meeting_manifest_restore_ambiguous"
+    )
+}
+fn restore_error(code: &str) -> &'static str {
+    match code {
+        "meeting_active" => "meeting_manifest_restore_busy",
+        "meeting_io" | "meeting_lock" => "meeting_manifest_restore_blocked",
+        _ => "meeting_manifest_restore_invalid",
+    }
+}
+fn read_manifest_bytes(path: &Path) -> StoreResult<Vec<u8>> {
+    if regular(path)?.len() > MAX_MANIFEST_BYTES {
+        return Err("meeting_manifest");
+    }
+    let file = File::open(path).map_err(|_| "meeting_io")?;
+    reject_hardlink(&file)?;
+    let mut bytes = Vec::new();
+    BufReader::with_capacity(64 * 1024, file.take(MAX_MANIFEST_BYTES + 1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| "meeting_io")?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err("meeting_manifest");
+    }
+    Ok(bytes)
+}
+fn read_current_manifest(directory: &Path) -> StoreResult<Option<Vec<u8>>> {
+    let path = directory.join("manifest.json");
+    match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("meeting_io"),
+        Ok(_) => read_manifest_bytes(&path).map(Some),
+    }
+}
+fn unavailable_manifest(id: &str, code: &'static str) -> MeetingManifest {
+    // An in-memory marker only: never persist a fabricated manifest or infer
+    // capture provenance/retention from a document that could not be read.
+    MeetingManifest {
+        schema_version: 0,
+        id: id.into(),
+        title: String::new(),
+        created_at_unix_secs: 0,
+        start_qpc_100ns: 0,
+        end_qpc_100ns: None,
+        devices: vec![],
+        status: MeetingStatus::Failed,
+        error: Some(code.into()),
+        capture_error: None,
+        capture_complete: None,
+        chunks: vec![],
+        source_health: vec![],
+    }
 }
 
 #[derive(Clone)]
 pub struct MeetingStore {
     root: PathBuf,
     metadata_io: Arc<Mutex<()>>,
+    #[cfg(test)]
+    restore_hook: Option<RestoreHook>,
 }
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RestoreStep {
+    Write,
+    Sync,
+    Install,
+}
+#[cfg(test)]
+type RestoreHook = Arc<dyn Fn(RestoreStep, &Path, &Path) -> StoreResult<()> + Send + Sync>;
 pub struct MeetingWriter {
     store: MeetingStore,
     directory: PathBuf,
@@ -337,6 +435,8 @@ impl MeetingStore {
         Ok(Self {
             root: fs::canonicalize(root).map_err(|_| "meeting_path")?,
             metadata_io: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            restore_hook: None,
         })
     }
     fn save(&self, directory: &Path, manifest: &MeetingManifest) -> StoreResult<()> {
@@ -402,7 +502,7 @@ impl MeetingStore {
     pub fn edit(&self, id: &str) -> StoreResult<MeetingWriter> {
         let directory = self.directory(id)?;
         let lease = SessionLease::acquire(&directory)?;
-        let mut manifest = self.load(id)?;
+        let mut manifest = self.load_leased(id, &lease)?;
         if matches!(
             manifest.status,
             MeetingStatus::Recording | MeetingStatus::Paused
@@ -445,27 +545,19 @@ impl MeetingStore {
         Ok(Some(bytes))
     }
     pub fn load(&self, id: &str) -> StoreResult<MeetingManifest> {
-        let guard = self.metadata_io.lock().map_err(|_| "meeting_lock")?;
-        let directory = self.directory(id)?;
-        let path = directory.join("manifest.json");
-        if regular(&path)?.len() > MAX_MANIFEST_BYTES {
-            return Err("meeting_manifest");
-        }
-        let mut bytes = Vec::new();
-        BufReader::with_capacity(
-            64 * 1024,
-            File::open(path)
-                .map_err(|_| "meeting_io")?
-                .take(MAX_MANIFEST_BYTES + 1),
-        )
-        .read_to_end(&mut bytes)
-        .map_err(|_| "meeting_io")?;
-        drop(guard);
-        if bytes.len() as u64 > MAX_MANIFEST_BYTES {
-            return Err("meeting_manifest");
-        }
+        self.load_internal(id, None)
+    }
+    fn load_leased(&self, id: &str, lease: &SessionLease) -> StoreResult<MeetingManifest> {
+        self.load_internal(id, Some(lease))
+    }
+    fn decode_manifest(
+        &self,
+        id: &str,
+        directory: &Path,
+        bytes: &[u8],
+    ) -> StoreResult<MeetingManifest> {
         let manifest: MeetingManifest =
-            serde_json::from_slice(&bytes).map_err(|_| "meeting_manifest")?;
+            serde_json::from_slice(bytes).map_err(|_| "meeting_manifest")?;
         if manifest.schema_version != 1 || manifest.id != id || manifest.title.len() > 4096 {
             return Err("meeting_manifest");
         }
@@ -483,6 +575,207 @@ impl MeetingStore {
         }
         Ok(manifest)
     }
+    fn load_internal(
+        &self,
+        id: &str,
+        lease: Option<&SessionLease>,
+    ) -> StoreResult<MeetingManifest> {
+        let directory = self.directory(id)?;
+        let bytes = {
+            let _guard = self.metadata_io.lock().map_err(|_| "meeting_lock")?;
+            read_current_manifest(&directory)?
+        };
+        if let Some(bytes) = bytes {
+            return self.decode_manifest(id, &directory, &bytes);
+        }
+        self.restore_missing_manifest(id, &directory, lease)
+    }
+    fn restore_missing_manifest(
+        &self,
+        id: &str,
+        directory: &Path,
+        lease: Option<&SessionLease>,
+    ) -> StoreResult<MeetingManifest> {
+        let owned = if lease.is_none() {
+            Some(SessionLease::acquire(directory).map_err(|e| restore_error(e))?)
+        } else {
+            None
+        };
+        let lease = lease
+            .or(owned.as_ref())
+            .ok_or("meeting_manifest_restore_busy")?;
+        if lease.directory != directory {
+            return Err("meeting_manifest_restore_invalid");
+        }
+        let existing = {
+            let _guard = self
+                .metadata_io
+                .lock()
+                .map_err(|_| "meeting_manifest_restore_blocked")?;
+            read_current_manifest(directory)
+        }
+        .map_err(|e| restore_error(e))?;
+        if let Some(bytes) = existing {
+            return self.decode_manifest(id, directory, &bytes);
+        }
+        // The exclusive recording lease spans discovery, validation and install.
+        // Do not hold the store I/O mutex while parsing/scanning backup metadata.
+        let mut backups = vec![];
+        for entry in fs::read_dir(directory).map_err(|_| "meeting_manifest_restore_blocked")? {
+            let entry = entry.map_err(|_| "meeting_manifest_restore_blocked")?;
+            if entry.file_name().to_str().is_some_and(manifest_backup_name) {
+                backups.push(entry.path());
+                if backups.len() > 16 {
+                    return Err("meeting_manifest_restore_ambiguous");
+                }
+            }
+        }
+        if backups.is_empty() {
+            return Err("meeting_manifest_restore_missing");
+        }
+        backups.sort();
+        let mut chosen: Option<(Vec<u8>, Vec<u8>)> = None;
+        for path in backups {
+            let bytes = read_manifest_bytes(&path).map_err(|e| restore_error(e))?;
+            let manifest = self
+                .decode_manifest(id, directory, &bytes)
+                .map_err(|e| restore_error(e))?;
+            if manifest.devices.len() > 2
+                || manifest.chunks.len() > 100_000
+                || manifest.source_health.len() > 100_000
+            {
+                return Err("meeting_manifest_restore_invalid");
+            }
+            for chunk in &manifest.chunks {
+                if chunk.start_qpc_100ns > chunk.end_qpc_100ns
+                    || (chunk.packets == 0 && (chunk.frames != 0 || chunk.committed_bytes != 8))
+                    || chunk.frames > chunk.format.sample_rate as u64 * 5
+                    || chunk.packets > chunk.frames
+                    || chunk
+                        .packets
+                        .checked_mul(40)
+                        .and_then(|v| v.checked_add(8))
+                        .is_none_or(|v| v > chunk.committed_bytes)
+                {
+                    return Err("meeting_manifest_restore_invalid");
+                }
+                // A backup must refer only to bounded regular raw files. Never
+                // follow links or use an unpublished .tmp to invent a format.
+                let raw = regular(&directory.join(&chunk.file)).map_err(|e| restore_error(e))?;
+                if raw.len() < chunk.committed_bytes
+                    || raw.len() > MAX_CHUNK_BYTES + MAX_PACKET_BYTES as u64 + 48
+                {
+                    return Err("meeting_manifest_restore_invalid");
+                }
+            }
+            let canonical =
+                serde_json::to_vec(&manifest).map_err(|_| "meeting_manifest_restore_invalid")?;
+            if let Some((_, previous)) = &chosen {
+                if previous != &canonical {
+                    return Err("meeting_manifest_restore_ambiguous");
+                }
+            } else {
+                chosen = Some((bytes, canonical));
+            }
+        }
+        let bytes = chosen.ok_or("meeting_manifest_restore_missing")?.0;
+        let mut staged = None;
+        // These four recovery-only slots bound failed copies across refreshes,
+        // store instances and restarts. Ordinary unpublished .tmp files are never
+        // read, removed or adopted. A slot is reusable only when every byte is
+        // identical to the independently validated published backup above.
+        for slot in 0..RESTORE_STAGING_SLOTS {
+            let path = directory.join(format!(".manifest-recovery-{slot}.tmp"));
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    #[cfg(test)]
+                    if let Some(hook) = &self.restore_hook {
+                        hook(RestoreStep::Write, &path, directory)?;
+                    }
+                    file.write_all(&bytes)
+                        .map_err(|_| "meeting_manifest_restore_blocked")?;
+                    #[cfg(test)]
+                    if let Some(hook) = &self.restore_hook {
+                        hook(RestoreStep::Sync, &path, directory)?;
+                    }
+                    file.sync_all()
+                        .map_err(|_| "meeting_manifest_restore_blocked")?;
+                    drop(file);
+                    staged = Some(path);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    regular(&path).map_err(|e| restore_error(e))?;
+                    let mut file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                        .map_err(|_| "meeting_manifest_restore_blocked")?;
+                    reject_hardlink(&file).map_err(|e| restore_error(e))?;
+                    let mut existing = Vec::new();
+                    Read::by_ref(&mut file)
+                        .take(MAX_MANIFEST_BYTES + 1)
+                        .read_to_end(&mut existing)
+                        .map_err(|_| "meeting_manifest_restore_blocked")?;
+                    if existing != bytes {
+                        continue;
+                    }
+                    #[cfg(test)]
+                    if let Some(hook) = &self.restore_hook {
+                        hook(RestoreStep::Sync, &path, directory)?;
+                    }
+                    file.sync_all()
+                        .map_err(|_| "meeting_manifest_restore_blocked")?;
+                    drop(file);
+                    staged = Some(path);
+                    break;
+                }
+                Err(_) => return Err("meeting_manifest_restore_blocked"),
+            }
+        }
+        let staged = staged.ok_or("meeting_manifest_restore_blocked")?;
+        let installed = {
+            let _guard = self
+                .metadata_io
+                .lock()
+                .map_err(|_| "meeting_manifest_restore_blocked")?;
+            if let Some(existing) =
+                read_current_manifest(directory).map_err(|e| restore_error(e))?
+            {
+                existing
+            } else {
+                let install = self.install_restored_manifest(&staged, directory);
+                // No overwrite fallback. If a competing target appeared, only
+                // accept it through the same ID/schema/path validation below.
+                let current = read_current_manifest(directory).map_err(|e| restore_error(e))?;
+                if let Some(current) = current {
+                    current
+                } else {
+                    let _ = install;
+                    return Err("meeting_manifest_restore_blocked");
+                }
+            }
+        };
+        // Backups and original .tmp files remain untouched. A failed install
+        // cannot remove the last readable published copy.
+        self.decode_manifest(id, directory, &installed)
+            .map_err(|e| restore_error(e))
+    }
+    fn install_restored_manifest(&self, staged: &Path, directory: &Path) -> StoreResult<()> {
+        #[cfg(test)]
+        if let Some(hook) = &self.restore_hook {
+            hook(RestoreStep::Install, staged, directory)?;
+        }
+        #[cfg(windows)]
+        return atomic_file::install_new(staged, &directory.join("manifest.json"));
+        #[cfg(not(windows))]
+        Err("meeting_manifest_restore_blocked")
+    }
     pub fn list(&self) -> StoreResult<Vec<MeetingManifest>> {
         safe_existing(&self.root)?;
         let mut result = vec![];
@@ -498,7 +791,22 @@ impl MeetingStore {
                 return Err("meeting_link");
             }
             if entry.file_type().map_err(|_| "meeting_io")?.is_dir() {
-                result.push(self.load(&id)?);
+                match self.load(&id) {
+                    Ok(manifest) => result.push(manifest),
+                    Err(error)
+                        if matches!(error, "meeting_link" | "meeting_path" | "meeting_id") =>
+                    {
+                        return Err(error)
+                    }
+                    Err(error) => result.push(unavailable_manifest(
+                        &id,
+                        if is_manifest_restore_error(error) {
+                            error
+                        } else {
+                            restore_error(error)
+                        },
+                    )),
+                }
             }
         }
         result.sort_by(|a, b| {
@@ -546,7 +854,7 @@ impl MeetingStore {
     ) -> StoreResult<MeetingManifest> {
         let directory = self.directory(id)?;
         let _lease = SessionLease::acquire(&directory)?;
-        let mut manifest = self.load(id)?;
+        let mut manifest = self.load_leased(id, &_lease)?;
         apply_capture_error(&mut manifest, cause)?;
         self.save(&directory, &manifest)?;
         Ok(manifest)
@@ -582,7 +890,7 @@ impl MeetingStore {
     ) -> StoreResult<MeetingManifest> {
         let directory = self.directory(id)?;
         let _lease = SessionLease::acquire(&directory)?;
-        let mut manifest = self.load(id)?;
+        let mut manifest = self.load_leased(id, &_lease)?;
         // Promote legacy error before considering a later actor observation.
         preserve_capture_provenance(&mut manifest);
         if let Some(cause) = capture_error {
@@ -642,7 +950,7 @@ impl MeetingStore {
     pub fn delete(&self, id: &str) -> StoreResult<()> {
         let directory = self.directory(id)?;
         let lease = SessionLease::acquire(&directory)?;
-        self.load(id)?;
+        self.load_leased(id, &lease)?;
         let mut paths = vec![];
         for entry in fs::read_dir(&directory).map_err(|_| "meeting_io")? {
             let path = entry.map_err(|_| "meeting_io")?.path();
@@ -677,8 +985,19 @@ impl MeetingStore {
         fs::remove_dir(directory).map_err(|_| "meeting_io")
     }
     pub fn prune(&self, now_unix_secs: u64) -> StoreResult<Vec<String>> {
+        self.prune_excluding(now_unix_secs, &HashSet::new())
+    }
+    /// Startup repair failures retain their evidence until recovery can retry.
+    pub(crate) fn prune_excluding(
+        &self,
+        now_unix_secs: u64,
+        excluded: &HashSet<String>,
+    ) -> StoreResult<Vec<String>> {
         let mut removed = vec![];
         for manifest in self.list()? {
+            if manifest.schema_version == 0 || excluded.contains(&manifest.id) {
+                continue;
+            }
             if now_unix_secs.saturating_sub(manifest.created_at_unix_secs) >= RETENTION_SECS {
                 match self.delete(&manifest.id) {
                     Ok(()) => removed.push(manifest.id),

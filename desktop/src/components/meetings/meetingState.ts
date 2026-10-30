@@ -14,6 +14,8 @@ export type MeetingError =
   | "devices"
   | "capture"
   | "storage"
+  | "restoreBlocked"
+  | "restoreConflict"
   | "model"
   | "modelUnsupported"
   | "processing"
@@ -50,6 +52,9 @@ const errorCodes: Record<string, MeetingError> = {
   meeting_capture_drain_limit: "capture",
   meeting_capture_event_wait_failed: "capture",
   meeting_capture_interval_invalid: "capture",
+  meeting_capture_packet_too_large: "capture",
+  meeting_capture_nonfinite_sample: "capture",
+  meeting_capture_frame_count_invalid: "capture",
   meeting_recording_panicked: "capture",
   meeting_stop_timeout: "capture",
   meeting_io: "storage",
@@ -58,6 +63,11 @@ const errorCodes: Record<string, MeetingError> = {
   meeting_atomic_replace: "storage",
   meeting_chunk: "storage",
   meeting_manifest: "storage",
+  meeting_manifest_restore_blocked: "restoreBlocked",
+  meeting_manifest_restore_busy: "busy",
+  meeting_manifest_restore_missing: "restoreConflict",
+  meeting_manifest_restore_invalid: "restoreConflict",
+  meeting_manifest_restore_ambiguous: "restoreConflict",
   meeting_transcript: "storage",
   meeting_model_unavailable: "model",
   meeting_model_not_loaded: "model",
@@ -91,8 +101,57 @@ const errorCodes: Record<string, MeetingError> = {
   meeting_unsupported: "unsupported",
 };
 
-/** Only known static categories cross into user-facing copy. */
+// Fixed operations emitted by capture.rs::native::os_error. Endpoint names,
+// paths and arbitrary operation strings cannot cross this allowlist.
+const captureOperations = new Set([
+  "com",
+  "event_create",
+  "device_id",
+  "device_properties",
+  "device_name",
+  "device_name_string",
+  "enumerator",
+  "enumerate",
+  "device_count",
+  "device_item",
+  "qpc",
+  "qpc_frequency",
+  "open_device",
+  "device_state",
+  "endpoint",
+  "device_flow",
+  "activate",
+  "mix_format",
+  "initialize",
+  "buffer_size",
+  "set_event",
+  "capture_service",
+  "start",
+  "stop",
+  "stream_health",
+  "next_packet",
+  "get_buffer",
+  "release_buffer",
+]);
+function captureFault(
+  error: unknown,
+): { reason: "device" | "capture"; code: string } | null {
+  if (typeof error !== "string") return null;
+  const match = /^meeting_capture_([a-z_]+)_([0-9a-fA-F]{8})$/.exec(error);
+  // JS '$' also matches before a terminal newline; demand the entire input.
+  if (!match || match[0] !== error || !captureOperations.has(match[1]))
+    return null;
+  const hr = match[2].toLowerCase();
+  return {
+    reason: hr === "88890004" || hr === "88890026" ? "device" : "capture",
+    code: error.toLowerCase(),
+  };
+}
+
+/** Only known static categories and bounded production HRESULTs enter UI copy. */
 export function meetingErrorKey(error: unknown): MeetingError {
+  const capture = captureFault(error);
+  if (capture) return capture.reason === "device" ? "devices" : "capture";
   return typeof error === "string" &&
     Object.prototype.hasOwnProperty.call(errorCodes, error)
     ? errorCodes[error]
@@ -107,7 +166,8 @@ export type CaptureReason = {
     | "queue"
     | "capture"
     | "storage"
-    | "unknown";
+    | "unknown"
+    | "unknownSaved";
   code?: string;
 };
 export function meetingCaptureReason(
@@ -116,7 +176,18 @@ export function meetingCaptureReason(
   const cause =
     meeting.capture_error ??
     (meeting.status === "interrupted" ? meeting.error : null);
-  if (!cause && meeting.status !== "interrupted") return null;
+  if (!cause)
+    return meeting.status === "interrupted" ? { reason: "unknown" } : null;
+  const capture = captureFault(cause);
+  if (capture) return capture;
+  if (
+    [
+      "meeting_capture_recovered",
+      "meeting_recovered",
+      "meeting_recording_interrupted",
+    ].includes(cause)
+  )
+    return { reason: "unknown" };
   const accessCodes = [
     "meeting_atomic_replace_win32_5",
     "meeting_atomic_replace_win32_32",
@@ -138,8 +209,6 @@ export function meetingCaptureReason(
     return { reason: "stateSave", code: cause };
   if (cause === "meeting_capture_queue_full")
     return { reason: "queue", code: cause };
-  if (cause === "meeting_capture_device_removed")
-    return { reason: "device", code: cause };
   const category = meetingErrorKey(cause);
   const reason =
     category === "devices"
@@ -150,7 +219,7 @@ export function meetingCaptureReason(
           ? "storage"
           : "unknown";
   return reason === "unknown"
-    ? { reason }
+    ? { reason: "unknownSaved" }
     : { reason, code: cause ?? undefined };
 }
 

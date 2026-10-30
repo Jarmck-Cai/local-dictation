@@ -7,6 +7,385 @@ const START: u64 = 1_000_000;
 const END: u64 = 1_200_000;
 
 #[test]
+#[cfg(windows)]
+fn runtime_final_recovery_readable_but_unwritable_raw_is_isolated_and_retryable() {
+    use std::os::windows::fs::OpenOptionsExt;
+    for status in [
+        MeetingStatus::Recording,
+        MeetingStatus::Paused,
+        MeetingStatus::Interrupted,
+    ] {
+        let f = Fixture::new();
+        f.recorded("damaged");
+        f.recorded("healthy");
+        let dir = f.root.join("damaged");
+        let mut manifest = f.store.load("damaged").unwrap();
+        manifest.status = status;
+        manifest.capture_complete = Some(false);
+        manifest.capture_error = Some("meeting_capture_device_inactive".into());
+        manifest.chunks[0].finalized = false;
+        let backup = serde_json::to_vec(&manifest).unwrap();
+        fs::write(dir.join(".manifest-123-13.backup"), &backup).unwrap();
+        fs::remove_file(dir.join("manifest.json")).unwrap();
+        let raw_path = dir.join(&manifest.chunks[0].file);
+        let raw = fs::read(&raw_path).unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&raw_path)
+            .unwrap();
+        let runtime = f.runtime(Mode::Good);
+        let rows = runtime.list().unwrap();
+        let bad = rows.iter().find(|row| row.id == "damaged").unwrap();
+        assert_eq!(bad.status, MeetingStatus::Interrupted);
+        assert_eq!(bad.error.as_deref(), Some("meeting_io"));
+        assert_eq!(bad.capture_error, manifest.capture_error);
+        assert!(runtime.current().unwrap().is_none());
+        assert_eq!(runtime.transcribe("damaged").unwrap_err(), "meeting_io");
+        assert_eq!(fs::read(&raw_path).unwrap(), raw);
+        assert_eq!(fs::read(dir.join("manifest.json")).unwrap(), backup);
+        runtime.transcribe("healthy").unwrap();
+        wait_status(&runtime, MeetingStatus::Complete);
+        let started = runtime
+            .start("new synthetic meeting", "mic", "remote")
+            .unwrap();
+        assert_eq!(
+            runtime.stop(&started.id).unwrap().status,
+            MeetingStatus::Recorded
+        );
+        let before_retry = runtime
+            .list()
+            .unwrap()
+            .iter()
+            .find(|row| row.id == "damaged")
+            .unwrap()
+            .revision;
+        drop(held);
+        runtime.transcribe("damaged").unwrap();
+        wait_status(&runtime, MeetingStatus::Complete);
+        let after = runtime
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == "damaged")
+            .unwrap();
+        assert!(after.revision > before_retry);
+        assert_eq!(after.capture_error, manifest.capture_error);
+        assert!(after.error.is_none());
+        assert_eq!(fs::read(&raw_path).unwrap(), raw);
+        assert_eq!(
+            fs::read(dir.join(".manifest-123-13.backup")).unwrap(),
+            backup
+        );
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn runtime_final_recovery_expired_blocked_raw_does_not_fail_startup_pruning() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = Fixture::new();
+    f.recorded("damaged");
+    f.recorded("healthy");
+    let dir = f.root.join("damaged");
+    let mut manifest = f.store.load("damaged").unwrap();
+    manifest.status = MeetingStatus::Recording;
+    manifest.created_at_unix_secs = unix_secs().unwrap() - 8 * 86400;
+    manifest.chunks[0].finalized = false;
+    let backup = serde_json::to_vec(&manifest).unwrap();
+    fs::write(dir.join(".manifest-123-14.backup"), &backup).unwrap();
+    fs::remove_file(dir.join("manifest.json")).unwrap();
+    let raw_path = dir.join(&manifest.chunks[0].file);
+    let raw = fs::read(&raw_path).unwrap();
+    let held = OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&raw_path)
+        .unwrap();
+    let runtime = f.runtime(Mode::Good);
+    assert_eq!(runtime.list().unwrap().len(), 2);
+    assert_eq!(
+        fs::read(dir.join(".manifest-123-14.backup")).unwrap(),
+        backup
+    );
+    assert_eq!(fs::read(&raw_path).unwrap(), raw);
+    drop(held);
+    runtime.transcribe("damaged").unwrap();
+    wait_status(&runtime, MeetingStatus::Complete);
+    // A successful explicit recovery restores eligibility for ordinary retention.
+    f.store.prune(unix_secs().unwrap()).unwrap();
+    assert_eq!(runtime.list().unwrap().len(), 1);
+}
+
+#[test]
+#[cfg(windows)]
+fn runtime_history_restore_keeps_other_activity_newer_than_every_history_row() {
+    use std::os::windows::fs::OpenOptionsExt;
+    for status in [
+        MeetingStatus::Recording,
+        MeetingStatus::Paused,
+        MeetingStatus::Processing,
+    ] {
+        let f = Fixture::new();
+        f.recorded("damaged");
+        f.recorded("busy");
+        let runtime = f.runtime(Mode::Good);
+        let dir = f.root.join("damaged");
+        let backup = dir.join(".manifest-123-12.backup");
+        fs::rename(dir.join("manifest.json"), &backup).unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&backup)
+            .unwrap();
+        runtime.list().unwrap();
+        let (generation, _, completion) = runtime.reserve("busy", Activity::Processing).unwrap();
+        let mut active = summary(&f.store.load("busy").unwrap(), Some(37));
+        active.status = status;
+        publish(&runtime.inner, generation, active, false);
+        let before = runtime.current().unwrap().unwrap();
+        drop(held);
+        let rows = runtime.list().unwrap();
+        let current = runtime.current().unwrap().unwrap();
+        println!(
+            "REFRESH_ACTIVITY_TRACE:{}",
+            serde_json::json!({"before": before, "rows": rows})
+        );
+        let mut terminal = current.clone();
+        terminal.status = MeetingStatus::Complete;
+        finish_runtime(
+            &runtime.inner,
+            generation,
+            Ok(terminal),
+            MeetingStatus::Failed,
+            &completion,
+        );
+        let busy = rows.iter().find(|v| v.id == "busy").unwrap();
+        let history = rows.iter().find(|v| v.id == "damaged").unwrap();
+        assert!(
+            busy.revision > history.revision,
+            "history must not clear another active job"
+        );
+        assert_eq!(
+            serde_json::to_value(busy).unwrap(),
+            serde_json::to_value(&current).unwrap()
+        );
+        assert_eq!(busy.status, status);
+        assert_eq!(busy.progress_percent, Some(37));
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn runtime_unlock_before_first_list_or_after_marker_never_revives_an_old_job() {
+    use std::os::windows::fs::OpenOptionsExt;
+    for status in [
+        MeetingStatus::Recording,
+        MeetingStatus::Paused,
+        MeetingStatus::Processing,
+    ] {
+        for cached_marker in [false, true] {
+            let f = Fixture::new();
+            f.recorded("damaged");
+            let mut m = f.store.load("damaged").unwrap();
+            m.status = status;
+            if status != MeetingStatus::Processing {
+                m.capture_complete = None;
+                m.chunks[0].finalized = false;
+            }
+            let dir = f.root.join("damaged");
+            let backup = dir.join(".manifest-123-11.backup");
+            fs::write(&backup, serde_json::to_vec(&m).unwrap()).unwrap();
+            fs::remove_file(dir.join("manifest.json")).unwrap();
+            let held = OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&backup)
+                .unwrap();
+            let runtime = f.runtime(Mode::Good);
+            if cached_marker {
+                assert_eq!(runtime.list().unwrap()[0].status, MeetingStatus::Failed);
+            }
+            drop(held);
+            let row = runtime.list().unwrap().remove(0);
+            assert_eq!(
+                row.status,
+                if status == MeetingStatus::Processing {
+                    MeetingStatus::Failed
+                } else {
+                    MeetingStatus::Interrupted
+                },
+                "{status:?}, cached={cached_marker}"
+            );
+            assert!(runtime.current().unwrap().is_none());
+            assert_eq!(
+                f.store.load("damaged").unwrap().status,
+                status,
+                "listing does not run recovery or restart a job"
+            );
+            runtime.transcribe("damaged").unwrap();
+            wait_status(&runtime, MeetingStatus::Complete);
+            assert_eq!(
+                f.store.load("damaged").unwrap().capture_complete,
+                Some(status == MeetingStatus::Processing)
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn runtime_unlock_refresh_keeps_first_cause_and_does_not_revive_current_job() {
+    use std::os::windows::fs::OpenOptionsExt;
+    for (known_cause, old_status) in [false, true].into_iter().flat_map(|known| {
+        [
+            MeetingStatus::Recording,
+            MeetingStatus::Paused,
+            MeetingStatus::Processing,
+        ]
+        .into_iter()
+        .map(move |status| (known, status))
+    }) {
+        let f = Fixture::new();
+        f.recorded("damaged");
+        let runtime = f.runtime(Mode::Good);
+        let mut m = f.store.load("damaged").unwrap();
+        m.status = old_status;
+        m.capture_complete = if old_status == MeetingStatus::Processing {
+            Some(true)
+        } else {
+            None
+        };
+        m.capture_error = None;
+        m.chunks[0].finalized = old_status == MeetingStatus::Processing;
+        let dir = f.root.join("damaged");
+        fs::write(dir.join("manifest.json"), serde_json::to_vec(&m).unwrap()).unwrap();
+        if known_cause {
+            let (generation, _, done) = runtime.reserve("damaged", Activity::Recording).unwrap();
+            let mut value = summary(&m, None);
+            value.capture_error = Some("meeting_io".into());
+            publish(&runtime.inner, generation, value, false);
+            finish_runtime(
+                &runtime.inner,
+                generation,
+                Err("meeting_atomic_replace_win32_1177".into()),
+                MeetingStatus::Interrupted,
+                &done,
+            );
+        }
+        let backup = dir.join(".manifest-123-10.backup");
+        fs::rename(dir.join("manifest.json"), &backup).unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&backup)
+            .unwrap();
+        assert_eq!(runtime.list().unwrap()[0].status, MeetingStatus::Failed);
+        drop(held);
+        let row = runtime.list().unwrap().remove(0);
+        let expected_status = if old_status == MeetingStatus::Processing {
+            MeetingStatus::Failed
+        } else {
+            MeetingStatus::Interrupted
+        };
+        assert_eq!(row.status, expected_status);
+        if known_cause {
+            assert_eq!(runtime.current().unwrap().unwrap().status, expected_status);
+        }
+        assert_eq!(
+            row.capture_error.as_deref(),
+            if known_cause {
+                Some("meeting_io")
+            } else {
+                None
+            }
+        );
+        runtime.transcribe("damaged").unwrap();
+        wait_status(&runtime, MeetingStatus::Complete);
+        let stored = f.store.load("damaged").unwrap();
+        assert_eq!(
+            stored.capture_complete,
+            Some(!known_cause && old_status == MeetingStatus::Processing)
+        );
+        if known_cause {
+            assert_eq!(stored.capture_error.as_deref(), Some("meeting_io"));
+        }
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn runtime_missing_manifest_backup_restarts_and_preserves_other_meetings() {
+    let f = Fixture::new();
+    f.recorded("damaged");
+    f.recorded("healthy");
+    let dir = f.root.join("damaged");
+    let old = fs::read(dir.join("manifest.json")).unwrap();
+    fs::rename(
+        dir.join("manifest.json"),
+        dir.join(".manifest-123-8.backup"),
+    )
+    .unwrap();
+    fs::write(
+        dir.join(".manifest-123-8.tmp"),
+        br#"{"id":"damaged","status":"complete"}"#,
+    )
+    .unwrap();
+    let runtime = f.runtime(Mode::Good);
+    assert_eq!(runtime.list().unwrap().len(), 2);
+    assert_eq!(
+        f.store.load("damaged").unwrap().status,
+        MeetingStatus::Recorded
+    );
+    assert_eq!(fs::read(dir.join("manifest.json")).unwrap(), old);
+    runtime.transcribe("damaged").unwrap();
+    wait_status(&runtime, MeetingStatus::Complete);
+    runtime.delete("damaged").unwrap();
+    assert_eq!(runtime.list().unwrap().len(), 1);
+}
+
+#[test]
+#[cfg(windows)]
+fn runtime_blocked_backup_is_isolated_and_refreshes_after_unlock() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = Fixture::new();
+    f.recorded("damaged");
+    f.recorded("healthy");
+    let dir = f.root.join("damaged");
+    let backup = dir.join(".manifest-123-9.backup");
+    fs::rename(dir.join("manifest.json"), &backup).unwrap();
+    fs::write(dir.join(".manifest-123-9.tmp"), b"unpublished").unwrap();
+    let held = OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&backup)
+        .unwrap();
+    let runtime = f.runtime(Mode::Good);
+    let rows = runtime.list().unwrap();
+    assert_eq!(rows.len(), 2);
+    let bad = rows.iter().find(|r| r.id == "damaged").unwrap();
+    assert_eq!(bad.status, MeetingStatus::Failed);
+    assert_eq!(
+        bad.error.as_deref(),
+        Some("meeting_manifest_restore_blocked")
+    );
+    assert!(bad.capture_error.is_none());
+    assert!(runtime.delete("damaged").is_err());
+    assert!(backup.exists());
+    runtime.transcribe("healthy").unwrap();
+    wait_status(&runtime, MeetingStatus::Complete);
+    drop(held);
+    let rows = runtime.list().unwrap();
+    assert_eq!(
+        rows.iter().find(|r| r.id == "damaged").unwrap().status,
+        MeetingStatus::Recorded
+    );
+    runtime.transcribe("damaged").unwrap();
+    wait_status(&runtime, MeetingStatus::Complete);
+    assert!(runtime.current().unwrap().unwrap().capture_error.is_none());
+}
+
+#[test]
 fn runtime_list_drops_records_expired_by_background_maintenance() {
     let f = Fixture::new();
     f.recorded("synthetic");
@@ -376,7 +755,7 @@ impl CaptureFactory for FakeFactory {
                 sender
                     .try_send(CaptureEvent::Error {
                         source: Source::Remote,
-                        code: "meeting_capture_device_removed".into(),
+                        code: "meeting_capture_get_buffer_88890004".into(),
                     })
                     .unwrap();
                 stop.store(true, Ordering::Release);
@@ -446,7 +825,7 @@ impl CaptureSession for FakeSession {
             }
         }
         if matches!(self.mode, Mode::SourceFault) {
-            return Err("meeting_capture_device_removed".into());
+            return Err("meeting_capture_get_buffer_88890004".into());
         }
         if matches!(self.mode, Mode::QueueFull) {
             return Err("meeting_capture_queue_full".into());
@@ -539,7 +918,7 @@ fn runtime_recording_uses_committed_boundaries_and_drains_while_stopping() {
 #[test]
 fn runtime_source_failure_and_full_queue_interrupt_without_losing_valid_raw() {
     for (mode, code) in [
-        (Mode::SourceFault, "meeting_capture_device_removed"),
+        (Mode::SourceFault, "meeting_capture_get_buffer_88890004"),
         (Mode::QueueFull, "meeting_capture_queue_full"),
         (Mode::InvalidPacket, "meeting_packet"),
     ] {

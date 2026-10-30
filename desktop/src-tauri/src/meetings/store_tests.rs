@@ -6,6 +6,539 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 #[cfg(windows)]
+fn final_recovery_repeated_install_failure_is_bounded_and_restart_can_retry() {
+    use std::sync::atomic::AtomicUsize;
+    let mut f = Fixture::new();
+    let (dir, mut backup, unknown_tmp) = missing_published_manifest(&f);
+    backup.resize(256 * 1024, b' ');
+    fs::write(dir.join(".manifest-123-7.backup"), &backup).unwrap();
+    let raw = fs::read(dir.join("chunk-00000000.bin")).unwrap();
+    let installs = Arc::new(AtomicUsize::new(0));
+    let calls = installs.clone();
+    let blocked: RestoreHook = Arc::new(move |step, _, _| {
+        if step == RestoreStep::Install {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Err("meeting_manifest_restore_blocked")
+        } else {
+            Ok(())
+        }
+    });
+    f.store.restore_hook = Some(blocked.clone());
+    let staged_usage = || {
+        fs::read_dir(&dir)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .fold((0usize, 0u64), |(count, bytes), entry| {
+                (count + 1, bytes + entry.metadata().unwrap().len())
+            })
+    };
+    for _ in 0..12 {
+        assert_eq!(
+            f.store.load("synthetic").unwrap_err(),
+            "meeting_manifest_restore_blocked"
+        );
+        let row = f.store.list().unwrap().remove(0);
+        assert_eq!(
+            row.error.as_deref(),
+            Some("meeting_manifest_restore_blocked")
+        );
+    }
+    let first_usage = staged_usage();
+    assert!(
+        first_usage.0 <= 5,
+        "unbounded staged count: {first_usage:?}"
+    );
+    assert!(first_usage.1 <= unknown_tmp.len() as u64 + 4 * backup.len() as u64);
+    let mut restarted = MeetingStore::new(&f.root).unwrap();
+    restarted.restore_hook = Some(blocked);
+    for _ in 0..12 {
+        assert!(restarted.load("synthetic").is_err());
+        restarted.list().unwrap();
+    }
+    assert_eq!(
+        staged_usage(),
+        first_usage,
+        "restart must reuse the same budget"
+    );
+    assert!(installs.load(Ordering::Relaxed) >= 24);
+    restarted.restore_hook = None;
+    assert_eq!(restarted.list().unwrap()[0].status, MeetingStatus::Recorded);
+    assert_eq!(fs::read(dir.join("manifest.json")).unwrap(), backup);
+    assert_eq!(
+        fs::read(dir.join(".manifest-123-7.backup")).unwrap(),
+        backup
+    );
+    assert_eq!(
+        fs::read(dir.join(".manifest-123-7.tmp")).unwrap(),
+        unknown_tmp
+    );
+    assert_eq!(fs::read(dir.join("chunk-00000000.bin")).unwrap(), raw);
+}
+
+#[test]
+#[cfg(windows)]
+fn final_recovery_write_and_sync_failures_keep_a_bounded_retry_state() {
+    for step in [RestoreStep::Write, RestoreStep::Sync] {
+        let mut f = Fixture::new();
+        let (dir, backup, unknown_tmp) = missing_published_manifest(&f);
+        let partial = backup[..17].to_vec();
+        f.store.restore_hook = Some(Arc::new(move |observed, path, _| {
+            if observed == step {
+                if step == RestoreStep::Write {
+                    fs::write(path, &partial).unwrap();
+                }
+                Err("meeting_manifest_restore_blocked")
+            } else {
+                Ok(())
+            }
+        }));
+        for _ in 0..20 {
+            assert_eq!(
+                f.store.load("synthetic").unwrap_err(),
+                "meeting_manifest_restore_blocked"
+            );
+            assert_eq!(f.store.list().unwrap()[0].schema_version, 0);
+        }
+        let slots: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| restore_staging_name(entry.file_name().to_str().unwrap()))
+            .collect();
+        let expected = if step == RestoreStep::Write {
+            RESTORE_STAGING_SLOTS as usize
+        } else {
+            1
+        };
+        assert_eq!(slots.len(), expected);
+        assert!(
+            slots
+                .iter()
+                .map(|entry| entry.metadata().unwrap().len())
+                .sum::<u64>()
+                <= 4 * backup.len() as u64
+        );
+        let restarted = MeetingStore::new(&f.root).unwrap();
+        if step == RestoreStep::Sync {
+            assert_eq!(restarted.list().unwrap()[0].status, MeetingStatus::Recorded);
+        } else {
+            // No readable complete slot exists: preserve all unknown partials,
+            // expose the blocked row and leave the published backup authoritative.
+            assert_eq!(
+                restarted.load("synthetic").unwrap_err(),
+                "meeting_manifest_restore_blocked"
+            );
+            assert_eq!(restarted.list().unwrap()[0].schema_version, 0);
+            restarted
+                .create("healthy", "healthy", 100, vec![])
+                .unwrap()
+                .finish(MeetingStatus::Recorded, Some(100), None)
+                .unwrap();
+            assert_eq!(
+                restarted.load("healthy").unwrap().status,
+                MeetingStatus::Recorded
+            );
+            assert_eq!(restarted.list().unwrap().len(), 2);
+        }
+        assert_eq!(
+            fs::read(dir.join(".manifest-123-7.backup")).unwrap(),
+            backup
+        );
+        assert_eq!(
+            fs::read(dir.join(".manifest-123-7.tmp")).unwrap(),
+            unknown_tmp
+        );
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn final_recovery_install_race_never_overwrites_competing_target() {
+    for valid in [true, false] {
+        let mut f = Fixture::new();
+        let (dir, backup, unknown_tmp) = missing_published_manifest(&f);
+        let mut competitor: serde_json::Value = serde_json::from_slice(&backup).unwrap();
+        competitor["title"] = serde_json::json!("competitor wins");
+        if !valid {
+            competitor["id"] = serde_json::json!("other-id");
+        }
+        let competitor = serde_json::to_vec(&competitor).unwrap();
+        let introduced = competitor.clone();
+        f.store.restore_hook = Some(Arc::new(move |step, _, directory| {
+            if step == RestoreStep::Install {
+                fs::write(directory.join("manifest.json"), &introduced).unwrap();
+                Err("meeting_manifest_restore_blocked")
+            } else {
+                Ok(())
+            }
+        }));
+        let result = f.store.load("synthetic");
+        if valid {
+            assert_eq!(result.unwrap().title, "competitor wins");
+        } else {
+            assert_eq!(result.unwrap_err(), "meeting_manifest_restore_invalid");
+        }
+        assert_eq!(fs::read(dir.join("manifest.json")).unwrap(), competitor);
+        assert_eq!(
+            fs::read(dir.join(".manifest-123-7.backup")).unwrap(),
+            backup
+        );
+        assert_eq!(
+            fs::read(dir.join(".manifest-123-7.tmp")).unwrap(),
+            unknown_tmp
+        );
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn final_recovery_slots_are_safe_for_expiry_delete_and_link_rejection() {
+    for expire in [false, true] {
+        let f = Fixture::new();
+        let (dir, backup, _) = missing_published_manifest(&f);
+        for slot in 0..RESTORE_STAGING_SLOTS {
+            fs::write(dir.join(format!(".manifest-recovery-{slot}.tmp")), &backup).unwrap();
+        }
+        let created = f.store.load("synthetic").unwrap().created_at_unix_secs;
+        if expire {
+            assert_eq!(
+                f.store.prune(created + RETENTION_SECS).unwrap(),
+                vec!["synthetic"]
+            );
+        } else {
+            f.store.delete("synthetic").unwrap();
+        }
+        assert!(!dir.exists());
+    }
+    let f = Fixture::new();
+    let (dir, backup, _) = missing_published_manifest(&f);
+    let outside = f.root.join(".outside-owned-fixture");
+    fs::write(&outside, &backup).unwrap();
+    fs::hard_link(&outside, dir.join(".manifest-recovery-0.tmp")).unwrap();
+    assert_eq!(
+        f.store.load("synthetic").unwrap_err(),
+        "meeting_manifest_restore_invalid"
+    );
+    assert!(f.store.delete("synthetic").is_err());
+    assert!(!dir.join("manifest.json").exists());
+    assert_eq!(fs::read(&outside).unwrap(), backup);
+    assert_eq!(
+        fs::read(dir.join(".manifest-123-7.backup")).unwrap(),
+        backup
+    );
+    // The bounded namespace cannot authorize an arbitrary filename for deletion.
+    assert!(!staging_name(".manifest-recovery-4.tmp"));
+    assert!(!staging_name(".manifest-recovery-00.tmp"));
+}
+
+#[test]
+#[cfg(windows)]
+fn final_recovery_external_process_lease_blocks_reused_stage() {
+    const CHILD: &str = "QINGSHU_RECOVERY_TEST_LEASE_DIRECTORY";
+    if let Some(directory) = std::env::var_os(CHILD) {
+        let directory = PathBuf::from(directory);
+        let lease = SessionLease::acquire(&directory).unwrap();
+        let ready = directory.parent().unwrap().join("lease-ready");
+        let release = directory.parent().unwrap().join("lease-release");
+        fs::write(ready, b"ready").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !release.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            release.exists(),
+            "parent must release the synthetic lease child"
+        );
+        drop(lease);
+        let restarted = MeetingStore::new(directory.parent().unwrap()).unwrap();
+        assert_eq!(
+            restarted.load("synthetic").unwrap().status,
+            MeetingStatus::Recorded
+        );
+        return;
+    }
+    let mut f = Fixture::new();
+    let (dir, backup, unknown_tmp) = missing_published_manifest(&f);
+    f.store.restore_hook = Some(Arc::new(|step, _, _| {
+        if step == RestoreStep::Install {
+            Err("meeting_manifest_restore_blocked")
+        } else {
+            Ok(())
+        }
+    }));
+    for _ in 0..12 {
+        assert!(f.store.load("synthetic").is_err());
+    }
+    f.store.restore_hook = None;
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "meetings::store::tests::final_recovery_external_process_lease_blocks_reused_stage",
+            "--nocapture",
+        ])
+        .env(CHILD, &dir)
+        .spawn()
+        .unwrap();
+    let ready = dir.parent().unwrap().join("lease-ready");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let result = if ready.exists() {
+        f.store.load("synthetic")
+    } else {
+        Err("child_not_ready")
+    };
+    let existed_before_release = dir.join("manifest.json").exists();
+    let stage_before_release = fs::read(dir.join(".manifest-recovery-0.tmp")).unwrap();
+    fs::write(dir.parent().unwrap().join("lease-release"), b"release").unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(result.unwrap_err(), "meeting_manifest_restore_busy");
+    assert!(!existed_before_release);
+    assert_eq!(stage_before_release, backup);
+    assert_eq!(fs::read(dir.join("manifest.json")).unwrap(), backup);
+    assert_eq!(
+        fs::read(dir.join(".manifest-123-7.tmp")).unwrap(),
+        unknown_tmp
+    );
+    assert_eq!(
+        f.store.load("synthetic").unwrap().status,
+        MeetingStatus::Recorded
+    );
+}
+
+#[test]
+#[cfg(windows)]
+#[ignore = "native junction fixture; run the link tests explicitly"]
+fn backup_restore_refuses_reparse_links_without_touching_their_targets() {
+    for name in [
+        "chunk-00000000.bin",
+        ".manifest-123-7.backup",
+        ".manifest-recovery-0.tmp",
+    ] {
+        let f = Fixture::new();
+        let (dir, old, _) = missing_published_manifest(&f);
+        let linked = dir.join(name);
+        if linked.exists() {
+            fs::remove_file(&linked).unwrap();
+        }
+        let outside = f.root.join(".outside-owned-fixture");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("sentinel"), &old).unwrap();
+        let result = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&linked)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "junction fixture creation must succeed"
+        );
+        assert!(f.store.load("synthetic").is_err());
+        assert!(!dir.join("manifest.json").exists());
+        assert_eq!(fs::read(outside.join("sentinel")).unwrap(), old);
+        fs::remove_dir(&linked).unwrap();
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn unavailable_manifest_retention_never_deletes_the_surviving_copy() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = Fixture::new();
+    let (dir, old, tmp) = missing_published_manifest(&f);
+    let held = OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(dir.join(".manifest-123-7.backup"))
+        .unwrap();
+    assert!(f.store.prune(u64::MAX).unwrap().is_empty());
+    assert!(dir.exists());
+    assert_eq!(fs::read(dir.join(".manifest-123-7.tmp")).unwrap(), tmp);
+    drop(held);
+    assert_eq!(
+        f.store.load("synthetic").unwrap().status,
+        MeetingStatus::Recorded
+    );
+    assert_eq!(fs::read(dir.join("manifest.json")).unwrap(), old);
+}
+
+#[test]
+#[cfg(windows)]
+fn backup_restore_never_follows_links_or_replaces_an_existing_target() {
+    for raw_link in [false, true] {
+        let f = Fixture::new();
+        let (dir, old, _) = missing_published_manifest(&f);
+        let linked = if raw_link {
+            dir.join("chunk-00000000.bin")
+        } else {
+            dir.join(".manifest-123-7.backup")
+        };
+        let outside = f.root.join(".outside-owned-fixture");
+        fs::hard_link(&linked, &outside).unwrap();
+        assert!(f.store.load("synthetic").is_err());
+        assert!(!dir.join("manifest.json").exists());
+        assert_eq!(fs::read(dir.join(".manifest-123-7.backup")).unwrap(), old);
+        assert!(outside.exists());
+    }
+    let f = Fixture::new();
+    let (dir, old, _) = missing_published_manifest(&f);
+    let mut current: serde_json::Value = serde_json::from_slice(&old).unwrap();
+    current["title"] = serde_json::json!("existing target wins");
+    let current = serde_json::to_vec(&current).unwrap();
+    fs::write(dir.join("manifest.json"), &current).unwrap();
+    assert_eq!(
+        f.store.load("synthetic").unwrap().title,
+        "existing target wins"
+    );
+    assert_eq!(fs::read(dir.join("manifest.json")).unwrap(), current);
+}
+
+#[test]
+#[cfg(windows)]
+fn restoration_size_budget_and_occupied_slots_preserve_all_originals() {
+    let f = Fixture::new();
+    let (dir, old, _) = missing_published_manifest(&f);
+    for n in 0..RESTORE_STAGING_SLOTS {
+        fs::write(
+            dir.join(format!(".manifest-recovery-{n}.tmp")),
+            b"unpublished collision",
+        )
+        .unwrap();
+    }
+    assert!(f.store.load("synthetic").is_err());
+    assert!(!dir.join("manifest.json").exists());
+    assert_eq!(fs::read(dir.join(".manifest-123-7.backup")).unwrap(), old);
+    assert_eq!(
+        f.store.load("synthetic").unwrap_err(),
+        "meeting_manifest_restore_blocked"
+    );
+    for n in 0..RESTORE_STAGING_SLOTS {
+        let path = dir.join(format!(".manifest-recovery-{n}.tmp"));
+        assert_eq!(fs::read(&path).unwrap(), b"unpublished collision");
+    }
+    // Only the fixture owner removes its own collision; production preserves it.
+    fs::remove_file(dir.join(".manifest-recovery-0.tmp")).unwrap();
+    assert_eq!(
+        f.store.load("synthetic").unwrap().status,
+        MeetingStatus::Recorded
+    );
+    let f = Fixture::new();
+    let (dir, _, _) = missing_published_manifest(&f);
+    let file = OpenOptions::new()
+        .write(true)
+        .open(dir.join(".manifest-123-7.backup"))
+        .unwrap();
+    file.set_len(MAX_MANIFEST_BYTES + 1).unwrap();
+    drop(file);
+    assert!(f.store.load("synthetic").is_err());
+    assert!(!dir.join("manifest.json").exists());
+}
+
+fn missing_published_manifest(f: &Fixture) -> (PathBuf, Vec<u8>, Vec<u8>) {
+    let mut w = f.writer();
+    w.append(packet(0)).unwrap();
+    w.finish(MeetingStatus::Recorded, Some(1350), None).unwrap();
+    let dir = f.root.join("synthetic");
+    let old = fs::read(dir.join("manifest.json")).unwrap();
+    fs::rename(
+        dir.join("manifest.json"),
+        dir.join(".manifest-123-7.backup"),
+    )
+    .unwrap();
+    let mut unpublished: serde_json::Value = serde_json::from_slice(&old).unwrap();
+    unpublished["title"] = serde_json::json!("unpublished");
+    unpublished["status"] = serde_json::json!("complete");
+    let tmp = serde_json::to_vec(&unpublished).unwrap();
+    fs::write(dir.join(".manifest-123-7.tmp"), &tmp).unwrap();
+    (dir, old, tmp)
+}
+
+#[test]
+#[cfg(windows)]
+fn missing_manifest_restores_only_published_backup_and_keeps_both_copies() {
+    let f = Fixture::new();
+    let (dir, old, tmp) = missing_published_manifest(&f);
+    let m = f.store.load("synthetic").unwrap();
+    assert_eq!(m.status, MeetingStatus::Recorded);
+    assert_eq!(m.title, "Synthetic");
+    assert_eq!(fs::read(dir.join("manifest.json")).unwrap(), old);
+    assert_eq!(fs::read(dir.join(".manifest-123-7.backup")).unwrap(), old);
+    assert_eq!(fs::read(dir.join(".manifest-123-7.tmp")).unwrap(), tmp);
+    f.store.recover("synthetic").unwrap();
+    assert_eq!(f.store.load("synthetic").unwrap().chunks[0].packets, 1);
+    f.store.delete("synthetic").unwrap();
+    assert!(!dir.exists());
+}
+
+#[test]
+#[cfg(windows)]
+fn backup_restore_rejects_invalid_documents_and_conflicting_old_snapshots() {
+    for fault in ["id", "schema", "path", "bytes", "zero_packets", "conflict"] {
+        let f = Fixture::new();
+        let (dir, old, tmp) = missing_published_manifest(&f);
+        let mut invalid: serde_json::Value = serde_json::from_slice(&old).unwrap();
+        match fault {
+            "id" => invalid["id"] = serde_json::json!("another"),
+            "schema" => invalid["schema_version"] = serde_json::json!(2),
+            "path" => invalid["chunks"][0]["file"] = serde_json::json!("../outside.bin"),
+            "bytes" => invalid["chunks"][0]["committed_bytes"] = serde_json::json!(u64::MAX),
+            "zero_packets" => invalid["chunks"][0]["packets"] = serde_json::json!(0),
+            _ => invalid["title"] = serde_json::json!("conflicting published snapshot"),
+        }
+        let path = dir.join(if fault == "conflict" {
+            ".manifest-124-1.backup"
+        } else {
+            ".manifest-123-7.backup"
+        });
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(f.store.load("synthetic").is_err(), "{fault}");
+        assert!(!dir.join("manifest.json").exists(), "{fault}");
+        assert!(path.exists());
+        assert_eq!(fs::read(dir.join(".manifest-123-7.tmp")).unwrap(), tmp);
+        let rows = f.store.list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, MeetingStatus::Failed);
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn equivalent_backups_restore_without_guessing_pid_or_file_time_order() {
+    let f = Fixture::new();
+    let (dir, old, _) = missing_published_manifest(&f);
+    let value: serde_json::Value = serde_json::from_slice(&old).unwrap();
+    fs::write(
+        dir.join(".manifest-999-100.backup"),
+        serde_json::to_vec_pretty(&value).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        f.store.load("synthetic").unwrap().status,
+        MeetingStatus::Recorded
+    );
+    assert!(dir.join(".manifest-123-7.backup").exists());
+    assert!(dir.join(".manifest-999-100.backup").exists());
+}
+
+#[test]
+#[cfg(windows)]
+fn restore_respects_live_session_lease_and_never_adopts_lone_tmp() {
+    let f = Fixture::new();
+    let (dir, _, _) = missing_published_manifest(&f);
+    let held = SessionLease::acquire(&dir).unwrap();
+    assert!(f.store.load("synthetic").is_err());
+    assert!(!dir.join("manifest.json").exists());
+    drop(held);
+    fs::remove_file(dir.join(".manifest-123-7.backup")).unwrap();
+    assert!(f.store.load("synthetic").is_err());
+    assert!(!dir.join("manifest.json").exists());
+    assert!(dir.join(".manifest-123-7.tmp").exists());
+}
+
+#[test]
+#[cfg(windows)]
 fn failed_transcript_replace_retains_staged_copy() {
     use std::os::windows::fs::OpenOptionsExt;
     let f = Fixture::new();

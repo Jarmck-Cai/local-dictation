@@ -1,6 +1,7 @@
 /** Complete root `meetings` subtree, registered by i18n/index.ts. */
 export const meetingMessages = {
   en: {
+    dateUnavailable: "Recording date unavailable",
     nav: "Meetings",
     title: "Meeting recording",
     beta: "Beta",
@@ -79,6 +80,8 @@ export const meetingMessages = {
         "Recording stopped because local audio or recording data could not be read or written.",
       unknown:
         "The original reason for this recording interruption was not saved.",
+      unknownSaved:
+        "Recording was interrupted by an unrecognized error. Diagnostic information was saved.",
     },
     warningInputClamped:
       "Some input audio was too loud, which may reduce transcription accuracy. Replay the recording to check.",
@@ -127,6 +130,10 @@ export const meetingMessages = {
         "Recording could not be completed. Check your audio devices. Any saved audio remains available.",
       storage:
         "The local recording could not be read or saved. Check available storage and retry.",
+      restoreBlocked:
+        "The recording state file is temporarily inaccessible. Saved audio is kept. Close anything using the file, then retry.",
+      restoreConflict:
+        "The recording state recovery information is missing, invalid or conflicting. Saved audio is kept; the recovery information needs to be checked before continuing.",
       model:
         "Local transcription is unavailable. Check that your speech model is ready, then retry. The saved audio is kept.",
       modelUnsupported:
@@ -140,6 +147,7 @@ export const meetingMessages = {
     },
   },
   zh: {
+    dateUnavailable: "录制时间暂不可用",
     captureDiagnostic: "诊断码：{{code}}",
     captureReasons: {
       stateSave: "录制状态无法保存，录音已中断。",
@@ -149,6 +157,7 @@ export const meetingMessages = {
       capture: "音频采集发生异常，录音已中断。",
       storage: "本地音频或录制数据读写失败，录音已中断。",
       unknown: "原始中断原因未保存。",
+      unknownSaved: "录音因未识别的异常中断，诊断信息已保存。",
     },
     nav: "会议",
     title: "会议录音",
@@ -244,6 +253,10 @@ export const meetingMessages = {
       devices: "所选声音设备当前不可用，请刷新并重新选择两台设备。",
       capture: "录音未能正常完成，请检查声音设备。已经保存的录音仍会保留。",
       storage: "无法读取或保存本机录音，请检查可用存储空间后重试。",
+      restoreBlocked:
+        "录制状态文件暂时无法访问，已保存的原音仍保留。请关闭占用文件的程序后重试。",
+      restoreConflict:
+        "录制状态的恢复信息缺失、无效或互相冲突。原音仍保留，请先检查恢复信息再继续。",
       model:
         "本机转录暂时不可用，请确认语音模型已就绪后重试。已保存的录音会保留。",
       modelUnsupported:
