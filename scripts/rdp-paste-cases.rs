@@ -110,24 +110,38 @@ mod rdp_tests {
     }
 
     #[test]
-    fn prefetch_before_input_can_deliver_text_without_a_post_input_render_receipt() {
+    fn prefetch_before_input_delivers_text_and_settles_after_prerendered_quiet_window() {
         start(0, 80, 0);
         SYSTEM.with(|s| s.borrow_mut().prefetch_before_begin = true);
-        assert_eq!(transaction(false), Ok(false));
+        assert_eq!(transaction(false), Ok(true));
         SYSTEM.with(|s| {
             let s = s.borrow();
             assert_eq!(s.remote_result, Some("synthetic-transcript"));
             assert_eq!((s.injected, s.remote_requests, s.restored), (1, 1, 1));
+            assert!((580..1000).contains(&s.now));
         });
     }
 
     #[test]
-    fn short_nonmutating_clipboard_contention_before_input_currently_aborts_the_chord() {
+    fn short_nonmutating_clipboard_contention_before_input_retries_and_delivers_once() {
         start(0, 80, 0);
         SYSTEM.with(|s| s.borrow_mut().busy_before_begin_until = Some(40));
+        assert_eq!(transaction(false), Ok(true));
+        SYSTEM.with(|s| {
+            let s = s.borrow();
+            assert_eq!(s.remote_result, Some("synthetic-transcript"));
+            assert_eq!((s.injected, s.remote_requests, s.restored), (1, 1, 1));
+            assert_eq!(s.body, "synthetic-original");
+        });
+    }
+
+    #[test]
+    fn sustained_nonmutating_clipboard_contention_before_input_aborts_the_chord() {
+        start(0, 80, 0);
+        SYSTEM.with(|s| s.borrow_mut().busy_before_begin_until = Some(400));
         assert_eq!(
             transaction(false),
-            Err("manual_paste_clipboard_busy".into())
+            Err("manual_paste_begin_clipboard_busy".into())
         );
         SYSTEM.with(|s| {
             let s = s.borrow();

@@ -23,7 +23,7 @@ mod unicode_copy_tests {
             assert_eq!(s.body, "synthetic-transcript");
             assert!(!s.delayed);
             assert_eq!(s.injected, 0);
-            assert_eq!(s.formats, [50001, 50002, 50003, 13]);
+            assert_eq!(s.formats, [50001, 50002, 50003, 50004, 13]);
             assert!(s.opened.is_none());
         });
     }

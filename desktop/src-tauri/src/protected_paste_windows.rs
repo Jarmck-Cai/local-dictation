@@ -147,6 +147,39 @@ impl ClipboardLock {
         }
         Ok(Self)
     }
+    fn open_bounded(
+        window: &Window,
+        pump: bool,
+        timeout: Duration,
+        busy_error: &'static str,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, &'static str> {
+        let started = Instant::now();
+        let mut step = policy::OPEN_BACKOFF_INITIAL;
+        loop {
+            if pump {
+                window.pump();
+            }
+            match Self::open(window.hwnd) {
+                Ok(lock) => return Ok(lock),
+                Err(_) => {
+                    if policy::settlement_cancelled(is_cancelled) {
+                        return Err(policy::CANCELLED);
+                    }
+                    let Some((wait, next_step)) =
+                        policy::open_retry_delay(step, started.elapsed(), timeout)
+                    else {
+                        return Err(busy_error);
+                    };
+                    step = next_step;
+                    thread::sleep(wait);
+                    if policy::settlement_cancelled(is_cancelled) {
+                        return Err(policy::CANCELLED);
+                    }
+                }
+            }
+        }
+    }
     fn close(self) -> Result<(), &'static str> {
         let result = unsafe { CloseClipboard() }.map_err(|_| UNAVAILABLE);
         // Retain Drop's second close attempt if the explicit close failed.
@@ -170,6 +203,7 @@ struct Context {
     expected_sequence: Cell<u32>,
     injection_started: Cell<bool>,
     read_at: Cell<Option<Instant>>,
+    rendered_before_injection: Cell<bool>,
     ownership_lost: Cell<bool>,
     render_failed: Cell<bool>,
     internal_empty: Cell<bool>,
@@ -200,8 +234,12 @@ unsafe fn render(hwnd: HWND, context: &Context, receipt: bool) {
         return;
     }
     context.expected_sequence.set(sequence);
-    if receipt && context.injection_started.get() {
-        context.read_at.set(Some(Instant::now()));
+    if receipt {
+        if context.injection_started.get() {
+            context.read_at.set(Some(Instant::now()));
+        } else {
+            context.rendered_before_injection.set(true);
+        }
     }
 }
 
@@ -519,9 +557,10 @@ struct WinClipboard {
     saved: Vec<Saved>,
     restore_snapshot: bool,
     markers: Vec<(u32, Global)>,
-    marker_formats: [u32; 3],
+    marker_formats: [u32; 4],
     mutated: bool,
     began: Instant,
+    injected_at: Option<Instant>,
     retained_text: Option<Global>,
 }
 impl WinClipboard {
@@ -535,9 +574,10 @@ impl WinClipboard {
             saved: Vec::new(),
             restore_snapshot: false,
             markers: Vec::new(),
-            marker_formats: [0; 3],
+            marker_formats: [0; 4],
             mutated: false,
             began: Instant::now(),
+            injected_at: None,
             retained_text: None,
         })
     }
@@ -555,21 +595,20 @@ impl WinClipboard {
         self.context.internal_empty.set(false);
         result
     }
-}
-impl Provider for WinClipboard {
-    fn prepare(&mut self, text: &str) -> Result<(), &'static str> {
+    fn prepare_publication_memory(&mut self, text: &str) -> Result<(), &'static str> {
         *self.context.text.borrow_mut() = Some(text_memory(text)?);
         // Also needed when no original payload can be saved, or a later restore
         // fails. Allocate before EmptyClipboard, never after destroying data.
         self.retained_text = Some(text_memory(text)?);
         // Allocate every restoration and marker resource before the first mutation.
         self.markers
-            .try_reserve_exact(3)
+            .try_reserve_exact(4)
             .map_err(|_| BACKUP_FAILED)?;
         for (name, value) in [
             ("ExcludeClipboardContentFromMonitorProcessing", 1u32),
             ("CanIncludeInClipboardHistory", 0u32),
             ("CanUploadToCloudClipboard", 0u32),
+            ("Clipboard Viewer Ignore", 0u32),
         ] {
             let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
             let format = unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) };
@@ -580,7 +619,9 @@ impl Provider for WinClipboard {
                 .push((format, Global::from_bytes(&value.to_le_bytes())?));
         }
         self.marker_formats = std::array::from_fn(|index| self.markers[index].0);
-        self.held = Some(ClipboardLock::open(self.window.hwnd)?);
+        Ok(())
+    }
+    fn snapshot_locked(&mut self) -> Result<(), &'static str> {
         self.current_sequence()?;
         let originally_empty = enumerate()?.is_empty();
         self.saved = snapshot()?;
@@ -593,6 +634,59 @@ impl Provider for WinClipboard {
         // Intentionally keep this same lock through publication: user copies
         // cannot slip between the complete backup and EmptyClipboard.
         Ok(())
+    }
+    fn verify_lease_under_lock(
+        &mut self,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), &'static str> {
+        let lock = ClipboardLock::open_bounded(
+            &self.window,
+            true,
+            policy::OPEN_CLIPBOARD_TIMEOUT,
+            policy::BEGIN_BUSY,
+            is_cancelled,
+        )?;
+        let owns = unsafe { GetClipboardOwner() }.ok() == Some(self.window.hwnd);
+        let sequence = self.current_sequence()?;
+        let valid = policy::same_lease(
+            self.context.expected_sequence.get(),
+            sequence,
+            owns,
+            self.context.ownership_lost.get(),
+        );
+        lock.close()?;
+        if !valid {
+            return Err("manual_paste_clipboard_changed");
+        }
+        Ok(())
+    }
+}
+impl Provider for WinClipboard {
+    fn prepare(&mut self, text: &str) -> Result<(), &'static str> {
+        self.prepare_publication_memory(text)?;
+        self.held = Some(ClipboardLock::open_bounded(
+            &self.window,
+            false,
+            policy::OPEN_CLIPBOARD_TIMEOUT,
+            policy::PREPARE_BUSY,
+            &|| false,
+        )?);
+        self.snapshot_locked()
+    }
+    fn prepare_cancellable(
+        &mut self,
+        text: &str,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), &'static str> {
+        self.prepare_publication_memory(text)?;
+        self.held = Some(ClipboardLock::open_bounded(
+            &self.window,
+            false,
+            policy::OPEN_CLIPBOARD_TIMEOUT,
+            policy::PREPARE_BUSY,
+            is_cancelled,
+        )?);
+        self.snapshot_locked()
     }
     fn publish(&mut self) -> Result<(), &'static str> {
         // Refuse inaccessible sequence state immediately before the first write.
@@ -622,36 +716,48 @@ impl Provider for WinClipboard {
         // under the next clipboard lock, so a newer user's copy is refused.
         self.context.expected_sequence.set(self.current_sequence()?);
         self.began = Instant::now();
+        self.injected_at = None;
         Ok(())
     }
+    fn before_preflight(&mut self, is_cancelled: &dyn Fn() -> bool) -> Result<(), &'static str> {
+        self.verify_lease_under_lock(is_cancelled)
+    }
     fn begin_injection(&mut self) -> Result<(), &'static str> {
-        self.window.pump();
-        let lock = ClipboardLock::open(self.window.hwnd)?;
-        let owns = unsafe { GetClipboardOwner() }.ok() == Some(self.window.hwnd);
-        let sequence = self.current_sequence()?;
-        let valid = policy::same_lease(
-            self.context.expected_sequence.get(),
-            sequence,
-            owns,
-            self.context.ownership_lost.get(),
-        );
-        lock.close()?;
-        if !valid {
-            return Err("manual_paste_clipboard_changed");
-        }
+        self.begin_injection_cancellable(&|| false)
+    }
+    fn begin_injection_cancellable(
+        &mut self,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), &'static str> {
+        self.verify_lease_under_lock(is_cancelled)?;
         self.context.injection_started.set(true);
         Ok(())
+    }
+    fn reset_injection_gate(&mut self) {
+        self.context.injection_started.set(false);
+    }
+    fn mark_injected(&mut self) {
+        self.injected_at = Some(Instant::now());
     }
     fn observe(&mut self) -> Result<Observation, &'static str> {
         self.window.pump();
         if self.context.render_failed.get() {
             return Err(RENDER_FAILED);
         }
+        let sequence = self.current_sequence()?;
+        let lease_lost =
+            self.context.ownership_lost.get() || sequence != self.context.expected_sequence.get();
         let read_at = self.context.read_at.get();
+        let pre_rendered_for = if self.context.rendered_before_injection.get() {
+            Some(self.injected_at.unwrap_or(self.began).elapsed())
+        } else {
+            None
+        };
         Ok(Observation {
             read: read_at.is_some(),
             quiet_for: read_at.map(|at| at.elapsed()),
-            ownership_lost: self.context.ownership_lost.get(),
+            pre_rendered_for,
+            ownership_lost: lease_lost,
         })
     }
     fn elapsed(&self) -> Duration {
@@ -864,7 +970,7 @@ pub(super) fn run_automatic(
 
 pub(super) fn run_with_preflight(
     text: &str,
-    preflight: impl FnOnce() -> Result<(), String>,
+    preflight: impl FnMut() -> Result<(), String>,
     inject: impl FnOnce() -> Result<(), String>,
     is_cancelled: impl Fn() -> bool,
     copy_result: bool,

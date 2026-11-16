@@ -46,7 +46,7 @@ pub(crate) fn run_automatic(
 #[cfg(target_os = "windows")]
 pub(crate) fn run_with_preflight(
     text: &str,
-    preflight: impl FnOnce() -> Result<(), String>,
+    preflight: impl FnMut() -> Result<(), String>,
     inject: impl FnOnce() -> Result<(), String>,
     is_cancelled: impl Fn() -> bool,
     copy_result: bool,

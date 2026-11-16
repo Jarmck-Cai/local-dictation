@@ -12,6 +12,9 @@ pub(crate) enum Submission {
 /// Public event codes are a static whitelist; internal errors may contain details.
 pub fn paste_error_code(error: &str) -> &'static str {
     match error {
+        "manual_paste_clipboard_busy"
+        | "manual_paste_prepare_clipboard_busy"
+        | "manual_paste_begin_clipboard_busy" => "clipboard_busy",
         "manual_paste_restore_failed" => "clipboard_restore_failed",
         "automatic_paste_unconfirmed" => "input_unconfirmed",
         "rdp_input_uncertain" => "input_unconfirmed",
@@ -132,6 +135,13 @@ mod tests {
 
     #[test]
     fn error_events_distinguish_restore_failure_without_exposing_internal_details() {
+        for busy in [
+            "manual_paste_clipboard_busy",
+            "manual_paste_prepare_clipboard_busy",
+            "manual_paste_begin_clipboard_busy",
+        ] {
+            assert_eq!(paste_error_code(busy), "clipboard_busy");
+        }
         assert_eq!(
             paste_error_code("manual_paste_restore_failed"),
             "clipboard_restore_failed"

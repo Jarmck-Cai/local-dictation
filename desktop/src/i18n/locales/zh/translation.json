@@ -1036,6 +1036,8 @@
         "manual_paste_backup_failed": "无法安全保存原剪贴板，本次未补贴。",
         "manual_paste_unsupported_format": "原剪贴板包含无法安全恢复的格式，本次未补贴。",
         "manual_paste_clipboard_busy": "剪贴板正被占用，本次未补贴，请稍后再试。",
+        "manual_paste_prepare_clipboard_busy": "其他程序持续占用剪贴板，本次未补贴，请稍后再试。",
+        "manual_paste_begin_clipboard_busy": "准备补贴后剪贴板仍被其他程序持续占用，本次未补贴，请稍后再试。",
         "manual_paste_clipboard_changed": "检测到新的复制内容，已保留新内容；请检查输入框。",
         "manual_paste_publish_failed": "无法准备补贴内容，请检查输入框；不会自动重试。",
         "manual_paste_render_failed": "补贴数据未能完整提供，请检查输入框；不会自动重试。",
@@ -1079,6 +1081,10 @@
       }
     },
     "autoPaste": {
+      "clipboard_busy": {
+        "title": "剪贴板正被其他程序占用",
+        "description": "其他程序持续占用系统剪贴板，本次尚未输入。可稍后将光标放在目标输入框使用补贴快捷键继续，或手动复制结果。"
+      },
       "clipboard_copy_failed": {
         "title": "输入已提交，但复制未完成",
         "description": "请检查远端输入框与剪贴板，避免重复输入；正文仍保留在最近转录。"

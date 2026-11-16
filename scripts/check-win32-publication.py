@@ -65,7 +65,11 @@ impl Instant {
 }
 mod thread {
     pub fn sleep(duration: std::time::Duration) {
-        super::SYSTEM.with(|s| s.borrow_mut().now += duration.as_millis() as u64);
+        super::SYSTEM.with(|s| {
+            let mut s = s.borrow_mut();
+            s.now += duration.as_millis() as u64;
+            if s.cancel_at.is_some_and(|at| at <= s.now) { s.cancelled = true; }
+        });
     }
 }
 #[derive(Default)]
@@ -90,6 +94,12 @@ struct SyntheticSystem {
     remote_buffer: Option<&'static str>, remote_result: Option<&'static str>,
     remote_requests: usize, prefetch_before_begin: bool,
     busy_before_begin_until: Option<u64>, copy_at: Option<u64>, cancel_at: Option<u64>,
+    prepare_busy_until: Option<u64>,
+    listener_busy_until: Option<u64>,
+    listener_prerender: bool,
+    second_begin_busy_ms: Option<u64>,
+    begin_opens: usize,
+    same_owner_copy_at: Option<u64>,
 }
 thread_local! { static SYSTEM: RefCell<SyntheticSystem> = RefCell::new(SyntheticSystem::default()); }
 fn reset(synthesis: bool) {
@@ -166,7 +176,10 @@ impl Saved {
 struct PCWSTR(*const u16);
 unsafe fn RegisterClipboardFormatW(name: PCWSTR) -> u32 {
     // Synthetic identity only; no native clipboard API is linked.
-    if *name.0 == 'E' as u16 { 50001 } else if *name.0.add(3) == 'I' as u16 { 50002 } else { 50003 }
+    if *name.0 == 'E' as u16 { 50001 }
+    else if *name.0.add(1) == 'l' as u16 { 50004 }
+    else if *name.0.add(3) == 'I' as u16 { 50002 }
+    else { 50003 }
 }
 fn text_memory(text: &str) -> Result<Global, &'static str> {
     assert_eq!(text, "synthetic-transcript");
@@ -176,7 +189,7 @@ fn text_memory(text: &str) -> Result<Global, &'static str> {
 fn enumerate() -> Result<Vec<u32>, &'static str> {
     SYSTEM.with(|s| { let s = s.borrow();
         Ok(if s.originally_empty { vec![] } else if s.restore_unavailable { vec![60001] }
-           else if s.marker_only { vec![16, 50001, 50002, 50003] } else { vec![13] }) })
+           else if s.marker_only { vec![16, 50001, 50002, 50003, 50004] } else { vec![13] }) })
 }
 fn snapshot() -> Result<Vec<Saved>, &'static str> {
     SYSTEM.with(|s| { let s = s.borrow();
@@ -195,6 +208,20 @@ impl ClipboardLock {
         SYSTEM.with(|s| {
             let mut s = s.borrow_mut();
             if s.opened.is_some() { return Err("manual_paste_clipboard_busy"); }
+            if !s.synthesized && s.prepare_busy_until.is_some_and(|until| s.now < until) {
+                return Err("manual_paste_clipboard_busy");
+            }
+            if s.synthesized && s.injected == 0 {
+                s.begin_opens += 1;
+                if s.begin_opens == 2 {
+                    if let Some(wait) = s.second_begin_busy_ms.take() {
+                        s.listener_busy_until = Some(s.now + wait);
+                    }
+                }
+                if s.listener_busy_until.is_some_and(|until| s.now < until) {
+                    return Err("manual_paste_clipboard_busy");
+                }
+            }
             if s.rdp && s.synthesized && s.injected == 0
                 && s.busy_before_begin_until.is_some_and(|until| s.now < until) {
                 return Err("manual_paste_clipboard_busy");
@@ -203,6 +230,7 @@ impl ClipboardLock {
             s.opened = Some(hwnd.0); Ok(Self)
         })
     }
+    // REAL_OPEN_BOUNDED
     fn close(self) -> Result<(), &'static str> {
         let (copy, cancel) = SYSTEM.with(|s| {
             let mut s = s.borrow_mut();
@@ -230,9 +258,13 @@ impl Window {
         redirect_tick(self.hwnd);
         let (owner_change, same_owner_change, read, context) = SYSTEM.with(|s| {
             let mut s = s.borrow_mut();
+            let timed_same_owner = s.same_owner_copy_at.is_some_and(|at| at <= s.now);
+            if timed_same_owner { s.same_owner_copy_at = None; }
+            let listener_read = if s.synthesized { std::mem::take(&mut s.listener_prerender) } else { false };
+            let target_read = if s.delayed { std::mem::take(&mut s.reader_pending) } else { false };
             (std::mem::take(&mut s.copy_before_begin),
-             std::mem::take(&mut s.change_before_begin),
-             std::mem::take(&mut s.reader_pending), s.context)
+             std::mem::take(&mut s.change_before_begin) || timed_same_owner,
+             listener_read || target_read, s.context)
         });
         if owner_change { new_user_copy(true); }
         if same_owner_change { new_user_copy(false); }
@@ -472,6 +504,158 @@ mod publication_tests {
         SYSTEM.with(|s| { let s = s.borrow(); assert_eq!(s.body, "synthetic-transcript");
             assert!(!s.delayed); assert_eq!(s.injected, 1); });
     }
+    #[cfg(not(baseline_v017))]
+    #[test]
+    fn background_monitor_lock_and_prerender_delivers_once_and_restores_after_quiet_window() {
+        reset(true);
+        SYSTEM.with(|s| {
+            let mut s = s.borrow_mut();
+            s.listener_prerender = true;
+            s.listener_busy_until = Some(20);
+        });
+        assert_eq!(transaction(false), Ok(true));
+        original_restored(1);
+        SYSTEM.with(|s| {
+            let s = s.borrow();
+            assert!(
+                (500..1000).contains(&s.now),
+                "expected 20ms lock wait + 480ms pre-rendered quiet window without 3s timeout, got {}ms",
+                s.now
+            );
+        });
+    }
+    #[cfg(not(baseline_v017))]
+    #[test]
+    fn prerendered_quiet_window_detects_owner_or_sequence_change_and_cancel() {
+        for owner_changed in [true, false] {
+            reset(true);
+            SYSTEM.with(|s| {
+                let mut s = s.borrow_mut();
+                s.listener_prerender = true;
+                s.listener_busy_until = Some(10);
+                if owner_changed {
+                    s.copy_at = Some(200);
+                } else {
+                    s.same_owner_copy_at = Some(200);
+                }
+            });
+            assert_eq!(transaction(false), Ok(false));
+            new_copy_preserved(1);
+            SYSTEM.with(|s| assert!(s.borrow().now < 480, "must exit quiet window as soon as copy occurs"));
+        }
+        reset(true);
+        SYSTEM.with(|s| {
+            let mut s = s.borrow_mut();
+            s.listener_prerender = true;
+            s.cancel_at = Some(150);
+        });
+        assert_eq!(transaction(false), Err(policy::CANCELLED.into()));
+        original_restored(1);
+        SYSTEM.with(|s| assert!(s.borrow().now < 480));
+    }
+    #[cfg(not(baseline_v017))]
+    #[test]
+    fn begin_lock_wait_over_100ms_refreshes_keyboard_token_without_keys_held() {
+        reset(true);
+        SYSTEM.with(|s| {
+            let mut s = s.borrow_mut();
+            s.listener_prerender = true;
+            // Contend on the post-preflight begin_injection open for 120ms (> 100ms token lifetime).
+            s.second_begin_busy_ms = Some(120);
+        });
+        let token_minted_at = std::cell::Cell::new(0u64);
+        let preflights = std::cell::Cell::new(0usize);
+        let mut clipboard = WinClipboard::new(false).unwrap();
+        let outcome = policy::transact_with_preflight(
+            &mut clipboard,
+            "synthetic-transcript",
+            || {
+                preflights.set(preflights.get() + 1);
+                token_minted_at.set(SYSTEM.with(|s| s.borrow().now));
+                Ok(())
+            },
+            || {
+                let age = SYSTEM.with(|s| s.borrow().now) - token_minted_at.get();
+                if age > 100 {
+                    return Err("keys_held".into());
+                }
+                SYSTEM.with(|s| s.borrow_mut().injected += 1);
+                Ok(())
+            },
+            || SYSTEM.with(|s| s.borrow().cancelled),
+            false,
+        );
+        assert_eq!(outcome, Ok(true));
+        assert_eq!(preflights.get(), 2, "must refresh preflight token after >100ms lock wait");
+        original_restored(1);
+    }
+    #[cfg(not(baseline_v017))]
+    #[test]
+    fn concurrent_user_copy_during_monitor_contention_refuses_chord_and_preserves_copy() {
+        for owner_changed in [true, false] {
+            reset(true);
+            SYSTEM.with(|s| {
+                let mut s = s.borrow_mut();
+                s.listener_prerender = true;
+                s.listener_busy_until = Some(30);
+                if owner_changed {
+                    s.copy_at = Some(15);
+                } else {
+                    s.same_owner_copy_at = Some(15);
+                }
+            });
+            assert_eq!(transaction(false), Err("manual_paste_clipboard_changed".into()));
+            new_copy_preserved(0);
+        }
+    }
+    #[cfg(not(baseline_v017))]
+    #[test]
+    fn sustained_clipboard_lock_returns_stage_specific_busy_codes_and_cancels_early() {
+        reset(true);
+        SYSTEM.with(|s| s.borrow_mut().prepare_busy_until = Some(1000));
+        assert_eq!(transaction(false), Err("manual_paste_prepare_clipboard_busy".into()));
+        SYSTEM.with(|s| {
+            let s = s.borrow();
+            assert_eq!(s.injected, 0);
+            assert_eq!(s.now, 280);
+            assert_eq!(s.body, "synthetic-original");
+        });
+
+        reset(true);
+        SYSTEM.with(|s| s.borrow_mut().listener_busy_until = Some(400));
+        assert_eq!(transaction(false), Err("manual_paste_begin_clipboard_busy".into()));
+        original_restored(0);
+        SYSTEM.with(|s| assert_eq!(s.borrow().now, 400));
+
+        reset(true);
+        SYSTEM.with(|s| s.borrow_mut().listener_busy_until = Some(1000));
+        assert_eq!(transaction(false), Err(RESTORE_FAILED.into()));
+        SYSTEM.with(|s| assert_eq!(s.borrow().injected, 0));
+
+        reset(true);
+        SYSTEM.with(|s| {
+            let mut s = s.borrow_mut();
+            s.prepare_busy_until = Some(1000);
+            s.cancel_at = Some(10);
+        });
+        assert_eq!(transaction(false), Err(policy::CANCELLED.into()));
+        SYSTEM.with(|s| {
+            let s = s.borrow();
+            assert_eq!(s.injected, 0);
+            assert!(s.now < 50);
+            assert_eq!(s.body, "synthetic-original");
+        });
+
+        reset(true);
+        SYSTEM.with(|s| {
+            let mut s = s.borrow_mut();
+            s.listener_busy_until = Some(400);
+            s.cancel_at = Some(10);
+        });
+        assert_eq!(transaction(false), Err(policy::CANCELLED.into()));
+        original_restored(0);
+        SYSTEM.with(|s| assert!((400..420).contains(&s.borrow().now)));
+    }
 }
 '''
 
@@ -489,14 +673,27 @@ def main() -> int:
               if args.baseline else (ROOT / filename).read_text(encoding="utf-8"))
     inherent = source[source.index("impl WinClipboard {"):]
     settlement = source[source.index("impl WinClipboard {\n    fn settle"):]
-    bodies = {name: function(source, name) for name in ["current_sequence", "empty", "publish", "begin_injection", "observe", "elapsed", "pause", "render"]}
+    base_names = ["current_sequence", "empty", "publish", "begin_injection", "observe", "elapsed", "pause", "render"]
+    bodies = {name: function(source, name) for name in base_names}
     bodies["new"] = function(inherent, "new")
     bodies["settle"] = function(settlement, "settle")
+    inherent_names = ["new", "current_sequence", "empty", "settle"]
+    provider_names = ["publish", "begin_injection", "observe", "elapsed", "pause"]
+    open_bounded = ""
+    if not args.baseline:
+        open_bounded = function(source, "open_bounded")
+        bodies["open_bounded"] = open_bounded
+        for extra in ["prepare_publication_memory", "snapshot_locked", "verify_lease_under_lock"]:
+            bodies[extra] = function(inherent, extra)
+            inherent_names.append(extra)
+        for extra in ["prepare_cancellable", "before_preflight", "begin_injection_cancellable", "reset_injection_gate", "mark_injected"]:
+            bodies[extra] = function(source, extra)
+            provider_names.append(extra)
     definitions = {name: declaration(source, name) for name in ["Context", "WinClipboard"]}
     policy = (ROOT / "desktop/src-tauri/src/protected_paste_policy.rs").as_posix()
     prepare = function(source, "prepare") if not args.baseline else PREPARE.replace("vec![Saved]", "vec![Saved { format: 13 }]")
     bodies["prepare"] = prepare
-    provider = prepare + "\n".join(bodies[name] for name in ["publish", "begin_injection", "observe", "elapsed", "pause"])
+    provider = prepare + "\n".join(bodies[name] for name in provider_names)
     provider += '''
     fn restore(&mut self) -> Result<(), &'static str> { WinClipboard::settle(self, false, &|| false) }
     fn retain_text(&mut self) -> Result<(), &'static str> { WinClipboard::settle(self, true, &|| false) }
@@ -505,9 +702,10 @@ def main() -> int:
         WinClipboard::settle(self, copy, cancelled)
     }
 '''
-    harness = ADAPTERS + f'\n#[path = "{policy}"] mod policy;\n'
+    adapters = ADAPTERS.replace("    // REAL_OPEN_BOUNDED", open_bounded)
+    harness = adapters + f'\n#[path = "{policy}"] mod policy;\n'
     harness += "#[derive(Default)]\n" + definitions["Context"] + "\n" + definitions["WinClipboard"]
-    harness += "\nimpl WinClipboard {\n" + "\n".join(bodies[name] for name in ["new", "current_sequence", "empty", "settle"]) + "\n}\n"
+    harness += "\nimpl WinClipboard {\n" + "\n".join(bodies[name] for name in inherent_names) + "\n}\n"
     harness += "impl Provider for WinClipboard {\n" + provider + "\n}\n" + bodies["render"] + TESTS
     if not args.baseline:
         copy_source = source[source.index("impl CopyLease {"):]
@@ -541,7 +739,11 @@ def main() -> int:
     }, indent=2), encoding="utf-8")
     rustc = shutil.which("rustc") or str(Path.home() / ".cargo/bin/rustc.exe")
     executable = out / (f"publication_{label}.exe" if os.name == "nt" else f"publication_{label}")
-    cfg = ["--cfg", "rdp_delivery_gate"] if args.rdp_delivery_gate else []
+    cfg = []
+    if args.baseline:
+        cfg.extend(["--cfg", "baseline_v017"])
+    if args.rdp_delivery_gate:
+        cfg.extend(["--cfg", "rdp_delivery_gate"])
     compiled = subprocess.run([rustc, "--edition=2021", "--test", *cfg, str(rustfile), "-o", str(executable)], check=False)
     if compiled.returncode:
         return compiled.returncode

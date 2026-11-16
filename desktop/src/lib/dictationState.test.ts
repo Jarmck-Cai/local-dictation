@@ -31,6 +31,7 @@ assert.equal(
   "unavailable key state must not be presented as a held key or generic failure",
 );
 
+assert.equal(pasteErrorCode({ code: "clipboard_busy" }), "clipboard_busy");
 assert.equal(
   pasteErrorCode({ code: "clipboard_restore_failed" }),
   "clipboard_restore_failed",

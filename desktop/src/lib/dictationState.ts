@@ -3,6 +3,7 @@ import type { CloudStatus, DictationTiming } from "./dictationApi";
 export function pasteErrorCode(
   payload: unknown,
 ):
+  | "clipboard_busy"
   | "clipboard_restore_failed"
   | "clipboard_copy_failed"
   | "input_requires_copy"
@@ -16,6 +17,7 @@ export function pasteErrorCode(
       ? (payload as { code?: unknown }).code
       : undefined;
   if (
+    code === "clipboard_busy" ||
     code === "clipboard_restore_failed" ||
     code === "clipboard_copy_failed" ||
     code === "input_requires_copy" ||

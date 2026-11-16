@@ -39,6 +39,7 @@ impl OverlayNotice {
     pub fn report_paste_error(&mut self, code: &str) {
         self.report(Self::PASTE);
         self.paste_error_code = match code {
+            "clipboard_busy" => Some("clipboard_busy"),
             "clipboard_restore_failed" => Some("clipboard_restore_failed"),
             "clipboard_copy_failed" => Some("clipboard_copy_failed"),
             "input_requires_copy" => Some("input_requires_copy"),
@@ -160,6 +161,8 @@ mod tests {
         assert_eq!(notice.paste_error_code(), "failed");
         notice.report_paste_error("input_unconfirmed");
         assert_eq!(notice.paste_error_code(), "input_unconfirmed");
+        notice.report_paste_error("clipboard_busy");
+        assert_eq!(notice.paste_error_code(), "clipboard_busy");
         notice.report(OverlayNotice::PASTE);
         assert_eq!(notice.paste_error_code(), "failed");
     }

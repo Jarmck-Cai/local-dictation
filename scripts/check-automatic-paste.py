@@ -77,6 +77,11 @@ struct SyntheticDesktop {
     retained: bool, published_text: String,
     settle_wait: u64, events: Vec<(&'static str, &'static str)>,
     preflight_wait: u64,
+    begin_lock_wait: u64,
+    prerendered_before_inject: bool,
+    enforce_token_lifetime: bool,
+    preflight_calls: usize,
+    copy_on_second_preflight: bool,
     copy_on_input_lock: bool,
     rdp: bool,
     unicode_calls: usize,
@@ -180,7 +185,7 @@ mod manual_paste {
     fn any_keyboard_key_down() -> Result<bool, &'static str> {
         Ok(DESKTOP.with(|s| s.borrow().keys_held))
     }
-    pub(crate) struct PreparedKeyboard;
+    pub(crate) struct PreparedKeyboard(u64);
     fn bound_high_keys(_: &Settings) -> u16 { 0 }
     pub(crate) fn wait_before_automatic(_: &AppHandle, cancelled: impl Fn() -> bool) -> Result<(), String> {
         if cancelled() { return Err("manual_paste_cancelled".into()); }
@@ -188,14 +193,30 @@ mod manual_paste {
         Ok(())
     }
     pub(crate) fn prepare_keyboard(_: &AppHandle) -> Result<PreparedKeyboard, String> {
-        advance(DESKTOP.with(|s| s.borrow().preflight_wait));
-        if any_keyboard_key_down().unwrap() { Err("keys_held".into()) } else { Ok(PreparedKeyboard) }
+        let wait = DESKTOP.with(|s| {
+            let mut s = s.borrow_mut();
+            s.preflight_calls += 1;
+            if s.preflight_calls == 2 && s.copy_on_second_preflight {
+                s.clipboard = "synthetic-new-user-copy".into();
+                s.ownership_lost = true;
+            }
+            s.preflight_wait
+        });
+        advance(wait);
+        let minted_at = DESKTOP.with(|s| s.borrow().now);
+        if any_keyboard_key_down().unwrap() { Err("keys_held".into()) } else { Ok(PreparedKeyboard(minted_at)) }
     }
-    pub(crate) fn keyboard_is_held(_: &AppHandle, _: &PreparedKeyboard) -> Result<bool, &'static str> {
+    pub(crate) fn keyboard_is_held(_: &AppHandle, prepared: &PreparedKeyboard) -> Result<bool, &'static str> {
+        if DESKTOP.with(|s| { let s = s.borrow(); s.enforce_token_lifetime && s.now.saturating_sub(prepared.0) > 100 }) {
+            return Ok(true);
+        }
         any_keyboard_key_down()
     }
     mod keyboard_state_windows {
-        pub(super) fn fast_check(_: &super::PreparedKeyboard, _: u16) -> Result<bool, &'static str> {
+        pub(super) fn fast_check(prepared: &super::PreparedKeyboard, _: u16) -> Result<bool, &'static str> {
+            if super::DESKTOP.with(|s| { let s = s.borrow(); s.enforce_token_lifetime && s.now.saturating_sub(prepared.0) > 100 }) {
+                return Ok(true);
+            }
             super::any_keyboard_key_down()
         }
     }
@@ -205,7 +226,7 @@ mod protected_paste {
     use super::*;
     mod platform {
         use super::*;
-        struct FakeProvider { original: String, text: String, began: u64 }
+        struct FakeProvider { original: String, text: String, began: u64, injected_at: Option<u64> }
         impl crate::protected_policy::Provider for FakeProvider {
             fn prepare(&mut self, text: &str) -> Result<(), &'static str> {
                 let delay = DESKTOP.with(|s| s.borrow().backup_wait);
@@ -216,6 +237,7 @@ mod protected_paste {
             }
             fn publish(&mut self) -> Result<(), &'static str> {
                 self.began = DESKTOP.with(|s| s.borrow().now);
+                self.injected_at = None;
                 DESKTOP.with(|s| { let mut s = s.borrow_mut();
                     s.clipboard = self.text.clone(); s.published_text = self.text.clone();
                     s.read_at = None; s.ownership_lost = false; s.retained = false;
@@ -223,14 +245,25 @@ mod protected_paste {
                 Ok(())
             }
             fn begin_injection(&mut self) -> Result<(), &'static str> {
+                let wait = DESKTOP.with(|s| std::mem::take(&mut s.borrow_mut().begin_lock_wait));
+                if wait > 0 { advance(wait); }
                 if self.ownership_lost() { Err("manual_paste_clipboard_changed") } else { Ok(()) }
             }
+            fn mark_injected(&mut self) {
+                self.injected_at = Some(DESKTOP.with(|s| s.borrow().now));
+            }
             fn observe(&mut self) -> Result<crate::protected_policy::Observation, &'static str> {
-                DESKTOP.with(|s| { let s = s.borrow(); Ok(crate::protected_policy::Observation {
-                    read: s.read_at.is_some(),
-                    quiet_for: s.read_at.map(|at| Duration::from_millis(s.now - at)),
-                    ownership_lost: s.ownership_lost,
-                }) })
+                DESKTOP.with(|s| { let s = s.borrow();
+                    let pre = s.prerendered_before_inject.then(|| {
+                        Duration::from_millis(s.now - self.injected_at.unwrap_or(self.began))
+                    });
+                    Ok(crate::protected_policy::Observation {
+                        read: !s.prerendered_before_inject && s.read_at.is_some(),
+                        quiet_for: (!s.prerendered_before_inject).then_some(s.read_at).flatten().map(|at| Duration::from_millis(s.now - at)),
+                        pre_rendered_for: pre,
+                        ownership_lost: s.ownership_lost,
+                    })
+                })
             }
             fn elapsed(&self) -> Duration { Duration::from_millis(DESKTOP.with(|s| s.borrow().now) - self.began) }
             fn pause(&mut self) { advance(10); }
@@ -264,10 +297,10 @@ mod protected_paste {
                 })
             }
         }
-        pub(super) fn run_with_preflight(text: &str, preflight: impl FnOnce() -> Result<(), String>, inject: impl FnOnce() -> Result<(), String>,
+        pub(super) fn run_with_preflight(text: &str, preflight: impl FnMut() -> Result<(), String>, inject: impl FnOnce() -> Result<(), String>,
             cancelled: impl Fn() -> bool, copy: bool) -> Result<bool, String> {
             DESKTOP.with(|s| s.borrow_mut().protected_calls += 1);
-            let mut provider = FakeProvider { original: String::new(), text: String::new(), began: 0 };
+            let mut provider = FakeProvider { original: String::new(), text: String::new(), began: 0, injected_at: None };
             crate::protected_policy::transact_with_preflight(&mut provider, text, preflight, inject, cancelled, copy)
         }
     }
@@ -537,12 +570,64 @@ mod automatic_tests {
     #[test]
     fn real_actions_error_helper_emits_only_whitelisted_codes() {
         let app = app(10, PasteMethod::CtrlV, false);
-        for error in ["manual_paste_restore_failed", "automatic_paste_unconfirmed", "private synthetic detail"] {
+        for error in [
+            "manual_paste_prepare_clipboard_busy",
+            "manual_paste_begin_clipboard_busy",
+            "manual_paste_restore_failed",
+            "automatic_paste_unconfirmed",
+            "private synthetic detail",
+        ] {
             emit_paste_error(&app, error);
         }
         DESKTOP.with(|s| assert_eq!(s.borrow().events, vec![
+            ("paste-error", "clipboard_busy"),
+            ("paste-error", "clipboard_busy"),
             ("paste-error", "clipboard_restore_failed"),
             ("paste-error", "input_unconfirmed"), ("paste-error", "failed")]));
+    }
+    #[test]
+    fn automatic_and_manual_shortcut_recover_from_monitor_prerender_and_refresh_expired_token() {
+        for manual in [false, true] {
+            let handle = app(200, PasteMethod::CtrlV, manual);
+            DESKTOP.with(|s| {
+                let mut s = s.borrow_mut();
+                s.enforce_token_lifetime = true;
+                s.begin_lock_wait = 130;
+                s.prerendered_before_inject = true;
+            });
+            if manual {
+                assert_eq!(paste_latest_preserving_clipboard("synthetic-current".into(), handle, cancelled), Ok(true));
+            } else {
+                assert_eq!(super::paste_cancellable("synthetic-current".into(), handle, cancelled), Ok(Submission::ClipboardReadObserved));
+            }
+            DESKTOP.with(|s| {
+                let s = s.borrow();
+                assert_eq!(s.preflight_calls, 2, "manual={} must refresh PreparedKeyboard after >100ms lock wait", manual);
+                assert_eq!(s.chord_times.len(), 1);
+                assert_eq!(s.received, vec!["synthetic-current"]);
+                assert_eq!(s.clipboard, "synthetic-previous-transcript");
+                assert!((710..1000).contains(&s.now));
+            });
+
+            let handle = app(200, PasteMethod::CtrlV, false);
+            DESKTOP.with(|s| {
+                let mut s = s.borrow_mut();
+                s.enforce_token_lifetime = true;
+                s.begin_lock_wait = 130;
+                s.copy_on_second_preflight = true;
+            });
+            let rejected = if manual {
+                paste_latest_preserving_clipboard("synthetic-current".into(), handle, cancelled).err()
+            } else {
+                super::paste_cancellable("synthetic-current".into(), handle, cancelled).err()
+            };
+            assert_eq!(rejected, Some("manual_paste_clipboard_changed".into()));
+            DESKTOP.with(|s| {
+                let s = s.borrow();
+                assert!(s.chord_times.is_empty());
+                assert_eq!(s.clipboard, "synthetic-new-user-copy");
+            });
+        }
     }
 }
 '''
@@ -727,6 +812,9 @@ def main() -> int:
                          .replace("// REAL_AUTOMATIC_WRAPPER", wrapper))
         if args.late_preflight:
             safe_adapters = safe_adapters.replace(
+                "pub(super) fn run_with_preflight(text: &str, preflight: impl FnMut()",
+                "pub(super) fn run_with_preflight(text: &str, mut preflight: impl FnMut()"
+            ).replace(
                 "crate::protected_policy::transact_with_preflight(&mut provider, text, preflight, inject, cancelled, copy)",
                 "crate::protected_policy::transact_with_retention(&mut provider, text, || { preflight()?; inject() }, cancelled, copy)")
     harness = (ADAPTERS + f'\n#[path = "{delivery}"] mod paste_delivery;\n'

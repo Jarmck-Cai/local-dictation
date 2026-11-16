@@ -1036,6 +1036,8 @@
         "manual_paste_backup_failed": "Could not safely save the clipboard. No paste was made.",
         "manual_paste_unsupported_format": "The clipboard has a format that cannot be restored safely. No paste was made.",
         "manual_paste_clipboard_busy": "The clipboard is busy. No paste was made; try again shortly.",
+        "manual_paste_prepare_clipboard_busy": "Another app is holding the clipboard. No paste was made; try again shortly.",
+        "manual_paste_begin_clipboard_busy": "Another app held the clipboard after preparing paste data. No paste was made; try again shortly.",
         "manual_paste_clipboard_changed": "Newly copied content was preserved. Please check the input field.",
         "manual_paste_publish_failed": "Could not prepare paste data. Check the input; no automatic retry.",
         "manual_paste_render_failed": "Could not provide complete paste data. Check the input; no automatic retry.",
@@ -1079,6 +1081,10 @@
       }
     },
     "autoPaste": {
+      "clipboard_busy": {
+        "title": "Clipboard is busy",
+        "description": "Another app is holding the clipboard, so no text was inserted. Place the cursor in the target field and try your manual paste shortcut shortly, or copy the result."
+      },
       "clipboard_copy_failed": {
         "title": "Input submitted; clipboard copy incomplete",
         "description": "Check the remote input field and clipboard before trying again. The text remains in recent transcriptions."

@@ -5,10 +5,32 @@ pub(crate) const CANCELLED: &str = "manual_paste_cancelled";
 pub(crate) const INJECTION_FAILED: &str = "manual_paste_injection_failed";
 pub(crate) const RESTORE_FAILED: &str = "manual_paste_restore_failed";
 pub(crate) const LIMIT_EXCEEDED: &str = "manual_paste_backup_too_large";
+pub(crate) const PREPARE_BUSY: &str = "manual_paste_prepare_clipboard_busy";
+pub(crate) const BEGIN_BUSY: &str = "manual_paste_begin_clipboard_busy";
 pub(crate) const MAX_FORMATS: usize = 64;
 pub(crate) const MAX_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(3);
 pub(crate) const READ_QUIET: Duration = Duration::from_millis(150);
+pub(crate) const PRE_RENDERED_QUIET: Duration = Duration::from_millis(480);
+pub(crate) const OPEN_CLIPBOARD_TIMEOUT: Duration = Duration::from_millis(280);
+pub(crate) const OPEN_BACKOFF_INITIAL: Duration = Duration::from_millis(2);
+pub(crate) const OPEN_BACKOFF_MAX_STEP: Duration = Duration::from_millis(15);
+pub(crate) const PREFLIGHT_REFRESH_AGE: Duration = Duration::from_millis(50);
+pub(crate) const MAX_PREFLIGHT_ATTEMPTS: usize = 3;
+
+pub(crate) fn open_retry_delay(
+    step: Duration,
+    elapsed: Duration,
+    timeout: Duration,
+) -> Option<(Duration, Duration)> {
+    let remaining = timeout.checked_sub(elapsed)?;
+    if remaining.is_zero() {
+        return None;
+    }
+    let wait = step.min(OPEN_BACKOFF_MAX_STEP).min(remaining);
+    let next_step = step.saturating_mul(2).min(OPEN_BACKOFF_MAX_STEP);
+    Some((wait, next_step))
+}
 
 /// Valid only while the provider holds its clipboard lock.
 pub(crate) fn same_lease(
@@ -54,6 +76,7 @@ pub(crate) fn safe_global_format(format: u32, name: Option<&str>) -> bool {
                         | "ExcludeClipboardContentFromMonitorProcessing"
                         | "CanIncludeInClipboardHistory"
                         | "CanUploadToCloudClipboard"
+                        | "Clipboard Viewer Ignore"
                 )
             ))
 }
@@ -79,12 +102,15 @@ impl Budget {
 pub(crate) struct Observation {
     pub read: bool,
     pub quiet_for: Option<Duration>,
+    pub pre_rendered_for: Option<Duration>,
     pub ownership_lost: bool,
 }
 pub(crate) fn finished(elapsed: Duration, o: Observation) -> bool {
     o.ownership_lost
         || elapsed >= READ_TIMEOUT
         || (o.read && o.quiet_for.is_some_and(|quiet| quiet >= READ_QUIET))
+        || o.pre_rendered_for
+            .is_some_and(|quiet| quiet >= PRE_RENDERED_QUIET)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,8 +150,28 @@ pub(crate) fn settlement_result(cancelled: bool) -> Result<(), &'static str> {
 
 pub(crate) trait Provider {
     fn prepare(&mut self, text: &str) -> Result<(), &'static str>;
+    fn prepare_cancellable(
+        &mut self,
+        text: &str,
+        _is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), &'static str> {
+        self.prepare(text)
+    }
     fn publish(&mut self) -> Result<(), &'static str>;
+    /// Pump owner messages and absorb immediate post-close listener contention
+    /// before minting a short-lived keyboard token.
+    fn before_preflight(&mut self, _is_cancelled: &dyn Fn() -> bool) -> Result<(), &'static str> {
+        Ok(())
+    }
     fn begin_injection(&mut self) -> Result<(), &'static str>;
+    fn begin_injection_cancellable(
+        &mut self,
+        _is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), &'static str> {
+        self.begin_injection()
+    }
+    fn reset_injection_gate(&mut self) {}
+    fn mark_injected(&mut self) {}
     fn observe(&mut self) -> Result<Observation, &'static str>;
     fn elapsed(&self) -> Duration;
     fn pause(&mut self);
@@ -186,7 +232,7 @@ pub(crate) fn transact_with_retention<P: Provider>(
 pub(crate) fn transact_with_preflight<P: Provider>(
     provider: &mut P,
     text: &str,
-    preflight: impl FnOnce() -> Result<(), String>,
+    mut preflight: impl FnMut() -> Result<(), String>,
     inject: impl FnOnce() -> Result<(), String>,
     is_cancelled: impl Fn() -> bool,
     copy_result: bool,
@@ -194,7 +240,7 @@ pub(crate) fn transact_with_preflight<P: Provider>(
     if is_cancelled() {
         return Err(CANCELLED.into());
     }
-    provider.prepare(text)?;
+    provider.prepare_cancellable(text, &is_cancelled)?;
     if is_cancelled() {
         return Err(CANCELLED.into());
     }
@@ -204,19 +250,35 @@ pub(crate) fn transact_with_preflight<P: Provider>(
         if is_cancelled() {
             return Err(CANCELLED);
         }
-        // A keyboard/source barrier can wait. It MUST precede the final lease
-        // check so a new copy during that wait cannot authorize an old paste.
-        preflight().map_err(|error| match error.as_str() {
-            CANCELLED => CANCELLED,
-            "keys_held" => "keys_held",
-            _ => "keyboard_unavailable",
-        })?;
-        if is_cancelled() {
-            return Err(CANCELLED);
-        }
-        provider.begin_injection()?;
-        if is_cancelled() {
-            return Err(CANCELLED);
+        provider.before_preflight(&is_cancelled)?;
+        let mut attempts = 0usize;
+        loop {
+            if attempts > 0 && is_cancelled() {
+                return Err(CANCELLED);
+            }
+            // A keyboard/source barrier can wait. It MUST precede the final lease
+            // check so a new copy during that wait cannot authorize an old paste.
+            preflight().map_err(|error| match error.as_str() {
+                CANCELLED => CANCELLED,
+                "keys_held" => "keys_held",
+                _ => "keyboard_unavailable",
+            })?;
+            if is_cancelled() {
+                return Err(CANCELLED);
+            }
+            let token_minted_at = provider.elapsed();
+            provider.begin_injection_cancellable(&is_cancelled)?;
+            if is_cancelled() {
+                return Err(CANCELLED);
+            }
+            if provider.elapsed().saturating_sub(token_minted_at) < PREFLIGHT_REFRESH_AGE {
+                break;
+            }
+            provider.reset_injection_gate();
+            attempts += 1;
+            if attempts >= MAX_PREFLIGHT_ATTEMPTS {
+                return Err(BEGIN_BUSY);
+            }
         }
         inject().map_err(|error| match error.as_str() {
             CANCELLED => CANCELLED,
@@ -225,6 +287,7 @@ pub(crate) fn transact_with_preflight<P: Provider>(
             "unsupported" => "unsupported",
             _ => INJECTION_FAILED,
         })?;
+        provider.mark_injected();
         loop {
             if is_cancelled() {
                 return Err(CANCELLED);
@@ -234,7 +297,11 @@ pub(crate) fn transact_with_preflight<P: Provider>(
                 if is_cancelled() {
                     return Err(CANCELLED);
                 }
-                return Ok(observed.read && !observed.ownership_lost);
+                let delivered = observed.read
+                    || observed
+                        .pre_rendered_for
+                        .is_some_and(|quiet| quiet >= PRE_RENDERED_QUIET);
+                return Ok(delivered && !observed.ownership_lost);
             }
             provider.pause();
         }
@@ -302,6 +369,7 @@ mod tests {
             Ok(Observation {
                 read: self.observed,
                 quiet_for: self.observed.then_some(self.elapsed),
+                pre_rendered_for: None,
                 ownership_lost: self.concurrent_copy,
             })
         }
@@ -522,6 +590,7 @@ mod tests {
                 Ok(Observation {
                     read: true,
                     quiet_for: Some(READ_QUIET),
+                    pre_rendered_for: None,
                     ownership_lost: false,
                 })
             }
@@ -754,6 +823,7 @@ mod tests {
             Observation {
                 read: true,
                 quiet_for: Some(Duration::from_millis(149)),
+                pre_rendered_for: None,
                 ownership_lost: false
             }
         ));
@@ -762,6 +832,25 @@ mod tests {
             Observation {
                 read: true,
                 quiet_for: Some(Duration::from_millis(150)),
+                pre_rendered_for: None,
+                ownership_lost: false
+            }
+        ));
+        assert!(!finished(
+            Duration::from_millis(479),
+            Observation {
+                read: false,
+                quiet_for: None,
+                pre_rendered_for: Some(Duration::from_millis(479)),
+                ownership_lost: false
+            }
+        ));
+        assert!(finished(
+            Duration::from_millis(480),
+            Observation {
+                read: false,
+                quiet_for: None,
+                pre_rendered_for: Some(PRE_RENDERED_QUIET),
                 ownership_lost: false
             }
         ));
@@ -794,6 +883,7 @@ mod tests {
         }
         assert!(safe_global_format(0xc012, Some("HTML Format")));
         assert!(safe_global_format(0xc013, Some("Rich Text Format")));
+        assert!(safe_global_format(0xc015, Some("Clipboard Viewer Ignore")));
         assert!(!safe_global_format(
             0xc014,
             Some("Unknown application private object")
@@ -865,5 +955,138 @@ mod tests {
             assert_eq!(p.current, "original rich content");
             assert_eq!(p.log, ["prepare", "publish", "begin", "restore"]);
         }
+    }
+    #[test]
+    fn open_retry_delay_follows_exponential_backoff_and_caps_at_budget() {
+        let mut step = OPEN_BACKOFF_INITIAL;
+        let mut elapsed = Duration::ZERO;
+        let mut waits = Vec::new();
+        while let Some((wait, next)) = open_retry_delay(step, elapsed, OPEN_CLIPBOARD_TIMEOUT) {
+            waits.push(wait.as_millis() as u64);
+            elapsed += wait;
+            step = next;
+        }
+        assert_eq!(&waits[..4], &[2, 4, 8, 15]);
+        assert!(waits.iter().all(|&ms| ms > 0 && ms <= 15));
+        assert_eq!(elapsed, OPEN_CLIPBOARD_TIMEOUT);
+        assert!(open_retry_delay(step, elapsed, OPEN_CLIPBOARD_TIMEOUT).is_none());
+        assert_ne!(PREPARE_BUSY, BEGIN_BUSY);
+    }
+    #[test]
+    fn lock_wait_past_token_refresh_age_refreshes_preflight_and_rechecks_lease() {
+        struct ContendedBegin {
+            now: Duration,
+            begin_waits: Vec<Duration>,
+            resets: usize,
+            copy_on_second_preflight: bool,
+            ownership_lost: bool,
+            restored: bool,
+        }
+        impl Provider for ContendedBegin {
+            fn prepare(&mut self, _: &str) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn publish(&mut self) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn begin_injection(&mut self) -> Result<(), &'static str> {
+                if let Some(wait) = self.begin_waits.first().copied() {
+                    self.begin_waits.remove(0);
+                    self.now += wait;
+                }
+                if self.ownership_lost {
+                    Err("manual_paste_clipboard_changed")
+                } else {
+                    Ok(())
+                }
+            }
+            fn reset_injection_gate(&mut self) {
+                self.resets += 1;
+                if self.copy_on_second_preflight {
+                    self.ownership_lost = true;
+                }
+            }
+            fn observe(&mut self) -> Result<Observation, &'static str> {
+                Ok(Observation {
+                    read: true,
+                    quiet_for: Some(READ_QUIET),
+                    pre_rendered_for: None,
+                    ownership_lost: self.ownership_lost,
+                })
+            }
+            fn elapsed(&self) -> Duration {
+                self.now
+            }
+            fn pause(&mut self) {
+                self.now += Duration::from_millis(10);
+            }
+            fn restore(&mut self) -> Result<(), &'static str> {
+                self.restored = true;
+                Ok(())
+            }
+            fn ownership_lost(&self) -> bool {
+                self.ownership_lost
+            }
+        }
+        let clock = std::rc::Rc::new(Cell::new(0u64));
+        let token_at = std::rc::Rc::new(Cell::new(0u64));
+        let preflights = Cell::new(0usize);
+        let mut p = ContendedBegin {
+            now: Duration::ZERO,
+            begin_waits: vec![Duration::from_millis(120), Duration::ZERO],
+            resets: 0,
+            copy_on_second_preflight: false,
+            ownership_lost: false,
+            restored: false,
+        };
+        let clock_for_preflight = std::rc::Rc::clone(&clock);
+        let token_for_preflight = std::rc::Rc::clone(&token_at);
+        let result = transact_with_preflight(
+            &mut p,
+            "hello",
+            || {
+                preflights.set(preflights.get() + 1);
+                // First preflight at 0ms, refreshed at 120ms after the slow lock wait.
+                let now_ms = if preflights.get() == 1 { 0 } else { 120 };
+                clock_for_preflight.set(now_ms);
+                token_for_preflight.set(now_ms);
+                Ok(())
+            },
+            || {
+                // Enforce the real 100ms PreparedKeyboard token lifetime.
+                if 120u64.saturating_sub(token_at.get()) > 100 {
+                    Err("keys_held".into())
+                } else {
+                    Ok(())
+                }
+            },
+            || false,
+            false,
+        );
+        assert_eq!(result, Ok(true));
+        assert_eq!(preflights.get(), 2);
+        assert_eq!(p.resets, 1);
+        assert!(p.restored);
+
+        // A user copy during the refreshed preflight is caught by the re-run lease check.
+        let mut p2 = ContendedBegin {
+            now: Duration::ZERO,
+            begin_waits: vec![Duration::from_millis(120), Duration::ZERO],
+            resets: 0,
+            copy_on_second_preflight: true,
+            ownership_lost: false,
+            restored: false,
+        };
+        assert_eq!(
+            transact_with_preflight(
+                &mut p2,
+                "hello",
+                || Ok(()),
+                || panic!("must not inject over a new copy"),
+                || false,
+                false,
+            ),
+            Err("manual_paste_clipboard_changed".into())
+        );
     }
 }

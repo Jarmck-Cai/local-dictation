@@ -139,6 +139,8 @@ fn main() {
     scenario("live-without-streaming", OverlayStyle::Live, false, None, false, false, false, false);
     paste_error_scenario("held-key", "keys_held");
     paste_error_scenario("state-unavailable", "keyboard_unavailable");
+    paste_error_scenario("prepare-busy", "manual_paste_prepare_clipboard_busy");
+    paste_error_scenario("begin-busy", "manual_paste_begin_clipboard_busy");
     paste_error_scenario("restore-failed", "manual_paste_restore_failed");
     paste_error_scenario("unconfirmed", "automatic_paste_unconfirmed");
     paste_error_scenario("unicode-partial", "rdp_input_uncertain");
@@ -232,6 +234,8 @@ paste_errors = json.loads(result.stdout)
 expected_errors = {
     "held-key": "keys_held",
     "state-unavailable": "keyboard_unavailable",
+    "prepare-busy": "clipboard_busy",
+    "begin-busy": "clipboard_busy",
     "restore-failed": "clipboard_restore_failed",
     "unconfirmed": "input_unconfirmed",
     "unicode-partial": "input_unconfirmed",
@@ -267,8 +271,14 @@ for (const language of ["en", "zh"]) {
     if (actual === unknown) throw new Error(`${language}: submitted input displayed as unknown (${outcome})`);
   }
   const manualFallback = instance.t("dictation.manualPaste.failed");
-  const manual = instance.t("dictation.manualPaste.errors.manual_paste_requires_copy", {defaultValue: manualFallback});
-  if (manual === manualFallback) throw new Error(`${language}: unsupported manual input lacks explicit copy guidance`);
+  for (const key of [
+    "manual_paste_requires_copy",
+    "manual_paste_prepare_clipboard_busy",
+    "manual_paste_begin_clipboard_busy",
+  ]) {
+    const manual = instance.t(`dictation.manualPaste.errors.${key}`, {defaultValue: manualFallback});
+    if (manual === manualFallback) throw new Error(`${language}: manual paste error ${key} fell back to generic failure`);
+  }
   console.log(`PASS timing outcomes: ${language}, software submission retains dedicated status`);
 }
 '''
