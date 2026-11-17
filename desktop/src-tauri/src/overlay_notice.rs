@@ -118,6 +118,16 @@ impl OverlayNotice {
         self.shown();
         true
     }
+
+    pub fn acknowledge_paste_recovery(&mut self) -> bool {
+        if self.failures & Self::PASTE == 0 {
+            return false;
+        }
+        self.failures &= !Self::PASTE;
+        self.paste_error_code = None;
+        self.shown();
+        true
+    }
 }
 
 #[cfg(test)]
@@ -290,5 +300,30 @@ mod tests {
         notice.recording_ready();
         assert_eq!(notice.progress(), None);
         assert!(!notice.capture_ready());
+    }
+
+    #[test]
+    fn shortcut_recovery_clears_paste_error_without_erasing_other_faults() {
+        let mut notice = OverlayNotice::default();
+        assert!(!notice.acknowledge_paste_recovery());
+
+        notice.report_paste_error("keys_held");
+        assert_eq!(notice.failures(), OverlayNotice::PASTE);
+        assert!(notice.acknowledge_paste_recovery());
+        assert_eq!(notice.failures(), 0);
+        assert_eq!(notice.paste_error_code(), "failed");
+        assert!(notice.hide_ticket().is_some());
+
+        // Playback or capture-busy faults remain visible when only paste recovered.
+        notice.report_paste_error("clipboard_busy");
+        notice.report(OverlayNotice::PLAYBACK);
+        assert!(notice.acknowledge_paste_recovery());
+        assert_eq!(notice.failures(), OverlayNotice::PLAYBACK);
+        assert!(notice.hide_ticket().is_none());
+
+        notice.dismiss(notice.failure_generation());
+        notice.report(OverlayNotice::CAPTURE_BUSY);
+        assert!(!notice.acknowledge_paste_recovery());
+        assert_eq!(notice.failures(), OverlayNotice::CAPTURE_BUSY);
     }
 }

@@ -353,9 +353,10 @@
       },
       "clipboardHandling": {
         "title": "Clipboard Handling",
-        "description": "Try to restore the original clipboard, or keep this transcript. On Windows, the transcript remains if the original content cannot be restored. Anything newly copied takes priority.",
+        "description": "Try to restore the original clipboard, keep the transcript only when auto-paste fails, or always copy it. On Windows, the transcript remains if the original content cannot be restored. Anything newly copied takes priority.",
         "options": {
           "dontModify": "Try to Restore Original Content",
+          "copyOnFailure": "Copy to Clipboard When Auto-Paste Fails",
           "copyToClipboard": "Copy to Clipboard"
         }
       },

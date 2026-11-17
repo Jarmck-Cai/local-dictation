@@ -8,10 +8,12 @@
 #[path = "protected_paste_windows.rs"]
 mod platform;
 #[cfg(target_os = "windows")]
-pub(crate) use platform::CopyLease;
+pub(crate) use platform::{copy_if_unchanged, ClipboardBaseline, CopyLease};
 #[cfg(any(target_os = "windows", test))]
 #[path = "protected_paste_policy.rs"]
 mod policy;
+#[cfg(target_os = "windows")]
+pub(crate) use policy::Retention;
 
 /// Borrow the clipboard, invoke `inject` once, and settle before returning.
 /// This function uses the calling worker thread, including its message pump.
@@ -52,4 +54,15 @@ pub(crate) fn run_with_preflight(
     copy_result: bool,
 ) -> Result<bool, String> {
     platform::run_with_preflight(text, preflight, inject, is_cancelled, copy_result)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn run_with_preflight_and_retention(
+    text: &str,
+    preflight: impl FnMut() -> Result<(), String>,
+    inject: impl FnOnce() -> Result<(), String>,
+    is_cancelled: impl Fn() -> bool,
+    retention: Retention,
+) -> Result<bool, String> {
+    platform::run_with_preflight_and_retention(text, preflight, inject, is_cancelled, retention)
 }

@@ -814,33 +814,57 @@ fn paste_automatic_windows(
     text: &str,
     app_handle: &AppHandle,
     paste_method: PasteMethod,
-    copy_result: bool,
+    clipboard_handling: ClipboardHandling,
     is_cancelled: &impl Fn() -> bool,
 ) -> Result<Submission, String> {
     with_enigo(app_handle, |enigo| {
         if is_cancelled() {
             return Ok(Submission::Cancelled);
         }
+        let retention = match clipboard_handling {
+            ClipboardHandling::DontModify => crate::protected_paste::Retention::Restore,
+            ClipboardHandling::CopyToClipboard => crate::protected_paste::Retention::CopyOnSuccess,
+            ClipboardHandling::CopyOnFailure => crate::protected_paste::Retention::CopyOnFailure,
+        };
+        let copy_on_failure_baseline = (clipboard_handling == ClipboardHandling::CopyOnFailure)
+            .then(crate::protected_paste::ClipboardBaseline::capture);
+        let retain_early_failure = |error: String| -> Result<Submission, String> {
+            if let Some(baseline) = copy_on_failure_baseline {
+                if error != "manual_paste_cancelled"
+                    && error != "manual_paste_clipboard_changed"
+                    && error != "rdp_input_submitted_copy_failed"
+                {
+                    let _ = crate::protected_paste::copy_if_unchanged(text, baseline, is_cancelled);
+                }
+            }
+            Err(error)
+        };
         match crate::manual_paste::wait_before_automatic(app_handle, is_cancelled) {
             Ok(()) => {}
             Err(code) if code == "manual_paste_cancelled" => return Ok(Submission::Cancelled),
-            Err(code) => return Err(code),
+            Err(code) => return retain_early_failure(code),
         }
-        if let Some(target) = crate::rdp_input::platform::capture()? {
-            return submit_mstsc(target, text, app_handle, copy_result, is_cancelled)
-                .map(|()| Submission::UnicodeSubmitted)
-                .or_else(|code| {
-                    if code == "manual_paste_cancelled" {
-                        Ok(Submission::Cancelled)
-                    } else {
-                        Err(code)
-                    }
-                });
+        let target = match crate::rdp_input::platform::capture() {
+            Ok(target) => target,
+            Err(code) => return retain_early_failure(code),
+        };
+        if let Some(target) = target {
+            return match submit_mstsc(
+                target,
+                text,
+                app_handle,
+                clipboard_handling == ClipboardHandling::CopyToClipboard,
+                is_cancelled,
+            ) {
+                Ok(()) => Ok(Submission::UnicodeSubmitted),
+                Err(code) if code == "manual_paste_cancelled" => Ok(Submission::Cancelled),
+                Err(code) => retain_early_failure(code),
+            };
         }
         let prepared = std::cell::RefCell::new(None);
         // Acquire the keyboard lock before borrowing the clipboard: an Enigo
         // wait must not sit between the transaction's lease check and its chord.
-        match crate::protected_paste::run_with_preflight(
+        match crate::protected_paste::run_with_preflight_and_retention(
             text,
             || {
                 *prepared.borrow_mut() = Some(crate::manual_paste::prepare_keyboard(app_handle)?);
@@ -858,11 +882,22 @@ fn paste_automatic_windows(
                 )
             },
             is_cancelled,
-            copy_result,
+            retention,
         ) {
             Ok(true) => Ok(Submission::ClipboardReadObserved),
             Ok(false) => Err("automatic_paste_unconfirmed".into()),
             Err(code) if code == "manual_paste_cancelled" => Ok(Submission::Cancelled),
+            Err(code)
+                if matches!(
+                    code.as_str(),
+                    "manual_paste_prepare_clipboard_busy"
+                        | "manual_paste_backup_failed"
+                        | "manual_paste_backup_too_large"
+                        | "manual_paste_unavailable"
+                ) =>
+            {
+                retain_early_failure(code)
+            }
             Err(code) => Err(code),
         }
     })
@@ -951,7 +986,7 @@ fn paste_with_cancellation(
                     &text,
                     &app_handle,
                     paste_method,
-                    settings.clipboard_handling == ClipboardHandling::CopyToClipboard,
+                    settings.clipboard_handling,
                     &is_cancelled,
                 );
             }
@@ -974,15 +1009,24 @@ fn paste_with_cancellation(
                     .map(|()| Submission::LegacySubmitted)
                 });
             }
-            if !paste_via_clipboard(
+            match paste_via_clipboard(
                 &text,
                 &app_handle,
                 &paste_method,
                 paste_delay_ms,
                 paste_delay_after_ms,
                 &is_cancelled,
-            )? {
-                return Ok(Submission::Cancelled);
+            ) {
+                Ok(false) => return Ok(Submission::Cancelled),
+                Ok(true) => {}
+                Err(error) => {
+                    if settings.clipboard_handling == ClipboardHandling::CopyOnFailure
+                        && !is_cancelled()
+                    {
+                        let _ = write_text_to_clipboard(&app_handle, &text);
+                    }
+                    return Err(error);
+                }
             }
         }
     }

@@ -171,12 +171,33 @@ const RecordingOverlay: React.FC = () => {
         if (payload.kind) setWorkKind(payload.kind);
       });
 
+      const unlistenShortcutCopy = await listen<boolean>(
+        "dictation-copy-result",
+        (event) => {
+          if (disposed || event.payload !== true) return;
+          void copyController.handleShortcutRecovery();
+        },
+      );
+
+      const unlistenShortcutPaste = await listen<{ outcome?: string }>(
+        "dictation-manual-paste",
+        (event) => {
+          if (disposed) return;
+          const outcome = event.payload?.outcome;
+          if (outcome === "read_observed" || outcome === "input_sent") {
+            void copyController.handleShortcutRecovery();
+          }
+        },
+      );
+
       return () => {
         unlistenUpdate();
         unlistenHide();
         unlistenLevel();
         unlistenStream();
         unlistenPhase();
+        unlistenShortcutCopy();
+        unlistenShortcutPaste();
       };
     };
 

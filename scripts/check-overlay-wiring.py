@@ -148,6 +148,15 @@ fn main() {
     paste_error_scenario("unicode-requires-copy", "rdp_input_too_long");
     paste_error_scenario("target-changed", "input_target_changed");
     paste_error_scenario("unknown", "private synthetic detail");
+
+    // Shortcut-driven paste/copy recovery clears only the paste error bit.
+    *OVERLAY_NOTICE.lock().unwrap() = OverlayNotice::new();
+    let app = AppHandle { settings: Settings { overlay_style: OverlayStyle::None }, emitted: Mutex::new(vec![]) };
+    OVERLAY_NOTICE.lock().unwrap().report_paste_error("keys_held");
+    assert!(OVERLAY_NOTICE.lock().unwrap().acknowledge_paste_recovery());
+    let cleared = sync_overlay_on_main(&app);
+    assert_eq!(cleared.state, None);
+    assert_eq!(cleared.update.failures, 0);
 }
 '''.replace("NOTICE_PATH", notice_path).replace("DELIVERY_PATH", delivery_path).replace("SNAPSHOT", snapshot).replace("WRAPPERS", wrappers).replace("SYNC", sync).replace("ENTRY", entry)
 OUTPUTS.mkdir(exist_ok=True)

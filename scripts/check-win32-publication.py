@@ -656,6 +656,46 @@ mod publication_tests {
         original_restored(0);
         SYSTEM.with(|s| assert!((400..420).contains(&s.borrow().now)));
     }
+    #[cfg(not(baseline_v017))]
+    #[test]
+    fn cold_boot_zero_clipboard_sequence_succeeds_under_lock_and_protects_new_copy() {
+        // Fresh Windows session before any clipboard write: sequence == 0, owner == 0, empty formats.
+        SYSTEM.with(|s| {
+            *s.borrow_mut() = SyntheticSystem {
+                sequence: 0,
+                owner: 0,
+                formats: Vec::new(),
+                body: "empty",
+                originally_empty: true,
+                close_synthesis: true,
+                ..Default::default()
+            };
+        });
+        assert_eq!(transaction(false), Ok(true));
+        SYSTEM.with(|s| {
+            let s = s.borrow();
+            assert_eq!(s.injected, 1);
+            assert_eq!(s.body, "empty");
+            assert!(s.formats.is_empty());
+            assert!(s.sequence > 0);
+        });
+
+        // Concurrent user copy during cold-boot first paste still aborts injection and preserves new copy.
+        SYSTEM.with(|s| {
+            *s.borrow_mut() = SyntheticSystem {
+                sequence: 0,
+                owner: 0,
+                formats: Vec::new(),
+                body: "empty",
+                originally_empty: true,
+                close_synthesis: true,
+                copy_before_begin: true,
+                ..Default::default()
+            };
+        });
+        assert_eq!(transaction(false), Err("manual_paste_clipboard_changed".into()));
+        new_copy_preserved(0);
+    }
 }
 '''
 
@@ -677,6 +717,10 @@ def main() -> int:
     bodies = {name: function(source, name) for name in base_names}
     bodies["new"] = function(inherent, "new")
     bodies["settle"] = function(settlement, "settle")
+    if args.baseline and "pre_rendered_for:" not in bodies["observe"]:
+        bodies["observe"] = bodies["observe"].replace(
+            "ownership_lost:", "pre_rendered_for: None, ownership_lost:"
+        )
     inherent_names = ["new", "current_sequence", "empty", "settle"]
     provider_names = ["publish", "begin_injection", "observe", "elapsed", "pause"]
     open_bounded = ""
@@ -709,6 +753,10 @@ def main() -> int:
     harness += "impl Provider for WinClipboard {\n" + provider + "\n}\n" + bodies["render"] + TESTS
     if not args.baseline:
         copy_source = source[source.index("impl CopyLease {"):]
+        harness += "#[derive(Clone, Copy)]\n" + declaration(source, "ClipboardBaseline")
+        baseline_source = source[source.index("impl ClipboardBaseline {"):]
+        harness += "\nimpl ClipboardBaseline {\n" + function(baseline_source, "capture") + "\n}\n"
+        harness += function(source, "copy_if_unchanged") + "\n"
         harness += declaration(source, "CopyLease") + "\nimpl CopyLease {\n"
         harness += function(copy_source, "prepare") + "\n" + function(copy_source, "finish") + "\n}\n"
         harness += (ROOT / "scripts/rdp-copy-cases.rs").read_text(encoding="utf-8")

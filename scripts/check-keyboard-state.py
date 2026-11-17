@@ -281,14 +281,17 @@ fn any_keyboard_key_down_for_settings(_: &()) -> Result<bool,&'static str> { Ok(
 // REAL_RELEASE_WAIT
 // REAL_AUTOMATIC_WAIT
 #[test] fn actual_auto_grace_allows_release_before_borrowing_clipboard() {
-    CLOCK.with(|c|c.set(0)); RELEASE.with(|c|c.set(60));
+    CLOCK.with(|c|c.set(0)); RELEASE.with(|c|c.set(0));
     assert_eq!(wait_before_automatic(&AppHandle,||false),Ok(()));
-    assert_eq!(CLOCK.with(Cell::get),60);
+    assert_eq!(CLOCK.with(Cell::get),0);
+    CLOCK.with(|c|c.set(0)); RELEASE.with(|c|c.set(550));
+    assert_eq!(wait_before_automatic(&AppHandle,||false),Ok(()));
+    assert_eq!(CLOCK.with(Cell::get),550);
 }
-#[test] fn actual_auto_grace_has_a_400ms_deadline_without_keys_or_clipboard() {
+#[test] fn actual_auto_grace_has_an_800ms_deadline_without_keys_or_clipboard() {
     CLOCK.with(|c|c.set(0)); RELEASE.with(|c|c.set(1000));
     assert_eq!(wait_before_automatic(&AppHandle,||false),Err("keys_held".into()));
-    assert_eq!(CLOCK.with(Cell::get),400);
+    assert_eq!(CLOCK.with(Cell::get),800);
 }
 #[test] fn actual_auto_grace_cancel_does_not_wait_until_the_deadline() {
     CLOCK.with(|c|c.set(0)); RELEASE.with(|c|c.set(1000));

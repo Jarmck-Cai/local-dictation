@@ -179,6 +179,7 @@ pub enum ClipboardHandling {
     #[default]
     DontModify,
     CopyToClipboard,
+    CopyOnFailure,
 }
 
 /// Script applied to Mandarin and Cantonese output. Other languages are never
@@ -1817,5 +1818,18 @@ mod tests {
         let out = format!("{:?}", map);
         assert!(!out.contains("secret"));
         assert!(out.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn clipboard_handling_supports_copy_on_failure_and_keeps_dont_modify_default() {
+        assert_eq!(ClipboardHandling::default(), ClipboardHandling::DontModify);
+        assert_eq!(
+            serde_json::to_string(&ClipboardHandling::CopyOnFailure).unwrap(),
+            "\"copy_on_failure\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ClipboardHandling>("\"copy_on_failure\"").unwrap(),
+            ClipboardHandling::CopyOnFailure
+        );
     }
 }

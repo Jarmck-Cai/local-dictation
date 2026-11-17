@@ -297,7 +297,7 @@ pub(crate) fn wait_before_automatic(
     app: &AppHandle,
     cancelled: impl Fn() -> bool,
 ) -> Result<(), String> {
-    let wait = ReleaseWait::new(Instant::now(), Duration::from_millis(400));
+    let wait = ReleaseWait::new(Instant::now(), Duration::from_millis(800));
     loop {
         if cancelled() {
             return Err(keyboard::CANCELLED.into());

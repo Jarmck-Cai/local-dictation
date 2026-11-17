@@ -622,7 +622,12 @@ impl WinClipboard {
         Ok(())
     }
     fn snapshot_locked(&mut self) -> Result<(), &'static str> {
-        self.current_sequence()?;
+        if self.held.is_none() {
+            return Err(UNAVAILABLE);
+        }
+        // On a fresh Windows session before the first clipboard write,
+        // GetClipboardSequenceNumber() legitimately returns 0. Holding
+        // OpenClipboard above already proves WINSTA_ACCESSCLIPBOARD access.
         let originally_empty = enumerate()?.is_empty();
         self.saved = snapshot()?;
         // Locale and privacy markers alone are not recoverable user content.
@@ -689,8 +694,9 @@ impl Provider for WinClipboard {
         self.snapshot_locked()
     }
     fn publish(&mut self) -> Result<(), &'static str> {
-        // Refuse inaccessible sequence state immediately before the first write.
-        self.current_sequence()?;
+        if self.held.is_none() {
+            return Err(UNAVAILABLE);
+        }
         self.empty()?;
         self.mutated = true;
         self.context.expected_sequence.set(self.current_sequence()?);
@@ -881,32 +887,97 @@ impl Drop for WinClipboard {
     }
 }
 
+/// Zero-lock snapshot of clipboard identity before waiting on preflight gates.
+#[derive(Clone, Copy)]
+pub(crate) struct ClipboardBaseline {
+    sequence: u32,
+    owner: Option<HWND>,
+}
+impl ClipboardBaseline {
+    pub(crate) fn capture() -> Self {
+        Self {
+            sequence: unsafe { GetClipboardSequenceNumber() },
+            owner: unsafe { GetClipboardOwner() }.ok(),
+        }
+    }
+}
+
+/// Fallback copy when automatic paste fails before publishing a temporary body.
+/// Refuses to overwrite if Esc cancelled or the clipboard changed since `baseline`.
+pub(crate) fn copy_if_unchanged(
+    text: &str,
+    baseline: ClipboardBaseline,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<bool, &'static str> {
+    if policy::settlement_cancelled(&is_cancelled) {
+        return Ok(false);
+    }
+    let mut clipboard = WinClipboard::new(true)?;
+    clipboard.prepare_publication_memory(text)?;
+    clipboard.held = Some(ClipboardLock::open_bounded(
+        &clipboard.window,
+        false,
+        OPEN_RESTORE_TIMEOUT,
+        policy::PREPARE_BUSY,
+        &is_cancelled,
+    )?);
+    clipboard.snapshot_locked()?;
+    let current = unsafe { GetClipboardSequenceNumber() };
+    let same_owner = unsafe { GetClipboardOwner() }.ok() == baseline.owner;
+    if current != baseline.sequence || !same_owner || policy::settlement_cancelled(&is_cancelled) {
+        clipboard.held.take().ok_or(UNAVAILABLE)?.close()?;
+        return Ok(false);
+    }
+    let retained = clipboard.retained_text.take().ok_or(RESTORE_FAILED)?;
+    let mut mutated = false;
+    let result = (|| {
+        clipboard.empty()?;
+        mutated = true;
+        for (format, memory) in clipboard.markers.drain(..) {
+            memory.transfer(format)?;
+        }
+        retained.transfer(UNICODE_TEXT)
+    })();
+    if result.is_err() && mutated {
+        let _ = clipboard.empty();
+        for saved in &mut clipboard.saved {
+            let _ = saved.restore();
+        }
+    }
+    let closed = clipboard.held.take().ok_or(UNAVAILABLE)?.close();
+    if result.is_err() || closed.is_err() {
+        Err(RESTORE_FAILED)
+    } else {
+        Ok(true)
+    }
+}
+
 /// Optional result copy after direct input; never publishes a temporary body.
 pub(crate) struct CopyLease {
     clipboard: WinClipboard,
-    sequence: u32,
+    sequence: Option<u32>,
     owner: Option<HWND>,
 }
 impl CopyLease {
     pub(crate) fn prepare(text: &str) -> Result<Self, &'static str> {
         let mut clipboard = WinClipboard::new(true)?;
         clipboard.prepare(text)?;
-        let sequence = clipboard.current_sequence()?;
+        // Sequence 0 is valid under a held lock before the session's first write.
+        let sequence = unsafe { GetClipboardSequenceNumber() };
         let owner = unsafe { GetClipboardOwner() }.ok();
         // Snapshot and identity refer to the same lock. Never adopt a newer
         // sequence after releasing it; even a close-time update invalidates copy.
         clipboard.held.take().ok_or(UNAVAILABLE)?.close()?;
         Ok(Self {
             clipboard,
-            sequence,
+            sequence: Some(sequence),
             owner,
         })
     }
     pub(crate) fn finish(&mut self, cancelled: &dyn Fn() -> bool) -> Result<(), &'static str> {
-        let expected = std::mem::take(&mut self.sequence);
-        if expected == 0 {
+        let Some(expected) = self.sequence.take() else {
             return Ok(());
-        }
+        };
         let started = Instant::now();
         let lock = loop {
             match ClipboardLock::open(self.clipboard.window.hwnd) {
@@ -915,7 +986,7 @@ impl CopyLease {
                 Err(_) => return Err(RESTORE_FAILED),
             }
         };
-        let current = self.clipboard.current_sequence()?;
+        let current = unsafe { GetClipboardSequenceNumber() };
         let same_owner = unsafe { GetClipboardOwner() }.ok() == self.owner;
         // Check source and cancellation under the very lock that will mutate.
         if current != expected || !same_owner || cancelled() {
@@ -975,13 +1046,30 @@ pub(super) fn run_with_preflight(
     is_cancelled: impl Fn() -> bool,
     copy_result: bool,
 ) -> Result<bool, String> {
-    let mut clipboard = WinClipboard::new(copy_result).map_err(String::from)?;
-    policy::transact_with_preflight(
+    run_with_preflight_and_retention(
+        text,
+        preflight,
+        inject,
+        is_cancelled,
+        policy::Retention::from_copy_flag(copy_result),
+    )
+}
+
+pub(super) fn run_with_preflight_and_retention(
+    text: &str,
+    preflight: impl FnMut() -> Result<(), String>,
+    inject: impl FnOnce() -> Result<(), String>,
+    is_cancelled: impl Fn() -> bool,
+    retention: policy::Retention,
+) -> Result<bool, String> {
+    let mut clipboard =
+        WinClipboard::new(retention != policy::Retention::Restore).map_err(String::from)?;
+    policy::transact_with_preflight_and_retention(
         &mut clipboard,
         text,
         preflight,
         inject,
         is_cancelled,
-        copy_result,
+        retention,
     )
 }

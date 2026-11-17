@@ -120,4 +120,61 @@ mod unicode_copy_tests {
             assert_eq!(s.restored, 0);
         });
     }
+    #[test]
+    fn cold_boot_zero_sequence_copy_lease_and_baseline_copy_work_and_respect_concurrent_copy() {
+        SYSTEM.with(|s| {
+            *s.borrow_mut() = SyntheticSystem {
+                sequence: 0,
+                owner: 0,
+                formats: Vec::new(),
+                body: "empty",
+                originally_empty: true,
+                ..Default::default()
+            };
+        });
+        let mut lease = CopyLease::prepare("synthetic-transcript").unwrap();
+        assert_eq!(lease.finish(&|| false), Ok(()));
+        SYSTEM.with(|s| {
+            let s = s.borrow();
+            assert_eq!(s.body, "synthetic-transcript");
+            assert!(!s.delayed);
+            assert_eq!(s.formats, [50001, 50002, 50003, 50004, 13]);
+        });
+
+        // Baseline fallback copy succeeds on virgin sequence == 0 when unchanged,
+        // and refuses to overwrite when cancelled or concurrently modified.
+        SYSTEM.with(|s| {
+            *s.borrow_mut() = SyntheticSystem {
+                sequence: 0,
+                owner: 0,
+                formats: Vec::new(),
+                body: "empty",
+                originally_empty: true,
+                ..Default::default()
+            };
+        });
+        let baseline = ClipboardBaseline::capture();
+        assert_eq!(
+            copy_if_unchanged("synthetic-transcript", baseline, || false),
+            Ok(true)
+        );
+        SYSTEM.with(|s| assert_eq!(s.borrow().body, "synthetic-transcript"));
+
+        reset(false);
+        let baseline = ClipboardBaseline::capture();
+        new_user_copy(true);
+        assert_eq!(
+            copy_if_unchanged("synthetic-transcript", baseline, || false),
+            Ok(false)
+        );
+        SYSTEM.with(|s| assert_eq!(s.borrow().body, "synthetic-new-user-copy"));
+
+        reset(false);
+        let baseline = ClipboardBaseline::capture();
+        assert_eq!(
+            copy_if_unchanged("synthetic-transcript", baseline, || true),
+            Ok(false)
+        );
+        SYSTEM.with(|s| assert_eq!(s.borrow().body, "synthetic-original"));
+    }
 }

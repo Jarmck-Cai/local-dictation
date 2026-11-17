@@ -114,6 +114,35 @@ pub(crate) fn finished(elapsed: Duration, o: Observation) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Retention {
+    Restore,
+    CopyOnSuccess,
+    CopyOnFailure,
+}
+
+impl Retention {
+    pub(crate) const fn from_copy_flag(copy_result: bool) -> Self {
+        if copy_result {
+            Self::CopyOnSuccess
+        } else {
+            Self::Restore
+        }
+    }
+
+    pub(crate) fn should_retain(self, outcome: &Result<bool, &'static str>) -> bool {
+        match self {
+            Self::Restore => false,
+            Self::CopyOnSuccess => outcome.is_ok(),
+            Self::CopyOnFailure => match *outcome {
+                Ok(true) => false,
+                Err(CANCELLED | "manual_paste_clipboard_changed") => false,
+                Ok(false) | Err(_) => true,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettlementAction {
     PreserveNewCopy,
     RestoreSnapshot,
@@ -232,10 +261,28 @@ pub(crate) fn transact_with_retention<P: Provider>(
 pub(crate) fn transact_with_preflight<P: Provider>(
     provider: &mut P,
     text: &str,
-    mut preflight: impl FnMut() -> Result<(), String>,
+    preflight: impl FnMut() -> Result<(), String>,
     inject: impl FnOnce() -> Result<(), String>,
     is_cancelled: impl Fn() -> bool,
     copy_result: bool,
+) -> Result<bool, String> {
+    transact_with_preflight_and_retention(
+        provider,
+        text,
+        preflight,
+        inject,
+        is_cancelled,
+        Retention::from_copy_flag(copy_result),
+    )
+}
+
+pub(crate) fn transact_with_preflight_and_retention<P: Provider>(
+    provider: &mut P,
+    text: &str,
+    mut preflight: impl FnMut() -> Result<(), String>,
+    inject: impl FnOnce() -> Result<(), String>,
+    is_cancelled: impl Fn() -> bool,
+    retention: Retention,
 ) -> Result<bool, String> {
     if is_cancelled() {
         return Err(CANCELLED.into());
@@ -309,7 +356,7 @@ pub(crate) fn transact_with_preflight<P: Provider>(
     .unwrap_or(Err(INJECTION_FAILED));
     // A restore failure must never be hidden by a read receipt or input error.
     provider
-        .settle(copy_result && outcome.is_ok(), &is_cancelled)
+        .settle(retention.should_retain(&outcome), &is_cancelled)
         .map_err(String::from)?;
     outcome
         .map(|read| read && !provider.ownership_lost())
@@ -1088,5 +1135,129 @@ mod tests {
             ),
             Err("manual_paste_clipboard_changed".into())
         );
+    }
+    #[test]
+    fn copy_on_failure_restores_on_success_retains_on_failure_and_protects_cancel_or_new_copy() {
+        // 1. Confirmed read restores original clipboard just like dont_modify.
+        let mut ok_paste = Fake {
+            current: "original rich content",
+            observed: true,
+            elapsed: READ_QUIET,
+            ..Default::default()
+        };
+        assert_eq!(
+            transact_with_preflight_and_retention(
+                &mut ok_paste,
+                "hello",
+                || Ok(()),
+                || Ok(()),
+                || false,
+                Retention::CopyOnFailure,
+            ),
+            Ok(true)
+        );
+        assert_eq!(ok_paste.current, "original rich content");
+        assert_eq!(ok_paste.log, ["prepare", "publish", "begin", "restore"]);
+
+        // 2. Key/injection failure retains transcript on the clipboard.
+        for code in ["keys_held", "keyboard_unavailable", INJECTION_FAILED] {
+            let mut failed_paste = Fake {
+                current: "original rich content",
+                ..Default::default()
+            };
+            assert_eq!(
+                transact_with_preflight_and_retention(
+                    &mut failed_paste,
+                    "hello",
+                    || Ok(()),
+                    || Err(code.into()),
+                    || false,
+                    Retention::CopyOnFailure,
+                ),
+                Err(code.into())
+            );
+            assert_eq!(failed_paste.current, "temporary transcript");
+            assert_eq!(failed_paste.log, ["prepare", "publish", "begin", "retain"]);
+        }
+
+        // 3. Unconfirmed 3s timeout (no read, no concurrent copy) retains transcript.
+        let mut unconfirmed = Fake {
+            current: "original rich content",
+            observed: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            transact_with_preflight_and_retention(
+                &mut unconfirmed,
+                "hello",
+                || Ok(()),
+                || Ok(()),
+                || false,
+                Retention::CopyOnFailure,
+            ),
+            Ok(false)
+        );
+        assert_eq!(unconfirmed.current, "temporary transcript");
+        assert_eq!(unconfirmed.log, ["prepare", "publish", "begin", "retain"]);
+
+        // 4. Esc cancellation never overwrites original clipboard.
+        let cancelled = Cell::new(false);
+        let mut cancelled_paste = Fake {
+            current: "original rich content",
+            ..Default::default()
+        };
+        assert_eq!(
+            transact_with_preflight_and_retention(
+                &mut cancelled_paste,
+                "hello",
+                || {
+                    cancelled.set(true);
+                    Err(CANCELLED.into())
+                },
+                || panic!("must not inject after cancel"),
+                || cancelled.get(),
+                Retention::CopyOnFailure,
+            ),
+            Err(CANCELLED.into())
+        );
+        assert_eq!(cancelled_paste.current, "original rich content");
+        assert_eq!(cancelled_paste.log, ["prepare", "publish", "restore"]);
+
+        // 5. Concurrent user Ctrl+C before or after injection never gets overwritten.
+        let mut changed_before = Fake {
+            current: "original rich content",
+            failure: Some("changed"),
+            ..Default::default()
+        };
+        assert_eq!(
+            transact_with_preflight_and_retention(
+                &mut changed_before,
+                "hello",
+                || Ok(()),
+                || panic!("must not inject"),
+                || false,
+                Retention::CopyOnFailure,
+            ),
+            Err("manual_paste_clipboard_changed".into())
+        );
+        assert_eq!(changed_before.current, "new user copy");
+
+        let mut changed_during_observe = Fake {
+            current: "original rich content",
+            concurrent_copy: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            transact_with_preflight_and_retention(
+                &mut changed_during_observe,
+                "hello",
+                || Ok(()),
+                || Ok(()),
+                || false,
+                Retention::CopyOnFailure,
+            ),
+            Ok(false)
+        );
+        assert_eq!(changed_during_observe.current, "new user copy");
     }
 }

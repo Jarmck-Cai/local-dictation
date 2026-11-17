@@ -48,7 +48,7 @@ macro_rules! info { ($($args:tt)*) => { () } }
 #[derive(Clone, Copy, Debug)]
 enum PasteMethod { None, CtrlV, CtrlShiftV, ShiftInsert, Direct, ExternalScript }
 #[derive(Clone, Copy, PartialEq)]
-enum ClipboardHandling { DontModify, CopyToClipboard }
+enum ClipboardHandling { DontModify, CopyToClipboard, CopyOnFailure }
 #[derive(Clone, Copy)]
 struct Settings {
     paste_method: PasteMethod, paste_delay_ms: u64, paste_delay_after_ms: u64,
@@ -84,6 +84,7 @@ struct SyntheticDesktop {
     copy_on_second_preflight: bool,
     copy_on_input_lock: bool,
     rdp: bool,
+    rdp_target_error: Option<&'static str>,
     unicode_calls: usize,
 }
 thread_local! { static DESKTOP: RefCell<SyntheticDesktop> = RefCell::new(SyntheticDesktop::default()); }
@@ -189,7 +190,11 @@ mod manual_paste {
     fn bound_high_keys(_: &Settings) -> u16 { 0 }
     pub(crate) fn wait_before_automatic(_: &AppHandle, cancelled: impl Fn() -> bool) -> Result<(), String> {
         if cancelled() { return Err("manual_paste_cancelled".into()); }
-        if any_keyboard_key_down().unwrap() { advance(400); return Err("keys_held".into()); }
+        if any_keyboard_key_down().unwrap() {
+            advance(800);
+            if cancelled() { return Err("manual_paste_cancelled".into()); }
+            return Err("keys_held".into());
+        }
         Ok(())
     }
     pub(crate) fn prepare_keyboard(_: &AppHandle) -> Result<PreparedKeyboard, String> {
@@ -224,6 +229,45 @@ mod manual_paste {
 }
 mod protected_paste {
     use super::*;
+    pub(crate) use crate::protected_policy::Retention;
+    #[derive(Clone, Copy)]
+    pub(crate) struct ClipboardBaseline {
+        clipboard: [u8; 0],
+        snapshot_len: usize,
+    }
+    thread_local! {
+        static BASELINE_CLIPBOARD: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+    impl ClipboardBaseline {
+        pub(crate) fn capture() -> Self {
+            let current = DESKTOP.with(|s| s.borrow().clipboard.clone());
+            let len = current.len();
+            BASELINE_CLIPBOARD.with(|b| *b.borrow_mut() = current);
+            Self { clipboard: [], snapshot_len: len }
+        }
+    }
+    pub(crate) fn copy_if_unchanged(
+        text: &str,
+        baseline: ClipboardBaseline,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<bool, &'static str> {
+        if crate::protected_policy::settlement_cancelled(&cancelled) {
+            return Ok(false);
+        }
+        let expected = BASELINE_CLIPBOARD.with(|b| b.borrow().clone());
+        let _ = baseline.snapshot_len;
+        DESKTOP.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.ownership_lost || s.clipboard != expected {
+                return Ok(false);
+            }
+            s.clipboard = text.into();
+            s.retained = true;
+            let at = s.now;
+            s.writes.push((at, text.into()));
+            Ok(true)
+        })
+    }
     mod platform {
         use super::*;
         struct FakeProvider { original: String, text: String, began: u64, injected_at: Option<u64> }
@@ -299,12 +343,17 @@ mod protected_paste {
         }
         pub(super) fn run_with_preflight(text: &str, preflight: impl FnMut() -> Result<(), String>, inject: impl FnOnce() -> Result<(), String>,
             cancelled: impl Fn() -> bool, copy: bool) -> Result<bool, String> {
+            run_with_preflight_and_retention(text, preflight, inject, cancelled, Retention::from_copy_flag(copy))
+        }
+        pub(super) fn run_with_preflight_and_retention(text: &str, preflight: impl FnMut() -> Result<(), String>, inject: impl FnOnce() -> Result<(), String>,
+            cancelled: impl Fn() -> bool, retention: Retention) -> Result<bool, String> {
             DESKTOP.with(|s| s.borrow_mut().protected_calls += 1);
             let mut provider = FakeProvider { original: String::new(), text: String::new(), began: 0, injected_at: None };
-            crate::protected_policy::transact_with_preflight(&mut provider, text, preflight, inject, cancelled, copy)
+            crate::protected_policy::transact_with_preflight_and_retention(&mut provider, text, preflight, inject, cancelled, retention)
         }
     }
     // REAL_AUTOMATIC_WRAPPER
+    // REAL_AUTOMATIC_RETENTION_WRAPPER
 }
 '''
 
@@ -629,6 +678,116 @@ mod automatic_tests {
             });
         }
     }
+    #[test]
+    fn copy_on_failure_restores_on_success_copies_on_failure_and_protects_cancel_and_new_copy() {
+        let app_failure_policy = |delay: u64| {
+            DESKTOP.with(|s| *s.borrow_mut() = SyntheticDesktop {
+                clipboard: "synthetic-previous-transcript".into(),
+                read_after_chord: delay,
+                ..Default::default()
+            });
+            AppHandle {
+                settings: Settings {
+                    paste_method: PasteMethod::CtrlV,
+                    clipboard_handling: ClipboardHandling::CopyOnFailure,
+                    ..Default::default()
+                },
+                enigo: Arc::new(EnigoState(Mutex::new(Enigo))),
+                lock_barrier: None,
+            }
+        };
+
+        // 1. Local & MSTSC automatic paste success: restores/preserves original clipboard.
+        let ok_local = app_failure_policy(100);
+        assert_eq!(
+            super::paste_cancellable("synthetic-current".into(), ok_local, cancelled),
+            Ok(Submission::ClipboardReadObserved)
+        );
+        DESKTOP.with(|s| assert_eq!(s.borrow().clipboard, "synthetic-previous-transcript"));
+
+        let ok_rdp = app_failure_policy(100);
+        DESKTOP.with(|s| s.borrow_mut().rdp = true);
+        assert_eq!(
+            super::paste_cancellable("synthetic-current".into(), ok_rdp, cancelled),
+            Ok(Submission::UnicodeSubmitted)
+        );
+        DESKTOP.with(|s| assert_eq!(s.borrow().clipboard, "synthetic-previous-transcript"));
+
+        // 2. keys_held (800ms pre-gate), target unavailable, RDP unsupported, and 3s unconfirmed:
+        //    all retain the current transcript in the system clipboard for immediate Ctrl+V.
+        let held = app_failure_policy(100);
+        DESKTOP.with(|s| s.borrow_mut().keys_held = true);
+        assert_eq!(
+            super::paste_cancellable("synthetic-current".into(), held, cancelled),
+            Err("keys_held".into())
+        );
+        DESKTOP.with(|s| {
+            let s = s.borrow();
+            assert_eq!(s.now, 800);
+            assert_eq!(s.clipboard, "synthetic-current");
+        });
+
+        let no_target = app_failure_policy(100);
+        DESKTOP.with(|s| s.borrow_mut().rdp_target_error = Some("input_target_unavailable"));
+        assert_eq!(
+            super::paste_cancellable("synthetic-current".into(), no_target, cancelled),
+            Err("input_target_unavailable".into())
+        );
+        DESKTOP.with(|s| assert_eq!(s.borrow().clipboard, "synthetic-current"));
+
+        let rdp_long = app_failure_policy(100);
+        DESKTOP.with(|s| s.borrow_mut().rdp = true);
+        assert_eq!(
+            super::paste_cancellable("中".repeat(4097), rdp_long, cancelled),
+            Err("rdp_input_too_long".into())
+        );
+        DESKTOP.with(|s| assert_eq!(s.borrow().clipboard, "中".repeat(4097)));
+
+        let unconfirmed = app_failure_policy(5000);
+        assert_eq!(
+            super::paste_cancellable("synthetic-current".into(), unconfirmed, cancelled),
+            Err("automatic_paste_unconfirmed".into())
+        );
+        DESKTOP.with(|s| assert_eq!(s.borrow().clipboard, "synthetic-current"));
+
+        // 3. Concurrent user Ctrl+C during keys_held wait or inside transaction NEVER gets overwritten.
+        let held_with_copy = app_failure_policy(100);
+        DESKTOP.with(|s| {
+            let mut s = s.borrow_mut();
+            s.keys_held = true;
+            s.copy_at = Some(250);
+        });
+        assert_eq!(
+            super::paste_cancellable("synthetic-current".into(), held_with_copy, cancelled),
+            Err("keys_held".into())
+        );
+        DESKTOP.with(|s| assert_eq!(s.borrow().clipboard, "synthetic-new-user-copy"));
+
+        let tx_copy = app_failure_policy(100);
+        DESKTOP.with(|s| {
+            let mut s = s.borrow_mut();
+            s.preflight_wait = 40;
+            s.copy_at = Some(20);
+        });
+        assert_eq!(
+            super::paste_cancellable("synthetic-current".into(), tx_copy, cancelled),
+            Err("manual_paste_clipboard_changed".into())
+        );
+        DESKTOP.with(|s| assert_eq!(s.borrow().clipboard, "synthetic-new-user-copy"));
+
+        // 4. Esc cancellation during keys_held wait or inside transaction NEVER overwrites original clipboard.
+        let held_cancelled = app_failure_policy(100);
+        DESKTOP.with(|s| {
+            let mut s = s.borrow_mut();
+            s.keys_held = true;
+            s.cancel_at = Some(100);
+        });
+        assert_eq!(
+            super::paste_cancellable("synthetic-current".into(), held_cancelled, cancelled),
+            Ok(Submission::Cancelled)
+        );
+        DESKTOP.with(|s| assert_eq!(s.borrow().clipboard, "synthetic-previous-transcript"));
+    }
 }
 '''
 
@@ -714,7 +873,14 @@ pub(crate) mod platform {
     use crate::{DESKTOP, advance};
     pub(crate) struct Target;
     pub(crate) fn capture() -> Result<Option<Target>, String> {
-        Ok(DESKTOP.with(|s| s.borrow().rdp).then_some(Target))
+        DESKTOP.with(|s| {
+            let s = s.borrow();
+            if let Some(code) = s.rdp_target_error {
+                Err(code.into())
+            } else {
+                Ok(s.rdp.then_some(Target))
+            }
+        })
     }
     struct Adapter<P, K, C> { prepare: Option<K>, check: C, token: Option<P>,
         copy: bool, original: String, events: Vec<UnicodeEvent> }
@@ -802,21 +968,25 @@ def main() -> int:
         keyboard = (source / "manual_paste_keyboard.rs").as_posix()
         protected = (source / "protected_paste_policy.rs").as_posix()
         chord = function((source / "manual_paste.rs").read_text(encoding="utf-8"), "send_paste_chord")
-        wrapper = function((source / "protected_paste.rs").read_text(encoding="utf-8"), "run_with_preflight")
+        protected_source = (source / "protected_paste.rs").read_text(encoding="utf-8")
+        wrapper = function(protected_source, "run_with_preflight")
+        retention_wrapper = function(protected_source, "run_with_preflight_and_retention")
         for name, body in [("manual_paste.rs::send_paste_chord", chord),
-                           ("protected_paste.rs::run_with_preflight", wrapper)]:
+                           ("protected_paste.rs::run_with_preflight", wrapper),
+                           ("protected_paste.rs::run_with_preflight_and_retention", retention_wrapper)]:
             manifest["source_functions"][name] = hashlib.sha256(body.encode()).hexdigest()
         safe_adapters = (f'\n#[path = "{keyboard}"] mod keyboard;\n'
                          f'#[path = "{protected}"] mod protected_policy;\n'
                          + SAFE_ADAPTERS.replace("// REAL_MANUAL_CHORD", chord.replace("std::thread::sleep", "crate::virtual_clock::sleep"))
-                         .replace("// REAL_AUTOMATIC_WRAPPER", wrapper))
+                         .replace("// REAL_AUTOMATIC_WRAPPER", wrapper)
+                         .replace("// REAL_AUTOMATIC_RETENTION_WRAPPER", retention_wrapper))
         if args.late_preflight:
             safe_adapters = safe_adapters.replace(
-                "pub(super) fn run_with_preflight(text: &str, preflight: impl FnMut()",
-                "pub(super) fn run_with_preflight(text: &str, mut preflight: impl FnMut()"
+                "pub(super) fn run_with_preflight_and_retention(text: &str, preflight: impl FnMut()",
+                "pub(super) fn run_with_preflight_and_retention(text: &str, mut preflight: impl FnMut()"
             ).replace(
-                "crate::protected_policy::transact_with_preflight(&mut provider, text, preflight, inject, cancelled, copy)",
-                "crate::protected_policy::transact_with_retention(&mut provider, text, || { preflight()?; inject() }, cancelled, copy)")
+                "crate::protected_policy::transact_with_preflight_and_retention(&mut provider, text, preflight, inject, cancelled, retention)",
+                "crate::protected_policy::transact_with_retention(&mut provider, text, || { preflight()?; inject() }, cancelled, retention == Retention::CopyOnSuccess)")
     harness = (ADAPTERS + f'\n#[path = "{delivery}"] mod paste_delivery;\n'
                + 'use paste_delivery::{clipboard_submission, Submission};\n'
                + '\n'.join(functions["settings.rs"])

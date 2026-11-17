@@ -353,9 +353,10 @@
       },
       "clipboardHandling": {
         "title": "剪贴板处理",
-        "description": "尽量恢复原剪贴板，或保留本次转录。Windows 无法恢复原内容时会留下本次转录；期间新复制的内容优先保留。",
+        "description": "尽量恢复原剪贴板、仅在自动粘贴失败时保留本次转录，或始终复制到剪贴板。Windows 无法恢复原内容时会留下本次转录；期间新复制的内容优先保留。",
         "options": {
           "dontModify": "尽量恢复原内容",
+          "copyOnFailure": "仅在自动粘贴失败时复制到剪贴板",
           "copyToClipboard": "复制到剪贴板"
         }
       },

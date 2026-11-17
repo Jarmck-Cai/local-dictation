@@ -62,6 +62,36 @@ fn register_failure_listeners(app_handle: &AppHandle) {
             .report(OverlayNotice::PLAYBACK);
         queue_overlay_update(&app);
     });
+    let app = app_handle.clone();
+    app_handle.listen("dictation-copy-result", move |event| {
+        if serde_json::from_str::<bool>(event.payload()).ok() == Some(true)
+            && OVERLAY_NOTICE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .acknowledge_paste_recovery()
+        {
+            queue_overlay_update(&app);
+        }
+    });
+    let app = app_handle.clone();
+    app_handle.listen("dictation-manual-paste", move |event| {
+        let outcome = serde_json::from_str::<serde_json::Value>(event.payload())
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("outcome")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            });
+        if matches!(outcome.as_deref(), Some("read_observed" | "input_sent"))
+            && OVERLAY_NOTICE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .acknowledge_paste_recovery()
+        {
+            queue_overlay_update(&app);
+        }
+    });
 }
 
 #[cfg(not(target_os = "macos"))]

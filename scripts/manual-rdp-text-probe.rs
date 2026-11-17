@@ -15,7 +15,9 @@ impl WinClipboard {
         }];
         self.restore_snapshot = true;
         self.held = Some(ClipboardLock::open(self.window.hwnd)?);
-        self.current_sequence()?;
+        if self.held.is_none() {
+            return Err(UNAVAILABLE);
+        }
         Ok(())
     }
 }

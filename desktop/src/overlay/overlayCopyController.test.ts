@@ -225,4 +225,42 @@ for (const copyDone of [false, true]) {
   assert.deepEqual(h.dismissals, [], "a hidden card cannot dismiss");
 }
 
+// Shortcut-driven recovery (Ctrl+Shift+F9 / Ctrl+Shift+F8) dismisses a pure
+// paste failure immediately without wiping compound non-paste notices.
+{
+  const h = setup();
+  await h.controller.handleShortcutRecovery();
+  assert.deepEqual(
+    h.dismissals,
+    [7],
+    "paste-only failure dismisses on shortcut recovery",
+  );
+
+  const compound = setup();
+  compound.controller.show({
+    ...firstNotice,
+    failures: 3,
+    failure_generation: 9,
+  });
+  await compound.controller.handleShortcutRecovery();
+  assert.deepEqual(
+    compound.dismissals,
+    [],
+    "compound playback+paste notice relies on backend bit-clearing update",
+  );
+
+  const busyOnly = setup();
+  busyOnly.controller.show({
+    ...firstNotice,
+    failures: 4,
+    failure_generation: 10,
+  });
+  await busyOnly.controller.handleShortcutRecovery();
+  assert.deepEqual(
+    busyOnly.dismissals,
+    [],
+    "meeting capture-busy notice is not dismissed by paste/copy shortcuts",
+  );
+}
+
 console.log("overlayCopyController: all timing and race assertions passed");

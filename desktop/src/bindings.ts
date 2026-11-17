@@ -1039,7 +1039,7 @@ export type ChineseScript =
  * Keep whatever script the model produced.
  */
 "as_transcribed" | "simplified" | "traditional"
-export type ClipboardHandling = "dont_modify" | "copy_to_clipboard"
+export type ClipboardHandling = "dont_modify" | "copy_to_clipboard" | "copy_on_failure"
 export type CustomSounds = { start: boolean; stop: boolean }
 export type EngineType = 
 /**

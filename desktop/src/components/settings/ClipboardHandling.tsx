@@ -21,6 +21,10 @@ export const ClipboardHandlingSetting: React.FC<ClipboardHandlingProps> =
         label: t("settings.advanced.clipboardHandling.options.dontModify"),
       },
       {
+        value: "copy_on_failure",
+        label: t("settings.advanced.clipboardHandling.options.copyOnFailure"),
+      },
+      {
         value: "copy_to_clipboard",
         label: t("settings.advanced.clipboardHandling.options.copyToClipboard"),
       },

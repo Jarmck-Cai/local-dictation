@@ -97,4 +97,10 @@ export class OverlayCopyController {
       // Keep the card and its manual controls available if IPC cannot dismiss.
     }
   }
+
+  async handleShortcutRecovery() {
+    if (!this.notice || (this.notice.failures & 1) === 0) return;
+    if ((this.notice.failures & ~1) !== 0) return;
+    await this.dismiss();
+  }
 }
