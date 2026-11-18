@@ -5,6 +5,7 @@ import { SettingsGroup } from "../../ui/SettingsGroup";
 import { MuteWhileRecording } from "../MuteWhileRecording";
 import { DictationCleanup } from "../DictationCleanup";
 import { SenseVoiceModel } from "../SenseVoiceModel";
+import { CloudGatewaySettings } from "../CloudGatewaySettings";
 import { AutostartToggle } from "../AutostartToggle";
 import { ManualPasteShortcut } from "../ManualPasteShortcut";
 import { ClipboardHandlingSetting } from "../ClipboardHandling";
@@ -16,6 +17,7 @@ export const GeneralSettings = () => {
   const { t } = useTranslation();
   return (
     <div className="qs-page space-y-6">
+      <CloudGatewaySettings />
       <SenseVoiceModel />
       <DictationCleanup />
       <SettingsGroup title={t("dictation.settingsTitle")}>

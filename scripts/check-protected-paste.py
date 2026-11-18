@@ -58,6 +58,15 @@ pub(super) fn memory_probe() {
     }
     assert!(matches!(text_memory(""), Err("manual_paste_invalid_text")));
     assert!(matches!(text_memory("safe\0suffix"), Err("manual_paste_invalid_text")));
+    {
+        let lf_global = text_memory("1. 第一项\n2. 第二项").expect("LF multiline normalization");
+        let expected_crlf: Vec<u16> = "1. 第一项\r\n2. 第二项".encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            let lock = MemoryLock::new(lf_global.0).expect("lock LF normalized memory");
+            let actual = std::slice::from_raw_parts(lock.ptr.cast::<u16>(), expected_crlf.len());
+            assert_eq!(actual, expected_crlf, "LF multiline must normalize to CRLF in CF_UNICODETEXT");
+        }
+    }
     let (ansi, replacement) = converted(samples[0], 1252);
     assert!(replacement, "CP1252 cannot represent the Chinese sample");
     assert_eq!(ansi, b"???????? RDP 0123");

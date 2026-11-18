@@ -383,3 +383,85 @@ pub fn apply_confirmed(app: &AppHandle, raw: &str) -> String {
 pub fn relevant_terms(app: &AppHandle, raw: &str) -> Vec<String> {
     core::relevant_terms(raw, &confirmed_rules(app))
 }
+
+#[derive(Default)]
+pub(crate) struct LocalSyncVocabularySnapshot {
+    pub confirmed: Vec<VocabularyTerm>,
+    pub liked_terms: Vec<(String, u32)>,
+    pub frequent_tech_terms: Vec<(String, u32)>,
+    pub deleted_terms: Vec<String>,
+}
+
+pub(crate) fn export_sync_snapshot(app: &AppHandle) -> Result<LocalSyncVocabularySnapshot, String> {
+    with_connection(app, |conn| {
+        let confirmed = store::terms(conn)?
+            .into_iter()
+            .map(|entry| VocabularyTerm {
+                id: entry.id,
+                term: entry.rule.term,
+                aliases: entry.rule.aliases,
+                context: entry.rule.context,
+                enabled: entry.enabled,
+            })
+            .collect();
+
+        let mut liked_terms = Vec::new();
+        let mut frequent_tech_terms = Vec::new();
+        let mut deleted_terms = Vec::new();
+
+        if let Ok(mut stmt) = conn.prepare(
+            "WITH counts AS (
+                 SELECT term_id, COUNT(*) AS record_count
+                 FROM collected_term_observations
+                 GROUP BY term_id
+             )
+             SELECT t.term, COALESCE(c.record_count, 0) AS cnt, t.liked, t.deleted
+             FROM collected_terms t
+             LEFT JOIN counts c ON c.term_id = t.id
+             ORDER BY cnt DESC, t.id DESC
+             LIMIT 600",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?.clamp(0, i64::from(u32::MAX)) as u32,
+                    r.get::<_, bool>(2)?,
+                    r.get::<_, bool>(3)?,
+                ))
+            }) {
+                for (term, count, liked, deleted) in rows.flatten() {
+                    if deleted {
+                        deleted_terms.push(term);
+                    } else if liked {
+                        liked_terms.push((term, count.max(1)));
+                    } else if count >= 2 && term.chars().any(|c| c.is_ascii_alphabetic()) {
+                        frequent_tech_terms.push((term, count));
+                    }
+                }
+            }
+        }
+
+        Ok(LocalSyncVocabularySnapshot {
+            confirmed,
+            liked_terms,
+            frequent_tech_terms,
+            deleted_terms,
+        })
+    })
+}
+
+pub(crate) fn active_hint_terms(app: &AppHandle, max_terms: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in confirmed_rules(app) {
+        if out.len() >= max_terms {
+            break;
+        }
+        if !out
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&rule.term))
+        {
+            out.push(rule.term);
+        }
+    }
+    out
+}
