@@ -182,6 +182,14 @@ pub enum ClipboardHandling {
     CopyOnFailure,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RecognitionMode {
+    #[default]
+    CloudFirst,
+    LocalOnly,
+}
+
 /// Script applied to Mandarin and Cantonese output. Other languages are never
 /// converted.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
@@ -534,6 +542,21 @@ pub struct AppSettings {
     /// `overlay_position` (position `none` → style `None`).
     #[serde(default = "default_overlay_style")]
     pub overlay_style: OverlayStyle,
+    /// Speech recognition engine routing (`cloud_first` uses configured gateway with
+    /// automatic on-demand local SenseVoice fallback; unconfigured gateway stays local).
+    #[serde(default)]
+    pub recognition_mode: RecognitionMode,
+    /// Self-hosted dictation gateway base URL (e.g. `https://dictation.astrmind.com`).
+    /// Device Bearer token is stored separately in Windows DPAPI (`gateway-token.dpapi`).
+    #[serde(default)]
+    pub gateway_url: String,
+    /// Automatically sync confirmed and frequent technical vocabulary with the gateway.
+    #[serde(default = "default_gateway_auto_sync_vocabulary")]
+    pub gateway_auto_sync_vocabulary: bool,
+}
+
+fn default_gateway_auto_sync_vocabulary() -> bool {
+    true
 }
 
 fn default_model() -> String {
@@ -1030,6 +1053,9 @@ pub fn get_default_settings() -> AppSettings {
         vad_enabled: default_vad_enabled(),
         vad_backend: VadBackend::default(),
         overlay_style: OverlayStyle::Minimal,
+        recognition_mode: RecognitionMode::CloudFirst,
+        gateway_url: String::new(),
+        gateway_auto_sync_vocabulary: default_gateway_auto_sync_vocabulary(),
     }
 }
 

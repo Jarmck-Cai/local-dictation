@@ -42,15 +42,45 @@ impl<E: PlaybackEndpoint> Drop for MuteLease<E> {
     }
 }
 
-/// Converts real whitespace/control characters to one-line text, preserving literals.
+/// Normalizes dictation output while preserving multi-line paragraph breaks and
+/// ordered/unordered list newlines.
+///
+/// - Unifies `\r\n` and `\r` into `\n`
+/// - Collapses horizontal whitespace and control characters within each line to single `' '`
+/// - Trims leading/trailing horizontal spaces per line and strips leading/trailing blank lines
+/// - Caps consecutive newlines at 2 (`\n\n`, at most one blank line between paragraphs)
+/// - Never appends a trailing newline to single-line or multi-line text
 pub fn normalize_output(text: &str) -> String {
     let mut body = String::with_capacity(text.len());
+    let mut pending_newlines: usize = 0;
     let mut separator = false;
-    for character in text.chars() {
-        if character.is_control() || character.is_whitespace() {
-            separator = !body.is_empty();
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\r' {
+            if chars.peek() == Some(&'\n') {
+                let _ = chars.next();
+            }
+            if !body.is_empty() {
+                pending_newlines = pending_newlines.saturating_add(1);
+            }
+            separator = false;
+        } else if character == '\n' {
+            if !body.is_empty() {
+                pending_newlines = pending_newlines.saturating_add(1);
+            }
+            separator = false;
+        } else if character.is_control() || character.is_whitespace() {
+            if !body.is_empty() && pending_newlines == 0 {
+                separator = true;
+            }
         } else {
-            if separator {
+            if pending_newlines > 0 {
+                for _ in 0..pending_newlines.min(2) {
+                    body.push('\n');
+                }
+                pending_newlines = 0;
+                separator = false;
+            } else if separator {
                 body.push(' ');
                 separator = false;
             }
@@ -178,7 +208,21 @@ mod tests {
 
     #[test]
     fn empty_processed_result_falls_back_to_recoverable_raw_body() {
-        assert_eq!(result_body("原始\r\n正文", Some("\t\n")), "原始 正文");
+        assert_eq!(result_body("原始\r\n正文", Some("\t\n")), "原始\n正文");
         assert_eq!(result_body("原始", Some("整理\t正文")), "整理 正文");
+    }
+
+    #[test]
+    fn preserves_multiline_lists_and_paragraphs_without_trailing_newlines() {
+        assert_eq!(
+            normalize_output("  单句没有多余尾部换行 \r\n "),
+            "单句没有多余尾部换行"
+        );
+        assert_eq!(
+            normalize_output(
+                "\r\n三个任务：\r\n  1. 接入云端网关  \r\n  2. 同步技术词表 \n\n\n  3. 本地懒加载兜底 \r\n\n"
+            ),
+            "三个任务：\n1. 接入云端网关\n2. 同步技术词表\n\n3. 本地懒加载兜底"
+        );
     }
 }

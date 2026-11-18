@@ -13,6 +13,11 @@ import {
   type CleanupStatus,
   type DictationConfigView,
 } from "@/lib/dictation";
+import {
+  CLOUD_GATEWAY_REFRESH,
+  cloudGatewayCommands,
+  type CloudGatewayView,
+} from "@/lib/cloudGateway";
 import { dictationApi, type CloudStatus } from "@/lib/dictationApi";
 import { SnapshotGuard } from "@/lib/dictationState";
 
@@ -30,23 +35,31 @@ export const DictationStatus = () => {
   const [state, setState] = useState<DictationState>("idle");
   const [fallback, setFallback] = useState(false);
   const [config, setConfig] = useState<DictationConfigView | null>(null);
+  const [gateway, setGateway] = useState<CloudGatewayView | null>(null);
   const [cloud, setCloud] = useState<CloudStatus | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const helpId = useId();
   const configGeneration = useRef(0);
   const { models, currentModel } = useModelStore();
+  const cloudGatewayActive = gateway?.effective_mode === "cloud_first";
   const available =
-    currentModel === RECOGNITION_MODEL_ID &&
-    models.some((model) => model.id === currentModel && model.is_downloaded);
+    cloudGatewayActive ||
+    (currentModel === RECOGNITION_MODEL_ID &&
+      models.some((model) => model.id === currentModel && model.is_downloaded));
 
   useEffect(() => {
     let disposed = false;
     const load = async () => {
       const generation = ++configGeneration.current;
       try {
-        const view = await dictationCommands.getConfig();
-        if (!disposed && generation === configGeneration.current)
+        const [view, gw] = await Promise.all([
+          dictationCommands.getConfig(),
+          cloudGatewayCommands.getConfig().catch(() => null),
+        ]);
+        if (!disposed && generation === configGeneration.current) {
           setConfig(view);
+          setGateway(gw);
+        }
       } catch {
         if (!disposed && generation === configGeneration.current)
           setConfig(null);
@@ -54,9 +67,11 @@ export const DictationStatus = () => {
     };
     void load();
     window.addEventListener(DICTATION_CONFIG_REFRESH, load);
+    window.addEventListener(CLOUD_GATEWAY_REFRESH, load);
     return () => {
       disposed = true;
       window.removeEventListener(DICTATION_CONFIG_REFRESH, load);
+      window.removeEventListener(CLOUD_GATEWAY_REFRESH, load);
     };
   }, []);
 
@@ -125,16 +140,18 @@ export const DictationStatus = () => {
     (cloud.manual_paused ||
       cloud.cooldown_remaining_ms > 0 ||
       cloud.consecutive_failures >= 3);
-  const modeLabel = !config
-    ? t("dictation.footer.modeUnavailable")
-    : config.mode === "claude" && paused
-      ? t("dictation.footer.cloudPaused")
-      : config.mode === "off"
-        ? t("dictation.cleanup.hints.off")
-        : t("dictation.footer.mode", {
-            mode: t(`dictation.cleanup.modes.${config.mode}`),
-            strength: t(`dictation.cleanup.strengths.${config.strength}`),
-          });
+  const modeLabel = cloudGatewayActive
+    ? t("dictation.footer.cloudGatewayMode")
+    : !config
+      ? t("dictation.footer.modeUnavailable")
+      : config.mode === "claude" && paused
+        ? t("dictation.footer.cloudPaused")
+        : config.mode === "off"
+          ? t("dictation.cleanup.hints.off")
+          : t("dictation.footer.mode", {
+              mode: t(`dictation.cleanup.modes.${config.mode}`),
+              strength: t(`dictation.cleanup.strengths.${config.strength}`),
+            });
 
   return (
     <footer className="qs-status-footer">
@@ -177,11 +194,19 @@ export const DictationStatus = () => {
         <h2 className="font-medium text-text">
           {t("dictation.footer.dataTitle")}
         </h2>
-        <p>{t("dictation.footer.audioLocal")}</p>
         <p>
-          {config
-            ? t(`dictation.footer.dataModes.${config.mode}`)
-            : t("dictation.footer.modeUnavailable")}
+          {t(
+            cloudGatewayActive
+              ? "dictation.footer.audioCloudGateway"
+              : "dictation.footer.audioLocal",
+          )}
+        </p>
+        <p>
+          {cloudGatewayActive
+            ? t("dictation.footer.dataModes.cloudGateway")
+            : config
+              ? t(`dictation.footer.dataModes.${config.mode}`)
+              : t("dictation.footer.modeUnavailable")}
         </p>
         <p>{t("dictation.retention")}</p>
         <p>{t("dictation.status.currentCursor")}</p>

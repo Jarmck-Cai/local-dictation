@@ -8,6 +8,7 @@ mod catalog;
 mod chinese_script;
 pub mod cli;
 mod clipboard;
+mod cloud_gateway;
 mod commands;
 mod desktop_resources;
 mod dictation_cleanup;
@@ -235,6 +236,14 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     app_handle.listen("history-update-payload", move |_| {
         vocabulary::schedule_collected_terms_refresh(&collected_app);
     });
+    let sync_vocab_app = app_handle.clone();
+    app_handle.listen("vocabulary-updated", move |_| {
+        cloud_gateway::schedule_auto_vocabulary_sync(&sync_vocab_app);
+    });
+    let sync_collected_app = app_handle.clone();
+    app_handle.listen("collected-terms-updated", move |_| {
+        cloud_gateway::schedule_auto_vocabulary_sync(&sync_collected_app);
+    });
     vocabulary::schedule_collected_terms_refresh(app_handle);
     dictation_metrics::prune(app_handle);
     let cleanup_history = history_manager.clone();
@@ -254,7 +263,16 @@ fn initialize_core_logic(app_handle: &AppHandle) {
         vocabulary::schedule_collected_terms_refresh(&cleanup_app);
     });
     app_handle.manage(tray::TrayState::new());
-    transcription_manager.initiate_model_load();
+    if cloud_gateway::should_defer_startup_model_load(app_handle) {
+        log::info!(
+            "Cloud-first gateway configured; skipping startup local SenseVoice preload (0 MB resident)"
+        );
+    } else {
+        transcription_manager.initiate_model_load();
+    }
+    if cloud_gateway::should_auto_sync_on_startup(app_handle) {
+        cloud_gateway::schedule_auto_vocabulary_sync(app_handle);
+    }
 
     // Note: Shortcuts are NOT initialized here.
     // The frontend is responsible for calling the `initialize_shortcuts` command
@@ -700,6 +718,12 @@ pub fn run(cli_args: CliArgs) {
             dictation_cleanup::get_dictation_cloud_status,
             dictation_cleanup::set_dictation_cloud_paused,
             dictation_cleanup::toggle_dictation_cloud,
+            cloud_gateway::get_cloud_gateway_config,
+            cloud_gateway::save_cloud_gateway_config,
+            cloud_gateway::set_cloud_gateway_token,
+            cloud_gateway::clear_cloud_gateway_token,
+            cloud_gateway::test_cloud_gateway_connection,
+            cloud_gateway::sync_cloud_gateway_vocabulary,
             dictation_metrics::get_dictation_metrics,
             vocabulary::get_vocabulary,
             vocabulary::get_collected_terms,

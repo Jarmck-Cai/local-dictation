@@ -1,0 +1,28 @@
+# Caddy HTTPS reverse-proxy example for Qingshu Cloud Gateway
+# For direct HTTPS exposure when TCP 80/443 are open on the VPS.
+# (When using Cloudflare Zero Trust Tunnel `cloudflared`, point the Public Hostname
+#  `dictation.astrmind.com` directly to `http://127.0.0.1:8787` instead.)
+
+dictation.astrmind.com {
+    encode zstd gzip
+
+    request_body {
+        max_size 20MB
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+
+    reverse_proxy 127.0.0.1:8787 {
+        flush_interval -1
+        transport http {
+            read_timeout 45s
+            write_timeout 45s
+        }
+    }
+}

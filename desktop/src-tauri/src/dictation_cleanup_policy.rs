@@ -17,7 +17,7 @@ pub(crate) fn validate_cleanup_text(raw: &str, candidate: &str) -> Result<String
     }) {
         return Err("unexpected_controls");
     }
-    if numeric_fragments(raw) != numeric_fragments(text) {
+    if !numbers_preserved_or_valid_spoken_list(raw, text) {
         return Err("digits_changed");
     }
     if has_added_preface(raw, text) {
@@ -105,6 +105,245 @@ fn numeric_fragments(text: &str) -> Vec<String> {
         );
     }
     fragments
+}
+
+fn numbers_preserved_or_valid_spoken_list(raw: &str, candidate: &str) -> bool {
+    let raw_numbers = numeric_fragments(raw);
+    let candidate_numbers = numeric_fragments(candidate);
+    if raw_numbers == candidate_numbers {
+        return true;
+    }
+
+    let Some((stripped_candidate, max_item)) = strip_sequential_list_markers(candidate) else {
+        return false;
+    };
+    if !has_spoken_enumeration_cues(raw, max_item) {
+        return false;
+    }
+
+    if raw_numbers == numeric_fragments(&stripped_candidate) {
+        return true;
+    }
+
+    // Support mixed ASR output where one ordinal was transcribed as `第 1 点`
+    // and the following item as `第二点`.
+    let stripped_raw = strip_arabic_spoken_ordinals(raw, max_item);
+    numeric_fragments(&stripped_raw) == numeric_fragments(&stripped_candidate)
+}
+
+fn strip_sequential_list_markers(text: &str) -> Option<(String, usize)> {
+    let mut out = String::with_capacity(text.len());
+    let mut expected_next: usize = 1;
+    let mut current_run: usize = 0;
+    let mut max_completed_run: usize = 0;
+    let mut pending_single_item = false;
+
+    for (line_idx, line) in text.lines().enumerate() {
+        if line_idx > 0 {
+            out.push('\n');
+        }
+        if let Some((num, rest)) = parse_ordered_list_line(line) {
+            if num == expected_next && expected_next <= 20 {
+                if num == 1 {
+                    if current_run == 1 {
+                        return None;
+                    }
+                    pending_single_item = true;
+                    current_run = 1;
+                    expected_next = 2;
+                    out.push_str(rest);
+                    continue;
+                }
+                pending_single_item = false;
+                current_run = num;
+                max_completed_run = max_completed_run.max(current_run);
+                expected_next = num + 1;
+                out.push_str(rest);
+                continue;
+            } else if num == 1 && current_run >= 2 {
+                pending_single_item = true;
+                current_run = 1;
+                expected_next = 2;
+                out.push_str(rest);
+                continue;
+            } else {
+                return None;
+            }
+        }
+        out.push_str(line);
+    }
+
+    if current_run == 1 || pending_single_item || max_completed_run < 2 {
+        return None;
+    }
+
+    Some((out, max_completed_run))
+}
+
+fn parse_ordered_list_line(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    let digit_len = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_len == 0 || digit_len > 2 {
+        return None;
+    }
+    let number: usize = trimmed[..digit_len].parse().ok()?;
+    if number == 0 {
+        return None;
+    }
+    let after_digits = &trimmed[digit_len..];
+    let rest = if let Some(r) = after_digits.strip_prefix('.') {
+        if !r.starts_with([' ', '\t']) {
+            return None;
+        }
+        r.trim_start_matches([' ', '\t'])
+    } else if let Some(r) = after_digits.strip_prefix('、') {
+        r.trim_start_matches([' ', '\t'])
+    } else if let Some(r) = after_digits.strip_prefix(')') {
+        if !r.starts_with([' ', '\t']) {
+            return None;
+        }
+        r.trim_start_matches([' ', '\t'])
+    } else {
+        return None;
+    };
+    if rest.trim().is_empty() {
+        return None;
+    }
+    Some((number, rest))
+}
+
+fn has_spoken_enumeration_cues(raw: &str, max_item: usize) -> bool {
+    if max_item < 2 {
+        return false;
+    }
+    let lower = raw.to_lowercase();
+    let has_chinese_pair = (contains_ordinal_one(raw) && contains_ordinal_two(raw))
+        || (raw.contains("首先")
+            && [
+                "其次", "再者", "再次", "另外", "此外", "然后", "最后", "第二",
+            ]
+            .iter()
+            .any(|cue| raw.contains(cue)))
+        || (raw.contains("一是") && raw.contains("二是"))
+        || (raw.contains("其一") && raw.contains("其二"))
+        || (raw.contains("一、") && raw.contains("二、"))
+        || (raw.contains("一，") && raw.contains("二，") && raw.contains("点"));
+
+    let has_english_pair = (has_english_word(&lower, "first")
+        && has_english_word(&lower, "second"))
+        || (has_english_word(&lower, "firstly") && has_english_word(&lower, "secondly"));
+
+    has_chinese_pair || has_english_pair
+}
+
+fn contains_ordinal_one(raw: &str) -> bool {
+    const NON_LIST_SUFFIXES: &[&str] = &[
+        "时间",
+        "名",
+        "人称",
+        "线",
+        "季度",
+        "届",
+        "页",
+        "版",
+        "章",
+        "节",
+        "天",
+        "周",
+        "年",
+        "个月",
+        "阶段",
+        "印象",
+        "反应",
+        "顺位",
+        "梯队",
+        "现场",
+        "生产力",
+        "要务",
+    ];
+    for (idx, _) in raw.match_indices("第一") {
+        let after = &raw[idx + "第一".len()..];
+        if !NON_LIST_SUFFIXES.iter().any(|s| after.starts_with(s)) {
+            return true;
+        }
+    }
+    contains_arabic_ordinal(raw, 1)
+}
+
+fn contains_ordinal_two(raw: &str) -> bool {
+    const NON_LIST_SUFFIXES: &[&str] = &[
+        "名", "人称", "线", "季度", "届", "页", "版", "章", "节", "天", "周", "年", "个月", "阶段",
+        "梯队", "现场",
+    ];
+    for (idx, _) in raw.match_indices("第二") {
+        let after = &raw[idx + "第二".len()..];
+        if !NON_LIST_SUFFIXES.iter().any(|s| after.starts_with(s)) {
+            return true;
+        }
+    }
+    contains_arabic_ordinal(raw, 2)
+}
+
+fn contains_arabic_ordinal(raw: &str, target: usize) -> bool {
+    for (idx, _) in raw.match_indices('第') {
+        let after = raw[idx + '第'.len_utf8()..].trim_start_matches(' ');
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            continue;
+        }
+        if after[..digits].parse::<usize>().ok() == Some(target) {
+            let suffix = after[digits..].trim_start_matches(' ');
+            if suffix.is_empty()
+                || [
+                    "点", "个", "项", "条", "步", "是", "，", ",", "、", "：", ":",
+                ]
+                .iter()
+                .any(|s| suffix.starts_with(s))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn strip_arabic_spoken_ordinals(raw: &str, max_item: usize) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(pos) = rest.find('第') {
+        out.push_str(&rest[..pos]);
+        let after_di = &rest[pos + '第'.len_utf8()..];
+        let trimmed = after_di.trim_start_matches(' ');
+        let space_len = after_di.len() - trimmed.len();
+        let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 {
+            if let Ok(num) = trimmed[..digits].parse::<usize>() {
+                let after_num = &trimmed[digits..];
+                let after_num_trimmed = after_num.trim_start_matches(' ');
+                if (1..=max_item).contains(&num)
+                    && [
+                        "点", "个", "项", "条", "步", "是", "，", ",", "、", "：", ":",
+                    ]
+                    .iter()
+                    .any(|s| after_num_trimmed.starts_with(s))
+                {
+                    out.push('第');
+                    rest = &after_di[space_len + digits..];
+                    continue;
+                }
+            }
+        }
+        out.push('第');
+        rest = after_di;
+    }
+    out.push_str(rest);
+    out
+}
+
+fn has_english_word(lower: &str, target: &str) -> bool {
+    lower
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .any(|w| w == target)
 }
 
 fn comparison_text(text: &str) -> String {
@@ -645,6 +884,116 @@ mod tests {
         assert_eq!(
             validation_key_from_text("# ANTHROPIC_API_KEY=fake\nOTHER=value"),
             Err("validation_key_not_found")
+        );
+    }
+
+    #[test]
+    fn allows_spoken_ordinals_rewritten_to_multiline_ordered_lists() {
+        // Positive 1: Spoken 第一/第二/第三 -> 1. / 2. / 3.
+        assert_eq!(
+            validate_cleanup_text(
+                "今天有三个重点 第一 把网关鉴权写好 第二 同步 SQLite 词库 第三 支持本地懒加载兜底",
+                "今天有三个重点：\n1. 把网关鉴权写好\n2. 同步 SQLite 词库\n3. 支持本地懒加载兜底"
+            ),
+            Ok(
+                "今天有三个重点：\n1. 把网关鉴权写好\n2. 同步 SQLite 词库\n3. 支持本地懒加载兜底"
+                    .into()
+            )
+        );
+
+        // Positive 2: Spoken 首先/其次/最后 with inline amounts, dates, negative percentages, and negations
+        assert!(validate_cleanup_text(
+            "首先不要修改 3500 元预算，其次误差控制在 -2.5% 以内，最后在 11 月 20 日前交付",
+            "1. 不要修改 3500 元预算；\n2. 误差控制在 -2.5% 以内；\n3. 在 11 月 20 日前交付。"
+        )
+        .is_ok());
+
+        // Positive 3: Spoken 一是/二是 and 其一/其二
+        assert!(validate_cleanup_text(
+            "主要改动两块，一是放开多行列表，二是保持零常驻内存",
+            "主要改动两块：\n1. 放开多行列表\n2. 保持零常驻内存"
+        )
+        .is_ok());
+        assert!(validate_cleanup_text(
+            "其一检查端口 8787，其二检查证书有效期 90 天",
+            "1. 检查端口 8787\n2. 检查证书有效期 90 天"
+        )
+        .is_ok());
+
+        // Positive 4: Mixed ASR output (`第 1 点` + `第二点`) and English (`first` + `second`)
+        assert!(validate_cleanup_text(
+            "第 1 点打开日志，第二点核对超时 8000 毫秒",
+            "1. 打开日志\n2. 核对超时 8000 毫秒"
+        )
+        .is_ok());
+        assert!(validate_cleanup_text(
+            "Please do two things, first run cargo test, second push the branch",
+            "Please do two things:\n1. Run cargo test\n2. Push the branch"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_tampering_inside_spoken_lists_and_fake_non_enumeration_lists() {
+        // Negative 1: Tampered amount inside a valid spoken list
+        assert_eq!(
+            validate_cleanup_text(
+                "第一预算定在 3500 元，第二工期定在 14 天",
+                "1. 预算定在 4500 元\n2. 工期定在 14 天"
+            ),
+            Err("digits_changed")
+        );
+
+        // Negative 2: Dropped minus sign inside a spoken list
+        assert_eq!(
+            validate_cleanup_text(
+                "首先偏差不超过 -1.5%，其次保留 2 台机器",
+                "1. 偏差不超过 1.5%\n2. 保留 2 台机器"
+            ),
+            Err("digits_changed")
+        );
+
+        // Negative 3: Altered date inside a spoken list
+        assert_eq!(
+            validate_cleanup_text(
+                "第一在 11 月 17 日冻结，第二在 11 月 20 日发布",
+                "1. 在 11 月 18 日冻结\n2. 在 11 月 20 日发布"
+            ),
+            Err("digits_changed")
+        );
+
+        // Negative 4: Dropped negation inside a spoken list
+        assert_eq!(
+            validate_cleanup_text("第一不要删除备份，第二更新配置", "1. 删除备份\n2. 更新配置"),
+            Err("meaning_markers_changed")
+        );
+
+        // Negative 5: Non-enumeration compounds ("第一时间", "第一名") must not allow list digits
+        assert_eq!(
+            validate_cleanup_text(
+                "请第一时间同步进展，争取拿到第一名",
+                "1. 请同步进展\n2. 争取拿到好成绩"
+            ),
+            Err("digits_changed")
+        );
+
+        // Negative 6: Absorbing real time/quantity digit ("1 点钟") into list marker `1.`
+        assert_eq!(
+            validate_cleanup_text(
+                "请在 1 点钟发邮件，第二点确认会议室",
+                "1. 发邮件\n2. 确认会议室"
+            ),
+            Err("digits_changed")
+        );
+
+        // Negative 7: Out-of-order / skipped list numbers (`1.` then `3.`) or single `1.`
+        assert_eq!(
+            validate_cleanup_text("第一检查网关，第二检查词表", "1. 检查网关\n3. 检查词表"),
+            Err("digits_changed")
+        );
+        assert_eq!(
+            validate_cleanup_text("第一检查网关", "1. 检查网关"),
+            Err("digits_changed")
         );
     }
 }

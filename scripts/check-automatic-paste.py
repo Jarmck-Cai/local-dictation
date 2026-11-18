@@ -392,13 +392,33 @@ mod automatic_tests {
     fn mstsc_manual_recovery_normalizes_text_and_ignores_automatic_copy_preference() {
         let app = app(100, PasteMethod::CtrlV, true);
         DESKTOP.with(|s| s.borrow_mut().rdp = true);
-        assert_eq!(paste_latest_preserving_clipboard("中\r\nA\t😀 C:\\tmp\\n".into(), app, cancelled), Ok(false));
+        assert_eq!(paste_latest_preserving_clipboard(" \r\n中\t\0A 😀 C:\\tmp\\n ".into(), app, cancelled), Ok(false));
         DESKTOP.with(|s| { let s=s.borrow();
             assert_eq!(s.received, ["中 A 😀 C:\\tmp\\n"]);
             assert_eq!(s.clipboard, "synthetic-previous-transcript");
             assert_eq!((s.unicode_calls,s.protected_calls,s.legacy_writes),(1,0,0));
             assert!(s.chord_times.is_empty()); assert!(s.writes.is_empty());
         });
+    }
+    #[test]
+    fn multiline_list_pastes_locally_and_refuses_unsafe_mstsc_return_injection() {
+        let local = app(100, PasteMethod::CtrlV, false);
+        assert_eq!(
+            super::paste_cancellable("重点：\r\n1. 第一项\r\n2. 第二项\r\n".into(), local, cancelled),
+            Ok(Submission::ClipboardReadObserved)
+        );
+        DESKTOP.with(|s| {
+            let s = s.borrow();
+            assert_eq!(s.received, ["重点：\n1. 第一项\n2. 第二项"]);
+            assert_eq!((s.protected_calls, s.unicode_calls), (1, 0));
+        });
+
+        let remote = app(100, PasteMethod::CtrlV, false);
+        DESKTOP.with(|s| s.borrow_mut().rdp = true);
+        assert_eq!(
+            paste_latest_preserving_clipboard("1. 第一项\n2. 第二项".into(), remote, cancelled),
+            Err("manual_paste_requires_copy".into())
+        );
     }
     #[test]
     fn mstsc_cancel_during_preflight_has_no_input_or_clipboard_effect() {

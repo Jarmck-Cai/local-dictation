@@ -8,6 +8,8 @@ mod cloud_policy;
 #[path = "dictation_cleanup_policy.rs"]
 mod policy;
 
+pub(crate) use policy::validate_cleanup_text;
+
 use futures_util::future::{AbortHandle, AbortRegistration, Abortable};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -293,7 +295,7 @@ impl Drop for CloudRequestGuard {
 }
 
 /// Deliberately has no Debug/Serialize/Clone implementation.
-struct SecretBytes(Vec<u8>);
+pub(crate) struct SecretBytes(pub(crate) Vec<u8>);
 
 impl Drop for SecretBytes {
     fn drop(&mut self) {
@@ -304,6 +306,14 @@ impl Drop for SecretBytes {
         }
         std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+pub(crate) fn protect_secret_bytes(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
+    platform_key::protect(bytes)
+}
+
+pub(crate) fn unprotect_secret_bytes(bytes: &[u8]) -> Result<SecretBytes, &'static str> {
+    platform_key::unprotect(bytes)
 }
 
 fn secret_from_string(key: String) -> Result<SecretBytes, &'static str> {
@@ -464,6 +474,17 @@ impl CleanupSession {
             Ok(CleanupMode::Local) => "local",
             Ok(CleanupMode::Off) => "off",
             Err(_) => "unavailable",
+        }
+    }
+
+    pub(crate) fn gateway_preferences(&self) -> (bool, CleanupStrength, bool) {
+        match &self.config {
+            Ok(config) => (
+                config.mode != CleanupMode::Off,
+                config.strength,
+                config.natural_paragraphs,
+            ),
+            Err(_) => (true, CleanupStrength::Light, true),
         }
     }
 }
@@ -661,7 +682,7 @@ fn cleanup_prompt(config: &DictationConfig, terms: &[String]) -> String {
         CleanupStrength::Clear => "\n整理强度：清晰表达。在忠实原意范围内允许局部调整语序和断句，使表达清楚；不增加内容、不扩写、不改变行动要求。",
     });
     prompt.push_str(if config.natural_paragraphs {
-        "\n按内容关系合理断句并分自然段；主题或语义转折确有需要时才空行，不要每次停顿都分段。"
+        "\n按内容关系合理断句并分自然段；主题或语义转折确有需要时才空行，不要每次停顿都分段。当说话人明确使用“第一、第二、第三”或“首先、其次、最后”等列举多项要点时，可结构化为跨行 1. / 2. / 3. 有序列表；普通单句或“第一时间、第一名”等固定搭配绝不拆成列表。"
     } else {
         "\n合理断句，保留原有段落，不额外增加段落、空行或列表。"
     });

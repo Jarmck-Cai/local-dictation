@@ -528,12 +528,61 @@ fn snapshot() -> Result<Vec<Saved>, &'static str> {
     Ok(verified)
 }
 
+fn windows_clipboard_crlf(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains(['\r', '\n']) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    // Check whether every line break is already canonical CR-LF (`\r\n`).
+    let bytes = text.as_bytes();
+    let mut already_crlf = true;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' {
+            if bytes.get(i + 1) == Some(&b'\n') {
+                i += 2;
+                continue;
+            }
+            already_crlf = false;
+            break;
+        } else if bytes[i] == b'\n' {
+            already_crlf = false;
+            break;
+        }
+        i += 1;
+    }
+    if already_crlf {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut normalized = String::with_capacity(text.len() + 8);
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                let _ = chars.next();
+            }
+            normalized.push_str("\r\n");
+        } else if ch == '\n' {
+            normalized.push_str("\r\n");
+        } else {
+            normalized.push(ch);
+        }
+    }
+    std::borrow::Cow::Owned(normalized)
+}
+
 fn text_memory(text: &str) -> Result<Global, &'static str> {
     let invalid = "manual_paste_invalid_text";
     if text.is_empty() || text.contains('\0') {
         return Err(invalid);
     }
-    let units = text.encode_utf16().count().checked_add(1).ok_or(invalid)?;
+    // Win32 CF_UNICODETEXT (and Windows' synthesized CF_TEXT/CF_OEMTEXT) expects
+    // CR-LF line endings so classic Edit controls and modern editors all break lines cleanly.
+    let canonical = windows_clipboard_crlf(text);
+    let units = canonical
+        .encode_utf16()
+        .count()
+        .checked_add(1)
+        .ok_or(invalid)?;
     let bytes = units.checked_mul(size_of::<u16>()).ok_or(invalid)?;
     if bytes > MAX_TEXT_BYTES {
         return Err(policy::LIMIT_EXCEEDED);
@@ -542,7 +591,7 @@ fn text_memory(text: &str) -> Result<Global, &'static str> {
     unsafe {
         let locked = MemoryLock::new(memory.0)?;
         let ptr = locked.ptr.cast::<u16>();
-        for (index, unit) in text.encode_utf16().chain(Some(0)).enumerate() {
+        for (index, unit) in canonical.encode_utf16().chain(Some(0)).enumerate() {
             ptr.add(index).write(unit);
         }
     }

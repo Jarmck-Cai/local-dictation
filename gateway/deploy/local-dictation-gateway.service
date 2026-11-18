@@ -1,0 +1,29 @@
+[Unit]
+Description=Qingshu (Local Dictation) Lightweight ASR & Vocabulary Sync Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=local-dictation-gateway
+WorkingDirectory=/var/lib/local-dictation-gateway
+EnvironmentFile=/etc/local-dictation-gateway/gateway.env
+Environment=GATEWAY_DB_PATH=/var/lib/local-dictation-gateway/gateway.db
+ExecStart=/usr/local/bin/local-dictation-gateway
+Restart=on-failure
+RestartSec=3
+
+# Hardening & low-memory safety for 1 GB Oracle VPS
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target
