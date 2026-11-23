@@ -9,7 +9,7 @@ use std::{
 pub const FRAME_SAMPLES: usize = 160;
 pub const LATENCY_SAMPLES: usize = 128;
 #[link(name = "webrtc_apm", kind = "static")]
-#[link(name = "winmm")]
+#[cfg_attr(target_os = "windows", link(name = "winmm"))]
 extern "C" {
     fn meeting_apm_create(reserved: c_int) -> *mut c_void;
     fn meeting_apm_destroy(handle: *mut c_void);

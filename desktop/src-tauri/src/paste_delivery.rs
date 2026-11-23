@@ -39,7 +39,7 @@ where
     D: FnOnce(Box<dyn FnOnce() + Send>) -> Result<(), String>,
     P: FnOnce() + Send + 'static,
 {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         let _ = dispatch_ui;
         dispatch_paste(
@@ -54,7 +54,7 @@ where
             paste,
         )
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         dispatch_paste(guard, dispatch_ui, paste)
     }

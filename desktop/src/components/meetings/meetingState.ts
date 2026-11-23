@@ -21,7 +21,9 @@ export type MeetingError =
   | "processing"
   | "export"
   | "missing"
-  | "unsupported";
+  | "unsupported"
+  | "macosVersion"
+  | "macosAudioPermission";
 
 const errorCodes: Record<string, MeetingError> = {
   meeting_active: "busy",
@@ -97,6 +99,15 @@ const errorCodes: Record<string, MeetingError> = {
   meeting_link: "export",
   meeting_id: "missing",
   meeting_not_found: "missing",
+  meeting_capture_macos_version: "macosVersion",
+  meeting_capture_macos_permission: "macosAudioPermission",
+  meeting_capture_macos_microphone: "capture",
+  meeting_capture_macos_interrupted: "capture",
+  meeting_capture_macos_start: "capture",
+  meeting_capture_macos_stop: "capture",
+  meeting_capture_macos_timeout: "capture",
+  meeting_capture_clock_invalid: "capture",
+  meeting_capture_format_changed: "capture",
   meeting_capture_platform_unsupported: "unsupported",
   meeting_unsupported: "unsupported",
 };

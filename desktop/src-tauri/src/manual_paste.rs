@@ -168,6 +168,15 @@ pub fn handle_shortcut(app: &AppHandle, is_pressed: bool) {
                 return;
             }
         };
+        #[cfg(target_os = "macos")]
+        let cancelled_for_paste = {
+            let flag = permit.cancellation_flag();
+            let audio = Arc::clone(&audio);
+            move || {
+                flag.load(std::sync::atomic::Ordering::Acquire)
+                    || audio.was_cancelled_since(cancel_generation)
+            }
+        };
         let is_cancelled = || permit.is_cancelled() || audio.was_cancelled_since(cancel_generation);
         let result = policy::execute(
             is_cancelled,
@@ -193,7 +202,10 @@ pub fn handle_shortcut(app: &AppHandle, is_pressed: bool) {
                     Ok(false) => crate::clipboard::paste_latest_preserving_clipboard(
                         body,
                         app.clone(),
+                        #[cfg(not(target_os = "macos"))]
                         is_cancelled,
+                        #[cfg(target_os = "macos")]
+                        cancelled_for_paste,
                     ),
                     Ok(true) => Err("keys_held".into()),
                     Err(code) => Err(code.into()),
@@ -330,7 +342,25 @@ pub(crate) fn any_keyboard_key_down() -> Result<bool, &'static str> {
     Ok((0x08..=0xfe).any(|key| unsafe { GetAsyncKeyState(key) } < 0))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+pub(crate) fn any_keyboard_key_down() -> Result<bool, &'static str> {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+        fn CGEventSourceKeyState(state_id: i32, key: u16) -> bool;
+    }
+    // Query only aggregate state in the current login session. Caps Lock is a
+    // latched toggle and is deliberately excluded from physical hold checks.
+    if !unsafe { AXIsProcessTrusted() } || crate::secure_input::is_enabled_now() {
+        return Err("keyboard_unavailable");
+    }
+    const COMBINED_SESSION: i32 = 0;
+    Ok((0..=127)
+        .filter(|&key| key != 57)
+        .any(|key| unsafe { CGEventSourceKeyState(COMBINED_SESSION, key) }))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub(crate) fn any_keyboard_key_down() -> Result<bool, &'static str> {
     Err("unsupported")
 }

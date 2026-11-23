@@ -11,10 +11,16 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager};
 
-#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")
+))]
 struct MeetingModelUse(Arc<crate::managers::transcription::TranscriptionManager>);
 
-#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")
+))]
 impl Drop for MeetingModelUse {
     fn drop(&mut self) {
         self.0.finish_meeting_model_use();
@@ -22,11 +28,18 @@ impl Drop for MeetingModelUse {
 }
 
 fn supported() -> bool {
-    cfg!(all(
-        target_os = "windows",
-        target_arch = "x86_64",
-        target_env = "msvc"
-    ))
+    #[cfg(target_os = "macos")]
+    {
+        super::capture::macos_supported()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        cfg!(all(
+            target_os = "windows",
+            target_arch = "x86_64",
+            target_env = "msvc"
+        ))
+    }
 }
 
 fn transcription_error(error: anyhow::Error) -> String {
@@ -72,7 +85,10 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
             Ok(Box::new(permit) as Box<dyn Send>)
         }),
         process: Arc::new(move |store, id, cancelled, progress| {
-            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+            #[cfg(any(
+                target_os = "macos",
+                all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")
+            ))]
             {
                 let manager = processing_app
                     .try_state::<Arc<crate::managers::transcription::TranscriptionManager>>()
@@ -91,7 +107,10 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
                     progress,
                 )
             }
-            #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+            #[cfg(not(any(
+                target_os = "macos",
+                all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")
+            )))]
             {
                 let _ = (store, id, cancelled, progress, &processing_app, &vad_model);
                 Err("meeting_unsupported".into())
@@ -107,6 +126,9 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
 
 fn runtime(app: &AppHandle) -> Result<Arc<MeetingRuntime>, String> {
     if !supported() {
+        #[cfg(target_os = "macos")]
+        return Err("meeting_capture_macos_version".into());
+        #[cfg(not(target_os = "macos"))]
         return Err("meeting_unsupported".into());
     }
     app.try_state::<Arc<MeetingRuntime>>()

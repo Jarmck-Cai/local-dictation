@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Mic, RefreshCw, X } from "lucide-react";
 import { Button } from "../ui/Button";
+import { useOsType } from "../../hooks/useOsType";
 import { resolveMeetingDeviceId } from "./meetingDevices";
 import { MeetingErrorMessage } from "./meetingPresentation";
 import type { MeetingsSnapshot, MeetingsState } from "./meetingState";
@@ -18,6 +19,7 @@ export function MeetingRecordingDialog({
   state: MeetingsState | null;
 }) {
   const { t } = useTranslation();
+  const isMac = useOsType() === "macos";
   const dialog = useRef<HTMLDialogElement>(null);
   const [title, setTitle] = useState("");
   const [microphoneId, setMicrophoneId] = useState("");
@@ -122,7 +124,12 @@ export function MeetingRecordingDialog({
               {microphoneDevices.map((device) => (
                 <option key={device.id} value={device.id}>
                   {device.is_default
-                    ? t("meetings.defaultDevice", { name: device.name })
+                    ? t(
+                        isMac
+                          ? "meetings.macDefaultDevice"
+                          : "meetings.defaultDevice",
+                        { name: device.name },
+                      )
                     : device.name}
                 </option>
               ))}
@@ -141,19 +148,21 @@ export function MeetingRecordingDialog({
               <option value="">{t("meetings.choosePlayback")}</option>
               {playbackDevices.map((device) => (
                 <option key={device.id} value={device.id}>
-                  {device.is_default
-                    ? t("meetings.defaultDevice", { name: device.name })
-                    : device.name}
+                  {isMac
+                    ? t("meetings.macSystemAudio")
+                    : device.is_default
+                      ? t("meetings.defaultDevice", { name: device.name })
+                      : device.name}
                 </option>
               ))}
             </select>
           </label>
         </div>
         <p className="qs-meeting-caption" id="meeting-playback-hint">
-          {t("meetings.playbackHint")}
+          {t(isMac ? "meetings.macPlaybackHint" : "meetings.playbackHint")}
         </p>
         <p className="qs-meeting-caption" id="meeting-device-hint">
-          {t("meetings.deviceHint")}
+          {t(isMac ? "meetings.macDeviceHint" : "meetings.deviceHint")}
         </p>
         {snapshot.devicesLoading && (
           <p role="status" className="qs-meeting-caption">

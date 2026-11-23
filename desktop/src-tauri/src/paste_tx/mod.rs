@@ -38,12 +38,10 @@
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
-#[cfg(target_os = "macos")]
-use macos as platform;
 #[cfg(target_os = "windows")]
 use windows as platform;
 
@@ -190,7 +188,7 @@ pub(crate) fn send_chord(
 /// the caller should fall back to the legacy paste path. On `Ok`, publishing
 /// and chord injection have completed and the guarded restore (plus
 /// auto-submit) finishes asynchronously.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 pub(crate) fn try_reliable_paste(
     text: &str,
     app_handle: &tauri::AppHandle,

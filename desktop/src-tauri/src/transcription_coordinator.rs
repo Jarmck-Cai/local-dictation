@@ -846,6 +846,11 @@ pub struct ManualPastePermit {
 }
 
 impl ManualPastePermit {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn cancellation_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }

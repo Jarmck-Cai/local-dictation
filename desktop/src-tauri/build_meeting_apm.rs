@@ -42,6 +42,10 @@ fn digest(path: &Path) -> String {
 }
 
 pub fn build() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        build_macos();
+        return;
+    }
     println!("cargo:rerun-if-env-changed=MEETING_APM_DIR");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
         || std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64")
@@ -162,4 +166,37 @@ pub fn build() {
     );
     println!("cargo:rustc-link-lib=static=webrtc_apm");
     println!("cargo:rustc-link-lib=winmm");
+}
+
+fn build_macos() {
+    let crate_root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").expect("Read macOS architecture");
+    let root = crate_root.join(format!("../../.cache/native/webrtc-apm-2.1-macos-{arch}"));
+    let root = dunce::canonicalize(root)
+        .expect("Run bash scripts/prepare-macos.sh before building the macOS application");
+    let archive = child(&root, "libwebrtc_apm.a");
+    let checksum = child(&root, "libwebrtc_apm.sha256");
+    for path in [&archive, &checksum] {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    assert_eq!(
+        digest(&archive),
+        std::fs::read_to_string(checksum)
+            .expect("Read macOS APM checksum")
+            .trim(),
+        "macOS meeting audio archive changed; rerun scripts/prepare-macos.sh"
+    );
+    println!("cargo:rerun-if-changed=native/meeting_apm");
+    cc::Build::new()
+        .cpp(true)
+        .std("c++20")
+        .include(child(&root, "source/webrtc"))
+        .include(child(&root, "source/subprojects/abseil-cpp-20240722.0"))
+        .file(crate_root.join("native/meeting_apm/meeting_apm_wrapper.cpp"))
+        .define("WEBRTC_MAC", None)
+        .define("WEBRTC_POSIX", None)
+        .define("WEBRTC_LIBRARY_IMPL", None)
+        .compile("meeting_apm_bridge");
+    println!("cargo:rustc-link-search=native={}", root.display());
+    println!("cargo:rustc-link-lib=static=webrtc_apm");
 }

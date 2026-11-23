@@ -316,9 +316,9 @@ fn request_stop_boundary(
 #[cfg(target_os = "windows")]
 pub use native::{list_devices, now_qpc_100ns, start_capture, CaptureHandle};
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub struct CaptureHandle;
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 impl CaptureHandle {
     pub fn start_qpc_100ns(&self) -> u64 {
         0
@@ -327,15 +327,15 @@ impl CaptureHandle {
         Err("meeting_capture_platform_unsupported".into())
     }
 }
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn list_devices() -> Result<Vec<super::types::DeviceInfo>, String> {
     Err("meeting_capture_platform_unsupported".into())
 }
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn now_qpc_100ns() -> Result<u64, String> {
     Err("meeting_capture_platform_unsupported".into())
 }
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn start_capture(
     _config: super::types::CaptureConfig,
     _sender: CaptureSender,
@@ -343,6 +343,14 @@ pub fn start_capture(
 ) -> Result<CaptureHandle, String> {
     Err("meeting_capture_platform_unsupported".into())
 }
+
+#[cfg(target_os = "macos")]
+#[path = "capture_macos.rs"]
+mod macos;
+#[cfg(target_os = "macos")]
+pub(super) use macos::supported as macos_supported;
+#[cfg(target_os = "macos")]
+pub use macos::{list_devices, start_capture, CaptureHandle};
 
 #[cfg(target_os = "windows")]
 mod native {

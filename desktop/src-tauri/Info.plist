@@ -3,6 +3,8 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Request microphone access to transcribe audio locally</string>
+  <string>Light Dictation uses the microphone for dictation and local meeting recording</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Light Dictation captures computer audio when you start a meeting recording.</string>
 </dict>
 </plist>

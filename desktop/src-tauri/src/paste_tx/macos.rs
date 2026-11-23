@@ -1,33 +1,18 @@
-//! macOS reliable paste.
-//!
-//! Publishes the transcript with `declareTypes:owner:`, which puts a *promise*
-//! on the general pasteboard instead of data. When any consumer actually
-//! requests the text, AppKit calls `pasteboard:provideDataForType:` on our
-//! owner object — that callback is the read receipt. The previous clipboard is
-//! restored once receipts go quiet (see `paste_tx::evaluate`), guarded by the
-//! pasteboard `changeCount` so we never clobber a newer user copy.
-//!
-//! Threading: publishing and chord injection happen on the calling (main)
-//! thread, because promised pasteboard data is serviced by AppKit on the main
-//! run loop. The (potentially seconds-long) wait runs on a worker thread; the
-//! guarded restore is dispatched back to the main thread.
-
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
-
-use log::{error, info};
-use objc2::rc::Retained;
-use objc2::{define_class, msg_send, AnyThread, DefinedClass};
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
-use objc2_foundation::{NSArray, NSInteger, NSObject, NSString};
-use tauri::{AppHandle, Manager};
-use tauri_plugin_clipboard_manager::ClipboardExt;
-
+//! Protected macOS output. AppKit pasteboard promises are serviced on the main
+//! run loop. The recording/output permit stays on the worker until settlement.
 use super::{evaluate, send_chord, TxState, WaitDecision};
-use crate::clipboard::send_return_key;
-use crate::input::EnigoState;
-use crate::settings::{AutoSubmitKey, ClipboardHandling, PasteMethod};
+use crate::clipboard::with_enigo;
+use crate::settings::{ClipboardHandling, PasteMethod};
+use objc2::{
+    define_class, msg_send, rc::Retained, runtime::ProtocolObject, AnyThread, DefinedClass,
+};
+use objc2_app_kit::{
+    NSPasteboard, NSPasteboardItem, NSPasteboardTypeString, NSPasteboardWriting, NSWorkspace,
+};
+use objc2_foundation::{NSArray, NSInteger, NSObject, NSString};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
+use tauri::AppHandle;
 
 /// Concealment marker types declared alongside the text so that well-behaved
 /// third-party clipboard managers (Maccy, Paste, ...) skip the transcript.
@@ -54,7 +39,7 @@ define_class!(
 
     impl HandyPasteProvider {
         // NSPasteboardOwner informal protocol: the pasteboard is asking for the
-        // promised data — our receipt that a consumer read the clipboard.
+        // promised data â€” our receipt that a consumer read the clipboard.
         #[unsafe(method(pasteboard:provideDataForType:))]
         fn pasteboard_provide_data_for_type(&self, pasteboard: &NSPasteboard, data_type: &NSString) {
             let ivars = self.ivars();
@@ -63,18 +48,22 @@ define_class!(
             // Only a text read counts as a receipt: a request for one of the
             // concealment marker types is a clipboard manager inspecting the
             // markers, not the paste target reading the transcript.
-            if is_text {
-                if let Ok(mut state) = ivars.state.lock() {
-                    state.record_receipt(Instant::now());
-                }
-            }
             let payload = if is_text {
                 NSString::from_str(&ivars.text)
             } else {
                 // Concealment marker types are never handed out.
                 NSString::from_str("")
             };
-            let _ = pasteboard.setString_forType(&payload, data_type);
+            let supplied = pasteboard.setString_forType(&payload, data_type);
+            if is_text {
+                if let Ok(mut state) = ivars.state.lock() {
+                    if supplied {
+                        state.record_receipt(Instant::now());
+                    } else {
+                        state.injection_failed = true;
+                    }
+                }
+            }
         }
 
         #[unsafe(method(pasteboardChangedOwner:))]
@@ -93,244 +82,243 @@ impl HandyPasteProvider {
     }
 }
 
-struct MacPending {
+type Snapshot = Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>>;
+
+const MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
+
+fn snapshot(pasteboard: &NSPasteboard) -> Result<Snapshot, String> {
+    let mut copied = Vec::new();
+    let mut bytes = 0usize;
+    if let Some(items) = pasteboard.pasteboardItems() {
+        if items.len() > 256 {
+            return Err("manual_paste_backup_too_large".into());
+        }
+        for item in items.iter() {
+            let copy = NSPasteboardItem::new();
+            let types = item.types();
+            if types.is_empty() || types.len() > 128 {
+                return Err("manual_paste_backup_failed".into());
+            }
+            for kind in types.iter() {
+                let name = kind.to_string();
+                if name.contains("filepromise") || name == "NSFilesPromisePboardType" {
+                    return Err("manual_paste_unsupported_format".into());
+                }
+                let data = item
+                    .dataForType(&kind)
+                    .ok_or("manual_paste_backup_failed")?;
+                bytes = bytes
+                    .checked_add(data.len())
+                    .filter(|&total| total <= MAX_SNAPSHOT_BYTES)
+                    .ok_or("manual_paste_backup_too_large")?;
+                if !copy.setData_forType(&data, &kind) {
+                    return Err("manual_paste_backup_failed".into());
+                }
+            }
+            copied.push(ProtocolObject::from_retained(copy));
+        }
+    }
+    Ok(copied)
+}
+
+fn foreground_pid() -> Option<i32> {
+    NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .map(|app| app.processIdentifier())
+        .filter(|&pid| pid > 0)
+}
+
+fn preflight(cancelled: &dyn Fn() -> bool) -> Result<(), String> {
+    if cancelled() {
+        return Err("manual_paste_cancelled".into());
+    }
+    match crate::manual_paste::any_keyboard_key_down() {
+        Ok(false) => Ok(()),
+        Ok(true) => Err("keys_held".into()),
+        Err(code) => Err(code.into()),
+    }
+}
+
+fn on_main<T: Send + 'static>(
+    app: &AppHandle,
+    execute: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let (reply, result) = mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let _ = reply.send(execute());
+    })
+    .map_err(|_| "manual_paste_unavailable")?;
+    result.recv().map_err(|_| "manual_paste_unavailable")?
+}
+
+// Keep ObjC pasteboard items and their owner in the UI thread. Only the receipt
+// state and a settlement closure are transferred between worker and main.
+struct Pending {
     state: Arc<Mutex<TxState>>,
-    saved_text: Option<String>,
-    saved_image: Option<tauri::image::Image<'static>>,
+    saved: Snapshot,
     change_count: NSInteger,
-    provider: Option<Retained<HandyPasteProvider>>,
-    auto_submit: bool,
-    auto_submit_key: AutoSubmitKey,
-    /// ClipboardHandling::CopyToClipboard — instead of restoring, settle by
-    /// re-writing the transcript as plain text (without the concealment
-    /// markers), so clipboard managers record it and it outlives the promise.
-    preserve_transcript: bool,
-    /// The transcript, for the `preserve_transcript` re-write at settle time.
-    transcript: String,
-    settled: bool,
+    _provider: Retained<HandyPasteProvider>,
+    injection: Result<(), String>,
 }
 
-/// The transaction currently holding the clipboard, if any. A new paste
-/// settles it before snapshotting (see `flush_pending`).
-static PENDING: Mutex<Option<Arc<Mutex<MacPending>>>> = Mutex::new(None);
-
-/// Settles a transaction exactly once: sends the owed auto-submit Enter and
-/// restores the previous clipboard, guarded so we never clobber a newer copy.
-/// Must run on the main thread. Uses the already-locked enigo when called
-/// from within `paste` (which holds the lock), otherwise locks it itself.
-fn settle(
-    pending: &Arc<Mutex<MacPending>>,
-    app_handle: &AppHandle,
-    enigo: Option<&mut enigo::Enigo>,
-) {
-    let mut p = match pending.lock() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    if p.settled {
-        return;
-    }
-    p.settled = true;
-
-    let (receipt_seen, ownership_lost) = match p.state.lock() {
-        Ok(st) => (st.any_receipt_after_injection(), st.ownership_lost),
-        Err(_) => (false, true),
-    };
-
-    // Auto-submit only once the target demonstrably read the transcript;
-    // pressing Enter after an unconfirmed paste could submit stale content.
-    if p.auto_submit && receipt_seen {
-        match enigo {
-            Some(e) => {
-                let _ = send_return_key(e, p.auto_submit_key);
-            }
-            None => {
-                if let Some(enigo_state) = app_handle.try_state::<EnigoState>() {
-                    if let Ok(mut e) = enigo_state.0.lock() {
-                        let _ = send_return_key(&mut e, p.auto_submit_key);
-                    }
-                }
-            }
-        }
-    }
-
-    let still_ours =
-        !ownership_lost && NSPasteboard::generalPasteboard().changeCount() == p.change_count;
-    if !still_ours {
-        info!("[reliable-paste] clipboard changed externally; leaving it untouched");
-    } else if p.preserve_transcript {
-        // The user asked for the transcript to stay on the clipboard: replace
-        // the concealed promise with plain text so clipboard managers record
-        // it and it survives this app exiting.
-        let _ = app_handle.clipboard().write_text(&p.transcript);
-        info!("[reliable-paste] left transcript on clipboard as plain text");
-    } else {
-        let clipboard = app_handle.clipboard();
-        if let Some(text) = &p.saved_text {
-            let _ = clipboard.write_text(text);
-        } else if let Some(image) = &p.saved_image {
-            let _ = clipboard.write_image(image);
-        } else {
-            let _ = clipboard.clear();
-        }
-        info!("[reliable-paste] restored previous clipboard");
-    }
-
-    // Release the owner; any outstanding promise dies with the pasteboard
-    // contents we just replaced (or with the external change).
-    p.provider = None;
-}
-
-/// If a previous transaction is still holding the clipboard, settle it now so
-/// the caller's snapshot captures the user's original clipboard content.
-fn flush_pending(app_handle: &AppHandle, enigo: &mut enigo::Enigo) {
-    let previous = match PENDING.lock() {
-        Ok(mut slot) => slot.take(),
-        Err(_) => None,
-    };
-    if let Some(previous) = previous {
-        settle(&previous, app_handle, Some(enigo));
-    }
-}
-
-fn spawn_waiter(pending: Arc<Mutex<MacPending>>, app_handle: AppHandle) {
-    thread::spawn(move || {
-        let outcome = loop {
-            thread::sleep(Duration::from_millis(15));
-            let (decision, state_snapshot) = {
-                let p = match pending.lock() {
-                    Ok(p) => p,
-                    Err(_) => return,
-                };
-                if p.settled {
-                    // A newer paste settled this transaction already.
-                    return;
-                }
-                let result = match p.state.lock() {
-                    Ok(st) => {
-                        let now = Instant::now();
-                        let snapshot = (
-                            st.any_receipt_after_injection(),
-                            st.ownership_lost,
-                            st.injection_failed,
-                        );
-                        (evaluate(&st, now), snapshot)
-                    }
-                    Err(_) => return,
-                };
-                result
-            };
-            if let WaitDecision::Finish = decision {
-                break state_snapshot;
-            }
+impl Pending {
+    fn finish(
+        self,
+        text: &str,
+        handling: ClipboardHandling,
+        cancelled: bool,
+    ) -> Result<bool, String> {
+        let (read, lost, failed) = {
+            let st = self.state.lock().map_err(|_| "manual_paste_unavailable")?;
+            (
+                st.any_receipt_after_injection(),
+                st.ownership_lost,
+                st.injection_failed,
+            )
         };
-
-        let (receipt_seen, ownership_lost, injection_failed) = outcome;
-        if ownership_lost {
-            info!("[reliable-paste] settling: clipboard ownership lost");
-        } else if receipt_seen {
-            info!("[reliable-paste] settling: reads went quiet");
-        } else if injection_failed {
-            info!("[reliable-paste] settling: chord injection failed, restoring quickly");
-        } else {
-            info!("[reliable-paste] settling: no read within timeout, restoring anyway");
+        let pasteboard = NSPasteboard::generalPasteboard();
+        if lost || pasteboard.changeCount() != self.change_count {
+            return Err("manual_paste_clipboard_changed".into());
         }
-
-        let pending_for_finish = pending.clone();
-        let app_for_finish = app_handle.clone();
-        let _ = app_handle.run_on_main_thread(move || {
-            settle(&pending_for_finish, &app_for_finish, None);
-            if let Ok(mut slot) = PENDING.lock() {
-                let is_us = slot
-                    .as_ref()
-                    .map(|current| Arc::ptr_eq(current, &pending))
-                    .unwrap_or(false);
-                if is_us {
-                    *slot = None;
-                }
+        let copy = !cancelled
+            && match handling {
+                ClipboardHandling::CopyToClipboard => self.injection.is_ok(),
+                ClipboardHandling::CopyOnFailure => !read || failed,
+                ClipboardHandling::DontModify => false,
+            };
+        pasteboard.clearContents();
+        if copy {
+            if !pasteboard
+                .setString_forType(&NSString::from_str(text), unsafe { NSPasteboardTypeString })
+            {
+                return Err("manual_paste_restore_failed".into());
             }
-        });
-    });
+        } else if !self.saved.is_empty()
+            && !pasteboard.writeObjects(&NSArray::from_retained_slice(&self.saved))
+        {
+            return Err("manual_paste_restore_failed".into());
+        }
+        if cancelled {
+            return Err("manual_paste_cancelled".into());
+        }
+        self.injection?;
+        if failed {
+            return Err("manual_paste_render_failed".into());
+        }
+        Ok(read)
+    }
 }
 
-pub(super) fn run(
+thread_local! {
+    // The coordinator holds a single permit across automatic and manual output.
+    static PENDING: std::cell::RefCell<Option<Pending>> = const { std::cell::RefCell::new(None) };
+}
+
+fn begin(
     text: &str,
-    app_handle: &AppHandle,
-    paste_method: &PasteMethod,
-    enigo: &mut enigo::Enigo,
-    auto_submit: bool,
-    auto_submit_key: AutoSubmitKey,
-    clipboard_handling: ClipboardHandling,
-) -> Result<(), String> {
-    // Settle any previous transaction first so the snapshot below captures the
-    // user's original clipboard, not the previous transcript.
-    flush_pending(app_handle, enigo);
-
-    let clipboard = app_handle.clipboard();
-    let saved_text = clipboard.read_text().ok().filter(|t| !t.is_empty());
-    // Only probe for an image when there is no text; reading an image decodes
-    // the full bitmap (mirrors the legacy path).
-    let saved_image = if saved_text.is_none() {
-        clipboard.read_image().ok().map(|image| image.to_owned())
-    } else {
-        None
-    };
-
-    let state = Arc::new(Mutex::new(TxState::new()));
-    let provider = HandyPasteProvider::new(state.clone(), text.to_string());
-    let pasteboard = NSPasteboard::generalPasteboard();
-
-    let mut types: Vec<Retained<NSString>> = Vec::with_capacity(1 + CONCEALMENT_TYPES.len());
-    types.push(NSString::from_str("public.utf8-plain-text"));
-    for t in CONCEALMENT_TYPES {
-        types.push(NSString::from_str(t));
+    app: &AppHandle,
+    method: PasteMethod,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Arc<Mutex<TxState>>, String> {
+    preflight(cancelled)?;
+    let target = foreground_pid().ok_or("input_target_unavailable")?;
+    if PENDING.with(|slot| slot.borrow().is_some()) {
+        return Err("manual_paste_unavailable".into());
     }
-    let types = NSArray::from_retained_slice(&types);
-
-    // declareTypes:owner: clears the pasteboard and puts our promise on it;
-    // the return value is the new changeCount.
-    let change_count: NSInteger =
-        unsafe { msg_send![&*pasteboard, declareTypes: &*types, owner: &*provider] };
-    if change_count <= 0 {
-        return Err("declareTypes:owner: failed".to_string());
-    }
-    info!("[reliable-paste] published transcript as lazy promise (changeCount {change_count})");
-
-    // Mark injection *before* sending: enigo holds the chord for ~100ms and a
-    // fast target may legitimately read while the chord is still held.
-    if let Ok(mut st) = state.lock() {
-        st.injected_at = Some(Instant::now());
-    }
-    match send_chord(enigo, paste_method) {
-        Ok(()) => {
-            info!("[reliable-paste] paste chord sent ({paste_method:?})");
+    with_enigo(app, |enigo| {
+        let pasteboard = NSPasteboard::generalPasteboard();
+        let baseline = pasteboard.changeCount();
+        let saved = snapshot(&pasteboard)?;
+        preflight(cancelled)?;
+        if foreground_pid() != Some(target) {
+            return Err("input_target_changed".into());
         }
-        Err(e) => {
-            // Keep the transaction alive: the waiter restores the clipboard
-            // after the short failed-injection timeout.
-            if let Ok(mut st) = state.lock() {
-                st.injection_failed = true;
+        if pasteboard.changeCount() != baseline {
+            return Err("manual_paste_clipboard_changed".into());
+        }
+        let state = Arc::new(Mutex::new(TxState::new()));
+        let provider = HandyPasteProvider::new(state.clone(), text.to_string());
+        let mut types = vec![NSString::from_str("public.utf8-plain-text")];
+        types.extend(CONCEALMENT_TYPES.map(NSString::from_str));
+        let types = NSArray::from_retained_slice(&types);
+        let change_count: NSInteger =
+            unsafe { msg_send![&*pasteboard, declareTypes: &*types, owner: &*provider] };
+        let injection = preflight(cancelled).and_then(|()| {
+            if change_count <= 0 {
+                return Err("manual_paste_publish_failed".into());
             }
-            error!("[reliable-paste] failed to send paste chord: {e}");
+            if foreground_pid() != Some(target) {
+                return Err("input_target_changed".into());
+            }
+            if pasteboard.changeCount() != change_count {
+                return Err("manual_paste_clipboard_changed".into());
+            }
+            state
+                .lock()
+                .map_err(|_| "manual_paste_unavailable")?
+                .injected_at = Some(Instant::now());
+            send_chord(enigo, &method).map_err(|_| "manual_paste_injection_failed".into())
+        });
+        if injection.is_err() {
+            state
+                .lock()
+                .map_err(|_| "manual_paste_unavailable")?
+                .injection_failed = true;
+        }
+        PENDING.with(|slot| {
+            *slot.borrow_mut() = Some(Pending {
+                state: state.clone(),
+                saved,
+                change_count,
+                _provider: provider,
+                injection,
+            });
+        });
+        Ok(state)
+    })
+}
+
+pub(crate) fn run(
+    text: String,
+    app: &AppHandle,
+    method: PasteMethod,
+    handling: ClipboardHandling,
+    cancelled: impl Fn() -> bool + Send + Sync + 'static,
+) -> Result<bool, String> {
+    let deadline = Instant::now() + Duration::from_millis(800);
+    loop {
+        match preflight(&cancelled) {
+            Err(code) if code == "keys_held" && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => {
+                result?;
+                break;
+            }
         }
     }
-
-    let pending = Arc::new(Mutex::new(MacPending {
-        state,
-        saved_text,
-        saved_image,
-        change_count,
-        provider: Some(provider),
-        auto_submit,
-        auto_submit_key,
-        preserve_transcript: clipboard_handling == ClipboardHandling::CopyToClipboard,
-        transcript: text.to_string(),
-        settled: false,
-    }));
-    if let Ok(mut slot) = PENDING.lock() {
-        *slot = Some(pending.clone());
+    let text = Arc::new(text);
+    let cancelled = Arc::new(cancelled);
+    let state = on_main(app, {
+        let app = app.clone();
+        let text = Arc::clone(&text);
+        let cancelled = Arc::clone(&cancelled);
+        move || begin(&text, &app, method, &*cancelled)
+    })?;
+    loop {
+        let finish = match state.lock() {
+            Ok(st) => matches!(evaluate(&st, Instant::now()), WaitDecision::Finish),
+            Err(_) => true,
+        };
+        if finish || cancelled() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(15));
     }
-    spawn_waiter(pending, app_handle.clone());
-
-    Ok(())
+    on_main(app, move || {
+        let pending = PENDING
+            .with(|slot| slot.borrow_mut().take())
+            .ok_or("manual_paste_unavailable")?;
+        pending.finish(&text, handling, cancelled())
+    })
 }

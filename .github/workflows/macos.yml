@@ -5,6 +5,10 @@ on:
     branches: [codex/macos-beta5]
   workflow_dispatch:
 
+concurrency:
+  group: macos-preview-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -22,17 +26,42 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
+      - name: Check native capture against the macOS SDK
+        run: |
+          xcrun clang -fsyntax-only -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
+            desktop/src-tauri/native/meeting_capture_macos.m
+          plutil -lint desktop/src-tauri/Info.plist
       - name: Prepare verified model resources
         run: |
           test "$(uname -m)" = arm64
           rustup update stable
           rustup default stable
+          brew install meson ninja
           bash scripts/prepare-macos.sh
       - name: Frontend checks
         working-directory: desktop
         run: |
           bun test src
           bun run lint
+      - name: Fetch locked Rust dependencies
+        working-directory: desktop/src-tauri
+        env:
+          CARGO_NET_RETRY: "2"
+        run: |
+          if ! curl --fail --silent --show-error --max-time 10 https://index.crates.io/config.json >/dev/null; then
+            # crates.io's official index repository also serves the same sparse index.
+            cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+            mkdir -p "$cargo_home"
+            cat >> "$cargo_home/config.toml" <<'CARGO_CONFIG'
+
+          [source.crates-io]
+          replace-with = "crates-io-github-index"
+
+          [source.crates-io-github-index]
+          registry = "sparse+https://raw.githubusercontent.com/rust-lang/crates.io-index/master/"
+          CARGO_CONFIG
+          fi
+          cargo fetch --locked --target aarch64-apple-darwin
       - name: Build macOS app and disk image
         working-directory: desktop
         run: bun run tauri build --target aarch64-apple-darwin -- --locked

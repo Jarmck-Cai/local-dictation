@@ -1,7 +1,7 @@
 //! Per-account device credentials. Keychain items are independent of the data directory.
 use crate::dictation_cleanup::SecretBytes;
 use security_framework::passwords::{
-    delete_generic_password, generic_password, set_generic_password,
+    delete_generic_password, generic_password, set_generic_password, PasswordOptions,
 };
 
 const SERVICE: &str = "com.localdictation.desktop";
@@ -11,7 +11,7 @@ pub(crate) const CLAUDE: &str = "claude-api-key";
 pub(crate) const GATEWAY: &str = "gateway-device-token";
 
 pub(crate) fn load(account: &str) -> Result<Option<SecretBytes>, ()> {
-    match generic_password(SERVICE, account) {
+    match generic_password(PasswordOptions::new_generic_password(SERVICE, account)) {
         Ok(password) => Ok(Some(SecretBytes(password))),
         Err(error) if error.code() == ITEM_NOT_FOUND => Ok(None),
         Err(_) => Err(()),

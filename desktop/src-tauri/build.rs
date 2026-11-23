@@ -1,6 +1,22 @@
 mod build_meeting_apm;
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rerun-if-changed=native/meeting_capture_macos.m");
+        cc::Build::new()
+            .file("native/meeting_capture_macos.m")
+            .flag("-fobjc-arc")
+            .flag("-fblocks")
+            .compile("meeting_capture_macos");
+        for framework in [
+            "AVFoundation",
+            "CoreGraphics",
+            "CoreMedia",
+            "ScreenCaptureKit",
+        ] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+    }
     build_meeting_apm::build();
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     build_apple_intelligence_bridge();

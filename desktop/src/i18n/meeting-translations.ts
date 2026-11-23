@@ -25,6 +25,11 @@ export const meetingMessages = {
     chooseMicrophone: "Choose a microphone",
     choosePlayback: "Choose a playback device",
     defaultDevice: "{{name}} (communications default)",
+    macSystemAudio: "System audio",
+    macDefaultDevice: "{{name}} (system default)",
+    macPlaybackHint:
+      "System audio from apps sharing the main display may be included. Light Dictation records audio only. macOS may ask for Screen & System Audio Recording permission.",
+    macDeviceHint: "Choose the microphone to use for this recording.",
     playbackHint:
       "All sounds played through the selected playback device will be recorded, including sounds from other apps. Choose the same device your meeting uses.",
     deviceHint:
@@ -150,6 +155,9 @@ export const meetingMessages = {
         "The file could not be saved there. Choose another save location and retry.",
       missing: "This meeting is no longer available. Refresh the meeting list.",
       unsupported: "Meeting recording is not supported on this device.",
+      macosVersion: "Meeting recording requires macOS 15 or later.",
+      macosAudioPermission:
+        "Allow Local Dictation in System Settings → Privacy & Security → Screen & System Audio Recording, then reopen the app.",
     },
   },
   zh: {
@@ -185,6 +193,11 @@ export const meetingMessages = {
     chooseMicrophone: "请选择麦克风",
     choosePlayback: "请选择播放设备",
     defaultDevice: "{{name}}（默认通话设备）",
+    macSystemAudio: "系统声音",
+    macDefaultDevice: "{{name}}（系统默认）",
+    macPlaybackHint:
+      "录音可能包含主显示器上其他应用的声音。轻述仅接收声音，macOS 可能会要求授权「屏幕与系统音频录制」。",
+    macDeviceHint: "请选择本场录音使用的麦克风。",
     playbackHint:
       "所选播放设备发出的全部声音都会被录下，包括其他应用的声音。请选择会议正在使用的播放设备。",
     deviceHint:
@@ -277,6 +290,9 @@ export const meetingMessages = {
       export: "无法保存到所选位置，请换一个保存位置后重试。",
       missing: "这场会议已不可用，请刷新会议列表。",
       unsupported: "此设备暂不支持会议录音。",
+      macosVersion: "会议录音需要 macOS 15 或更新版本。",
+      macosAudioPermission:
+        "请在「系统设置 → 隐私与安全性 → 屏幕与系统音频录制」中授权轻述，然后重新打开应用。",
     },
   },
 };

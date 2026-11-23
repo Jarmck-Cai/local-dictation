@@ -720,7 +720,7 @@ impl ShortcutAction for TranscribeAction {
                                         return;
                                     }
 
-                                    match utils::paste_cancellable(final_text, ah_clone.clone(), || rm_for_paste.was_cancelled_since(cancel_generation)) {
+                                    match utils::paste_cancellable(final_text, ah_clone.clone(), move || rm_for_paste.was_cancelled_since(cancel_generation)) {
                                         Ok(paste_delivery::Submission::Cancelled) => {
                                             timing.outcome = "cancelled".into();
                                             debug!("Transcription operation cancelled before key injection");

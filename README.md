@@ -29,6 +29,10 @@ Windows 远程桌面预览：系统 MSTSC 前台采用有界 Unicode 输入，�
 
 默认快捷键：F8 按住录音，Esc 取消，Ctrl+Shift+F8 复制最近结果，Ctrl+Alt+F8 暂停或恢复云端整理，均可配置。输入位置以文字实际粘贴时的当前光标为准，已有选区会被替换。
 
+## macOS 预览
+
+macOS 版从 Windows Beta 5 的源码同步。听写支持本地 SenseVoice、云端实时识别、词库同步和保护式粘贴。Apple Silicon 需要 macOS 14 或以上，双路会议录音需要 macOS 15 或以上。构建、权限和验收范围见 [macOS 预览说明](docs/macos-preview.md)。
+
 ## 使用与构建
 
 使用流程、凭据配置和数据策略见 [使用说明](docs/desktop-usage.md)。源码在 `desktop/`，Windows 构建需要 Rust stable、Visual Studio 2022 C++ Build Tools、Windows SDK 和 CMake。

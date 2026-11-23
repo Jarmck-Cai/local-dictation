@@ -34,7 +34,11 @@ bool valid(const float* x, size_t n) {
   return true;
 }
 }
+#if defined(_WIN32)
 #define ABI extern "C" __declspec(dllexport)
+#else
+#define ABI extern "C"
+#endif
 ABI void* meeting_apm_create(int linear_diagnostic) noexcept {
   // This candidate exposes only complete upstream AEC3 output. APM 2.1's
   // public export_linear_aec_output flag alone does not initialize the AEC3

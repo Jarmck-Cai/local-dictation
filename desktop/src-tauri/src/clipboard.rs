@@ -17,7 +17,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 #[cfg(target_os = "linux")]
 use crate::utils::{is_gnome_wayland, is_kde_wayland, is_wayland};
 
-fn with_enigo<T>(
+pub(crate) fn with_enigo<T>(
     app_handle: &AppHandle,
     f: impl FnOnce(&mut Enigo) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -812,7 +812,8 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
 pub(crate) fn paste_cancellable(
     text: String,
     app_handle: AppHandle,
-    is_cancelled: impl Fn() -> bool,
+    #[cfg(target_os = "macos")] is_cancelled: impl Fn() -> bool + Send + Sync + 'static,
+    #[cfg(not(target_os = "macos"))] is_cancelled: impl Fn() -> bool,
 ) -> Result<Submission, String> {
     // Windows automatic tasks use the synchronous protected transaction below,
     // including cancellation and restoration before the worker releases its guard.
@@ -942,7 +943,8 @@ fn submit_mstsc(
 fn paste_with_cancellation(
     text: String,
     app_handle: AppHandle,
-    is_cancelled: impl Fn() -> bool,
+    #[cfg(target_os = "macos")] is_cancelled: impl Fn() -> bool + Send + Sync + 'static,
+    #[cfg(not(target_os = "macos"))] is_cancelled: impl Fn() -> bool,
     allow_reliable: bool,
 ) -> Result<Submission, String> {
     if is_cancelled() {
@@ -977,7 +979,7 @@ fn paste_with_cancellation(
     match paste_method {
         PasteMethod::None => {
             info!("PasteMethod::None selected - skipping paste action");
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             if !allow_reliable {
                 if settings.clipboard_handling == ClipboardHandling::CopyToClipboard {
                     write_text_to_clipboard(&app_handle, &text)?;
@@ -1000,11 +1002,26 @@ fn paste_with_cancellation(
                     &is_cancelled,
                 );
             }
+            #[cfg(target_os = "macos")]
+            if !allow_reliable {
+                return match crate::paste_tx::macos::run(
+                    text,
+                    &app_handle,
+                    paste_method,
+                    settings.clipboard_handling,
+                    is_cancelled,
+                ) {
+                    Ok(true) => Ok(Submission::ClipboardReadObserved),
+                    Ok(false) => Err("automatic_paste_unconfirmed".into()),
+                    Err(code) if code == "manual_paste_cancelled" => Ok(Submission::Cancelled),
+                    Err(code) => Err(code),
+                };
+            }
             // Debug-gated receipt-sequenced paste (#502): restore the clipboard
             // after the target actually reads the transcript, not on a timer.
             // Never retry an uncertain injection: the coordinator permits one
             // automatic submission per task, and a retry could insert twice.
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(target_os = "windows")]
             if settings.reliable_paste && allow_reliable {
                 return with_enigo(&app_handle, |enigo| {
                     crate::paste_tx::try_reliable_paste(
@@ -1068,7 +1085,8 @@ pub fn copy_latest_result(
 pub(crate) fn paste_latest_preserving_clipboard(
     text: String,
     app: AppHandle,
-    is_cancelled: impl Fn() -> bool,
+    #[cfg(target_os = "macos")] is_cancelled: impl Fn() -> bool + Send + Sync + 'static,
+    #[cfg(not(target_os = "macos"))] is_cancelled: impl Fn() -> bool,
 ) -> Result<bool, String> {
     let settings = get_settings(&app);
     let text = normalize_output(&text);
@@ -1128,7 +1146,17 @@ pub(crate) fn paste_latest_preserving_clipboard(
             )
         })
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        crate::paste_tx::macos::run(
+            text,
+            &app,
+            method,
+            ClipboardHandling::DontModify,
+            is_cancelled,
+        )
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = (method, is_cancelled);
         Err("manual_paste_unavailable".into())
