@@ -1107,6 +1107,8 @@
       "urlLabel": "网关地址",
       "urlPlaceholder": "https://dictation.astrmind.com",
       "tokenLabel": "设备访问令牌",
+      "tokenPlaceholderMac": "输入本设备专属令牌（保存在 macOS 钥匙串）",
+      "tokenConfiguredMac": "设备访问令牌已保存在 macOS 钥匙串（不回显）",
       "tokenPlaceholder": "输入本设备专属令牌（经 Windows DPAPI 加密存储，保存后不回显）",
       "tokenConfigured": "设备访问令牌已保存至 Windows DPAPI 安全存储（不回显）",
       "tokenMissing": "尚未配置设备访问令牌",

@@ -1,0 +1,56 @@
+name: macOS preview
+
+on:
+  push:
+    branches: [codex/macos-beta5]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apple-silicon:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Prepare verified model resources
+        run: |
+          test "$(uname -m)" = arm64
+          rustup update stable
+          rustup default stable
+          bash scripts/prepare-macos.sh
+      - name: Frontend checks
+        working-directory: desktop
+        run: |
+          bun test src
+          bun run lint
+      - name: Build macOS app and disk image
+        working-directory: desktop
+        run: bun run tauri build --target aarch64-apple-darwin -- --locked
+      - name: Verify bundled application
+        working-directory: desktop/src-tauri/target/aarch64-apple-darwin/release/bundle
+        run: |
+          set -euo pipefail
+          app="macos/Local Dictation.app"
+          binary="$app/Contents/MacOS/local-dictation"
+          models="$app/Contents/Resources/resources/models"
+          test "$(lipo -archs "$binary")" = arm64
+          codesign --verify --deep --strict "$app"
+          test -s "$models/silero_vad_v4.onnx"
+          test -s "$models/sense-voice-int8/model.int8.onnx"
+          test -s "$models/sense-voice-int8/tokens.txt"
+          shasum -a 256 dmg/*.dmg > dmg/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Local-Dictation-macOS-Apple-Silicon
+          path: desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/
+          if-no-files-found: error

@@ -23,6 +23,7 @@ const CLAUDE_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const CLAUDE_MODEL: &str = "claude-haiku-5-5";
 const CONFIG_FILE: &str = "dictation-config.json";
 const CLOUD_FILE: &str = "dictation-cloud.json";
+#[cfg(not(target_os = "macos"))]
 const KEY_FILE: &str = "claude-key.dpapi";
 const MAX_CONFIG_BYTES: u64 = 65_536;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -308,10 +309,12 @@ impl Drop for SecretBytes {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn protect_secret_bytes(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
     platform_key::protect(bytes)
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn unprotect_secret_bytes(bytes: &[u8]) -> Result<SecretBytes, &'static str> {
     platform_key::unprotect(bytes)
 }
@@ -364,6 +367,7 @@ fn load_config(app: &AppHandle) -> Result<DictationConfig, &'static str> {
     Ok(config)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn load_key(app: &AppHandle) -> Result<SecretBytes, &'static str> {
     let path = data_path(app, KEY_FILE)?;
     if !path.exists() {
@@ -377,9 +381,26 @@ fn load_key(app: &AppHandle) -> Result<SecretBytes, &'static str> {
     Ok(decrypted)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn persist_key(app: &AppHandle, key: SecretBytes) -> Result<(), &'static str> {
     let encrypted = platform_key::protect(&key.0)?;
     std::fs::write(data_path(app, KEY_FILE)?, encrypted).map_err(|_| "cleanup_storage_unavailable")
+}
+
+#[cfg(target_os = "macos")]
+fn load_key(_app: &AppHandle) -> Result<SecretBytes, &'static str> {
+    let key = crate::keychain::load(crate::keychain::CLAUDE)
+        .map_err(|_| "claude_key_unavailable")?
+        .ok_or("missing_claude_api_key")?;
+    if key.0.is_empty() || key.0.len() > 16_384 || key.0.iter().any(|b| !matches!(b, 0x21..=0x7e)) {
+        return Err("claude_key_unavailable");
+    }
+    Ok(key)
+}
+
+#[cfg(target_os = "macos")]
+fn persist_key(_app: &AppHandle, key: SecretBytes) -> Result<(), &'static str> {
+    crate::keychain::save(crate::keychain::CLAUDE, &key).map_err(|_| "claude_key_unavailable")
 }
 
 #[tauri::command]
@@ -424,11 +445,19 @@ pub fn clear_claude_api_key(app: AppHandle) -> Result<(), String> {
     let _lock = CONFIG_IO
         .lock()
         .map_err(|_| "cleanup_storage_unavailable")?;
-    let path = data_path(&app, KEY_FILE).map_err(str::to_string)?;
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err("cleanup_storage_unavailable".into()),
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        crate::keychain::clear(crate::keychain::CLAUDE).map_err(|_| "claude_key_unavailable".into())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let path = data_path(&app, KEY_FILE).map_err(str::to_string)?;
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err("cleanup_storage_unavailable".into()),
+        }
     }
 }
 
@@ -915,7 +944,7 @@ mod platform_key {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 mod platform_key {
     use super::SecretBytes;
     pub(super) fn protect(_bytes: &[u8]) -> Result<Vec<u8>, &'static str> {

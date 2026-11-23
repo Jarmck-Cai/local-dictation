@@ -1,17 +1,15 @@
-//! Self-hosted cloud dictation gateway client, Windows DPAPI device-token
-//! storage, and cross-device vocabulary synchronization.
+//! Self-hosted cloud dictation gateway client and cross-device vocabulary synchronization.
 //!
 //! - Client holds ZERO upstream API keys (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`).
-//! - Only `gateway_url` (in `AppSettings`) and DPAPI-encrypted `gateway-token.dpapi`
-//!   (in current Windows user `%APPDATA%`) are stored locally.
+//! - The gateway URL is saved in settings. The device token uses DPAPI on
+//!   Windows and the login Keychain on macOS.
 //! - Live dictation sends audio frames while recording. If streaming is
 //!   unavailable, the same recording can use the existing in-memory WAV upload
 //!   and then fall back to local recognition.
 
-use crate::dictation_cleanup::{
-    self, protect_secret_bytes, unprotect_secret_bytes, CleanupSession, CleanupStrength,
-    SecretBytes,
-};
+use crate::dictation_cleanup::{self, CleanupSession, CleanupStrength, SecretBytes};
+#[cfg(not(target_os = "macos"))]
+use crate::dictation_cleanup::{protect_secret_bytes, unprotect_secret_bytes};
 use crate::managers::transcription::TranscriptionManager;
 use crate::settings::{get_settings, write_settings, RecognitionMode};
 use hound::{SampleFormat, WavSpec, WavWriter};
@@ -28,6 +26,7 @@ use tauri::{AppHandle, Emitter, Manager};
 mod live;
 pub(crate) use live::AudioRoute;
 
+#[cfg(not(target_os = "macos"))]
 const TOKEN_FILE: &str = "gateway-token.dpapi";
 const SYNC_STATE_FILE: &str = "gateway-vocab-sync.json";
 const MAX_STATE_BYTES: u64 = 512 * 1024;
@@ -223,6 +222,7 @@ fn token_from_string(raw: String) -> Result<SecretBytes, &'static str> {
     Ok(secret)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn token_storage_path(app: &AppHandle) -> Result<PathBuf, &'static str> {
     let dir = app
         .path()
@@ -247,18 +247,37 @@ fn read_small_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, &'static str>
 }
 
 fn load_token(app: &AppHandle) -> Result<SecretBytes, &'static str> {
-    let path = token_storage_path(app)?;
-    if !path.exists() {
-        return Err("missing_gateway_token");
-    }
-    let encrypted = read_small_file(&path, 65_536)?;
-    let decrypted = unprotect_secret_bytes(&encrypted).map_err(|_| "gateway_token_unavailable")?;
+    let decrypted = read_token(app)?;
     if decrypted.0.len() < 12 || decrypted.0.iter().any(|b| !matches!(b, 0x21..=0x7e)) {
         return Err("gateway_token_unavailable");
     }
     Ok(decrypted)
 }
 
+#[cfg(not(target_os = "macos"))]
+fn read_token(app: &AppHandle) -> Result<SecretBytes, &'static str> {
+    let path = token_storage_path(app)?;
+    if !path.exists() {
+        return Err("missing_gateway_token");
+    }
+    let encrypted = read_small_file(&path, 65_536)?;
+    unprotect_secret_bytes(&encrypted).map_err(|_| "gateway_token_unavailable")
+}
+
+#[cfg(target_os = "macos")]
+fn read_token(_app: &AppHandle) -> Result<SecretBytes, &'static str> {
+    crate::keychain::load(crate::keychain::GATEWAY)
+        .map_err(|_| "gateway_token_unavailable")?
+        .ok_or("missing_gateway_token")
+}
+
+#[cfg(target_os = "macos")]
+fn persist_token(_app: &AppHandle, token: SecretBytes) -> Result<(), &'static str> {
+    crate::keychain::save(crate::keychain::GATEWAY, &token)
+        .map_err(|_| "gateway_token_unavailable")
+}
+
+#[cfg(not(target_os = "macos"))]
 fn persist_token(app: &AppHandle, token: SecretBytes) -> Result<(), &'static str> {
     let encrypted = protect_secret_bytes(&token.0).map_err(|_| "gateway_token_unavailable")?;
     let path = token_storage_path(app)?;
@@ -401,11 +420,17 @@ pub fn clear_cloud_gateway_token(app: AppHandle) -> Result<CloudGatewayView, Str
         let _lock = GATEWAY_IO
             .lock()
             .map_err(|_| "gateway_storage_unavailable")?;
-        let path = token_storage_path(&app).map_err(str::to_string)?;
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err("gateway_storage_unavailable".into()),
+        #[cfg(target_os = "macos")]
+        crate::keychain::clear(crate::keychain::GATEWAY)
+            .map_err(|_| "gateway_token_unavailable")?;
+        #[cfg(not(target_os = "macos"))]
+        {
+            let path = token_storage_path(&app).map_err(str::to_string)?;
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err("gateway_storage_unavailable".into()),
+            }
         }
         build_view(&app)
     };

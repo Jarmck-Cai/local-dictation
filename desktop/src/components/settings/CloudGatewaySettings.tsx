@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { useOsType } from "@/hooks/useOsType";
 import { useTranslation } from "react-i18next";
 import { Cloud, RefreshCw, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
@@ -19,6 +20,7 @@ import { SettingsGroup } from "../ui/SettingsGroup";
 
 export const CloudGatewaySettings = () => {
   const { t } = useTranslation();
+  const isMac = useOsType() === "macos";
   const [view, setView] = useState<CloudGatewayView | null>(null);
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -268,7 +270,9 @@ export const CloudGatewaySettings = () => {
                 <p className="text-sm">
                   {t(
                     view.token_configured
-                      ? "dictation.cloudGateway.tokenConfigured"
+                      ? isMac
+                        ? "dictation.cloudGateway.tokenConfiguredMac"
+                        : "dictation.cloudGateway.tokenConfigured"
                       : "dictation.cloudGateway.tokenMissing",
                   )}
                 </p>
@@ -280,7 +284,11 @@ export const CloudGatewaySettings = () => {
                     value={tokenInput}
                     disabled={busy}
                     aria-label={t("dictation.cloudGateway.tokenLabel")}
-                    placeholder={t("dictation.cloudGateway.tokenPlaceholder")}
+                    placeholder={t(
+                      isMac
+                        ? "dictation.cloudGateway.tokenPlaceholderMac"
+                        : "dictation.cloudGateway.tokenPlaceholder",
+                    )}
                     onChange={(event) => setTokenInput(event.target.value)}
                     className="min-w-48 flex-1"
                   />

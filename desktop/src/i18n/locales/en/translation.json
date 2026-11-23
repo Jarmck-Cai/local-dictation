@@ -1107,6 +1107,8 @@
       "urlLabel": "Gateway address",
       "urlPlaceholder": "https://dictation.astrmind.com",
       "tokenLabel": "Device access token",
+      "tokenPlaceholderMac": "Enter this device’s token (saved in macOS Keychain)",
+      "tokenConfiguredMac": "Device token saved in macOS Keychain (never displayed)",
       "tokenPlaceholder": "Enter device token (encrypted via Windows DPAPI, never echoed)",
       "tokenConfigured": "Device token saved in Windows DPAPI secure storage (never displayed)",
       "tokenMissing": "No device token configured yet",

@@ -16,6 +16,8 @@ mod dictation_lifecycle;
 mod dictation_metrics;
 mod helpers;
 mod input;
+#[cfg(target_os = "macos")]
+mod keychain;
 mod llm_client;
 mod managers;
 mod manual_paste;
