@@ -1,10 +1,13 @@
 //! End-to-end integration tests for `local-dictation-gateway` using local mock
 //! OpenAI and Anthropic servers (zero external network calls, zero secrets).
 
-use axum::extract::{Multipart, State as AxumState};
+use axum::extract::ws::{Message as AxumMessage, WebSocketUpgrade};
+use axum::extract::{Multipart, Query, State as AxumState};
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use futures_util::{SinkExt, StreamExt};
 use local_dictation_gateway::auth::{SecretString, TokenRegistry};
 use local_dictation_gateway::vocab::{
     VocabularyKind, VocabularyStore, VocabularySyncEntry, VocabularySyncRequest,
@@ -14,10 +17,13 @@ use local_dictation_gateway::{
     build_router, AppState, DictateResponse, GatewayConfig, HealthResponse, StatusResponse,
 };
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Error as WsError, Message};
 
 #[derive(Default)]
 struct MockUpstreamLog {
@@ -30,11 +36,86 @@ struct MockUpstreamLog {
     anthropic_user_messages: Vec<String>,
     anthropic_delay_ms: u64,
     openai_reply_text: String,
+    realtime_sessions: usize,
+    realtime_commits: usize,
+    realtime_closed: Arc<Notify>,
     anthropic_reply_text: String,
 }
 
 async fn spawn_mock_upstreams(state: Arc<Mutex<MockUpstreamLog>>) -> String {
     let router = Router::new()
+        .route(
+            "/v1/realtime",
+            get(
+                |AxumState(log): AxumState<Arc<Mutex<MockUpstreamLog>>>,
+                 headers: HeaderMap,
+                 Query(query): Query<HashMap<String, String>>,
+                 ws: WebSocketUpgrade| async move {
+                    assert_eq!(headers["authorization"], "Bearer mock-openai-key-for-testing");
+                    assert_eq!(query.get("intent").map(String::as_str), Some("transcription"));
+                    let closed = {
+                        let mut state = log.lock().unwrap();
+                        state.realtime_sessions += 1;
+                        state.realtime_closed.clone()
+                    };
+                    ws.on_upgrade(move |mut socket| async move {
+                        let AxumMessage::Text(config) = socket.recv().await.unwrap().unwrap() else {
+                            panic!("first upstream message must configure the session");
+                        };
+                        let config: Value = serde_json::from_str(&config).unwrap();
+                        assert_eq!(config["type"], "session.update");
+                        let input = &config["session"]["audio"]["input"];
+                        assert_eq!(config["session"]["type"], "transcription");
+                        assert_eq!(input["format"], json!({"type": "audio/pcm", "rate": 24000}));
+                        assert_eq!(input["transcription"]["model"], "gpt-live-transcribe");
+                        assert_eq!(input["transcription"]["languages"], json!(["zh", "en"]));
+                        assert_eq!(input["transcription"]["keywords"], json!(["Rust"]));
+                        assert!(input["turn_detection"].is_null());
+                        assert!(
+                            tokio::time::timeout(Duration::from_millis(40), socket.recv())
+                                .await
+                                .is_err(),
+                            "the gateway must wait for session.updated before forwarding audio"
+                        );
+                        let update = json!({"type": "session.updated", "session": config["session"]});
+                        socket.send(AxumMessage::Text(update.to_string().into())).await.unwrap();
+                        let mut audio = Vec::new();
+                        while let Some(Ok(AxumMessage::Text(message))) = socket.recv().await {
+                            let event: Value = serde_json::from_str(&message).unwrap();
+                            match event["type"].as_str().unwrap() {
+                                "input_audio_buffer.append" => {
+                                    let first_frame = audio.is_empty();
+                                    audio.extend(STANDARD.decode(event["audio"].as_str().unwrap()).unwrap());
+                                    if first_frame {
+                                        assert_eq!(audio, [0xd0, 0x07].repeat(2400));
+                                        socket.send(AxumMessage::Text(json!({
+                                            "type": "conversation.item.input_audio_transcription.delta",
+                                            "item_id": "item_test",
+                                            "content_index": 0,
+                                            "delta": "Rust "
+                                        }).to_string().into())).await.unwrap();
+                                    }
+                                }
+                                "input_audio_buffer.commit" => {
+                                    log.lock().unwrap().realtime_commits += 1;
+                                    assert_eq!(audio.len(), 5760, "all audio must arrive before commit");
+                                    for event in [
+                                        json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"item_test","content_index":0,"transcript":"Rust 网关"}),
+                                        json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"item_other","content_index":0,"transcript":"Unrelated"}),
+                                        json!({"type":"input_audio_buffer.committed","item_id":"item_test"}),
+                                    ] {
+                                        socket.send(AxumMessage::Text(event.to_string().into())).await.unwrap();
+                                    }
+                                    break;
+                                }
+                                other => panic!("unexpected upstream event {other}"),
+                            }
+                        }
+                        closed.notify_one();
+                    })
+                },
+            ),
+        )
         .route(
             "/v1/audio/transcriptions",
             post(
@@ -181,6 +262,7 @@ async fn spawn_gateway(upstream_base: &str, asr_model: &str, cleanup_timeout_ms:
         openai_api_key: SecretString::new("mock-openai-key-for-testing"),
         openai_base_url: format!("{upstream_base}/v1"),
         openai_asr_model: asr_model.to_string(),
+        openai_realtime_asr_model: Some("gpt-live-transcribe".into()),
         anthropic_api_key: SecretString::new("mock-anthropic-key-for-testing"),
         anthropic_base_url: upstream_base.to_string(),
         anthropic_cleanup_model: "claude-haiku-5-5".into(),
@@ -197,6 +279,145 @@ async fn spawn_gateway(upstream_base: &str, asr_model: &str, cleanup_timeout_ms:
         axum::serve(listener, app).await.unwrap();
     });
     format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn realtime_dictation_returns_partial_before_finish_and_cleans_only_the_final() {
+    let upstream_log = Arc::new(Mutex::new(MockUpstreamLog {
+        anthropic_reply_text: "Rust 网关。".into(),
+        ..Default::default()
+    }));
+    let upstream_url = spawn_mock_upstreams(upstream_log.clone()).await;
+    let gateway_url = spawn_gateway(&upstream_url, "gpt-transcribe", 1_500).await;
+    let stream_url = format!(
+        "{}/v1/dictate/stream",
+        gateway_url.replacen("http://", "ws://", 1)
+    );
+
+    let unauthorized = tokio_tungstenite::connect_async(&stream_url).await;
+    match unauthorized {
+        Err(WsError::Http(response)) => assert_eq!(response.status(), StatusCode::UNAUTHORIZED),
+        other => panic!("expected an authentication rejection, got {other:?}"),
+    }
+
+    let mut socket = authenticated_stream(&stream_url).await;
+    socket
+        .send(Message::Binary([0xd0, 0x07].repeat(2400).into()))
+        .await
+        .unwrap();
+
+    // The client does not finish until the private upstream observes the
+    // initial audio and returns a useful intermediate result.
+    let message = read_test_message(&mut socket).await;
+    assert_eq!(message, json!({"type":"partial", "text":"Rust "}));
+    assert!(upstream_log
+        .lock()
+        .unwrap()
+        .anthropic_user_messages
+        .is_empty());
+    socket
+        .send(Message::Binary([0xd0, 0x07].repeat(480).into()))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(r#"{"type":"finish"}"#.into()))
+        .await
+        .unwrap();
+    let final_message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let response: DictateResponse = serde_json::from_str(final_message.to_text().unwrap()).unwrap();
+    assert_eq!(response.raw_text, "Rust 网关");
+    assert_eq!(response.formatted_text, "Rust 网关。");
+    assert!(response.cleanup_applied);
+    assert_eq!(
+        upstream_log.lock().unwrap().anthropic_user_messages,
+        ["Rust 网关"]
+    );
+}
+
+type TestStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn authenticated_stream(stream_url: &str) -> TestStream {
+    let mut request = stream_url.into_client_request().unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        "Bearer qsgw_desktop_test_token_12345".parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    socket
+        .send(Message::Text(
+            json!({"language": "zh-CN", "hint_terms": ["Rust"]})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(read_test_message(&mut socket).await["type"], "ready");
+    socket
+}
+
+async fn read_test_message(socket: &mut TestStream) -> Value {
+    let event = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("gateway event timed out")
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(event.to_text().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn realtime_silence_does_not_open_the_upstream() {
+    let upstream_log = Arc::new(Mutex::new(MockUpstreamLog::default()));
+    let upstream_url = spawn_mock_upstreams(upstream_log.clone()).await;
+    let gateway_url = spawn_gateway(&upstream_url, "gpt-transcribe", 1_500).await;
+    let stream_url = format!(
+        "{}/v1/dictate/stream",
+        gateway_url.replacen("http://", "ws://", 1)
+    );
+    let mut socket = authenticated_stream(&stream_url).await;
+    socket
+        .send(Message::Binary(vec![0; 4800].into()))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(r#"{"type":"finish"}"#.into()))
+        .await
+        .unwrap();
+    let response: DictateResponse =
+        serde_json::from_value(read_test_message(&mut socket).await).unwrap();
+    assert!(response.raw_text.is_empty());
+    assert!(response.formatted_text.is_empty());
+    assert!(!response.cleanup_applied);
+    assert_eq!(upstream_log.lock().unwrap().realtime_sessions, 0);
+}
+
+#[tokio::test]
+async fn cancelling_a_realtime_recording_drops_the_upstream_without_committing() {
+    let upstream_log = Arc::new(Mutex::new(MockUpstreamLog::default()));
+    let upstream_closed = upstream_log.lock().unwrap().realtime_closed.clone();
+    let upstream_url = spawn_mock_upstreams(upstream_log.clone()).await;
+    let gateway_url = spawn_gateway(&upstream_url, "gpt-transcribe", 1_500).await;
+    let stream_url = format!(
+        "{}/v1/dictate/stream",
+        gateway_url.replacen("http://", "ws://", 1)
+    );
+    let mut socket = authenticated_stream(&stream_url).await;
+    socket
+        .send(Message::Binary([0xd0, 0x07].repeat(2400).into()))
+        .await
+        .unwrap();
+    assert_eq!(read_test_message(&mut socket).await["type"], "partial");
+    socket.close(None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), upstream_closed.notified())
+        .await
+        .expect("cancelling must release the upstream socket promptly");
+    let log = upstream_log.lock().unwrap();
+    assert_eq!(log.realtime_commits, 0);
+    assert!(log.anthropic_user_messages.is_empty());
 }
 
 #[tokio::test]

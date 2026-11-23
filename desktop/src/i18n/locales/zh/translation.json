@@ -1092,7 +1092,7 @@
     },
     "cloudGateway": {
       "title": "云端网关与多设备同步",
-      "description": "连接自建轻量网关，在台式机与轻薄本间共享中英文识别、口述列表排版与个人技术词表；客户端不保存任何上游 API 密钥，断网或超时自动按需加载本机 SenseVoiceSmall 兜底。",
+      "description": "云端听写会把音频发给自建网关和语音识别服务。支持实时转录的新版网关会在说话时开始识别。识别失败时可使用本机 SenseVoiceSmall。",
       "loadFailed": "无法读取云端网关设置。",
       "modeLabel": "识别引擎模式",
       "modes": {

@@ -4,9 +4,14 @@ use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp_secs()
-        .init();
+    let logger =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .format_timestamp_secs()
+            .build();
+    let level = logger.filter();
+    if log::set_boxed_logger(Box::new(GatewayLogger(logger))).is_ok() {
+        log::set_max_level(level);
+    }
 
     let config = match GatewayConfig::from_env() {
         Ok(cfg) => cfg,
@@ -65,6 +70,28 @@ async fn main() {
     {
         log::error!("Gateway server exited with error: {err}");
         std::process::exit(1);
+    }
+}
+
+struct GatewayLogger(env_logger::Logger);
+
+impl log::Log for GatewayLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        // WebSocket dependency tracing includes raw handshake headers and payloads.
+        let target = metadata.target();
+        !target.starts_with("tungstenite")
+            && !target.starts_with("tokio_tungstenite")
+            && self.0.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            self.0.log(record);
+        }
+    }
+
+    fn flush(&self) {
+        self.0.flush();
     }
 }
 

@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod policy;
+mod realtime;
 pub mod upstream;
 pub mod vocab;
 
@@ -21,6 +22,7 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 pub const DEFAULT_OPENAI_ASR_MODEL: &str = "gpt-transcribe";
+pub const DEFAULT_OPENAI_REALTIME_ASR_MODEL: &str = "gpt-live-transcribe";
 pub const DEFAULT_ANTHROPIC_CLEANUP_MODEL: &str = "claude-haiku-5-5";
 pub const DEFAULT_MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_ASR_TIMEOUT_MS: u64 = 20_000;
@@ -33,6 +35,7 @@ pub struct GatewayConfig {
     pub openai_api_key: Option<SecretString>,
     pub openai_base_url: String,
     pub openai_asr_model: String,
+    pub openai_realtime_asr_model: Option<String>,
     pub anthropic_api_key: Option<SecretString>,
     pub anthropic_base_url: String,
     pub anthropic_cleanup_model: String,
@@ -64,6 +67,10 @@ impl GatewayConfig {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_OPENAI_ASR_MODEL.to_string());
+        let openai_realtime_asr_model = std::env::var("OPENAI_REALTIME_ASR_MODEL")
+            .unwrap_or_else(|_| DEFAULT_OPENAI_REALTIME_ASR_MODEL.to_string());
+        let openai_realtime_asr_model = (!openai_realtime_asr_model.trim().is_empty())
+            .then(|| openai_realtime_asr_model.trim().to_owned());
 
         let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY")
             .ok()
@@ -100,6 +107,7 @@ impl GatewayConfig {
             openai_api_key,
             openai_base_url,
             openai_asr_model,
+            openai_realtime_asr_model,
             anthropic_api_key,
             anthropic_base_url,
             anthropic_cleanup_model,
@@ -141,6 +149,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/vocabulary", get(handle_get_vocabulary))
         .route("/v1/vocabulary/sync", post(handle_sync_vocabulary))
         .route("/v1/dictate", post(handle_dictate))
+        .route("/v1/dictate/stream", get(realtime::handle_stream))
         .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state)
 }
@@ -160,6 +169,7 @@ pub struct StatusResponse {
     pub asr_ready: bool,
     pub cleanup_ready: bool,
     pub asr_model: String,
+    pub realtime_asr_model: Option<String>,
     pub cleanup_model: String,
     pub vocabulary_revision: i64,
     pub vocabulary_count: u32,
@@ -230,6 +240,7 @@ async fn handle_status(
         asr_ready: state.config.openai_api_key.is_some(),
         cleanup_ready: state.config.anthropic_api_key.is_some(),
         asr_model: state.config.openai_asr_model.clone(),
+        realtime_asr_model: state.config.openai_realtime_asr_model.clone(),
         cleanup_model: state.config.anthropic_cleanup_model.clone(),
         vocabulary_revision,
         vocabulary_count,
@@ -445,8 +456,7 @@ async fn handle_dictate(
         code,
     })?;
 
-    let prompt_terms = state.vocab.select_prompt_terms(&meta.hint_terms, 64);
-    let vocabulary_revision = state.vocab.summary().map(|(rev, _)| rev).unwrap_or(0);
+    let context = DictateContext::new(&state, device_id, meta);
 
     // Step 1: Pure in-memory OpenAI ASR (`audio_payload` is consumed and dropped right here).
     let asr_started = Instant::now();
@@ -457,8 +467,8 @@ async fn handle_dictate(
             api_key: openai_key,
             model: &state.config.openai_asr_model,
             audio: audio_payload,
-            language: meta.language.as_deref(),
-            prompt_terms: &prompt_terms,
+            language: context.meta.language.as_deref(),
+            prompt_terms: &context.prompt_terms,
             timeout_ms: state.config.asr_timeout_ms,
         },
     )
@@ -466,7 +476,7 @@ async fn handle_dictate(
     .map_err(|code| {
         log::warn!(
             "dictate_asr_failed device={} audio_bytes={} reason={}",
-            device_id,
+            context.device_id,
             audio_len,
             code
         );
@@ -477,112 +487,119 @@ async fn handle_dictate(
     })?;
     let asr_ms = asr_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
-    if raw_text.trim().is_empty() {
-        log::info!(
-            "dictate_empty device={} audio_bytes={} asr_ms={}",
+    Ok(Json(
+        context.complete(&state, raw_text, audio_len, asr_ms).await,
+    ))
+}
+
+struct DictateContext {
+    device_id: String,
+    meta: DictateMetadata,
+    prompt_terms: Vec<String>,
+    vocabulary_revision: i64,
+}
+
+impl DictateContext {
+    fn new(state: &AppState, device_id: String, meta: DictateMetadata) -> Self {
+        Self {
+            prompt_terms: state.vocab.select_prompt_terms(&meta.hint_terms, 64),
+            vocabulary_revision: state.vocab.summary().map(|(rev, _)| rev).unwrap_or(0),
             device_id,
-            audio_len,
-            asr_ms
-        );
-        return Ok(Json(DictateResponse {
-            raw_text: String::new(),
-            formatted_text: String::new(),
+            meta,
+        }
+    }
+
+    async fn complete(
+        &self,
+        state: &AppState,
+        raw_text: String,
+        audio_len: usize,
+        asr_ms: u64,
+    ) -> DictateResponse {
+        let Self {
+            device_id,
+            meta,
+            prompt_terms,
+            vocabulary_revision,
+        } = self;
+        let mut response = DictateResponse {
+            formatted_text: policy::normalize_output(&raw_text),
+            raw_text,
             cleanup_applied: false,
             fallback_reason: None,
             asr_ms,
             cleanup_ms: 0,
-            vocabulary_revision,
-        }));
-    }
-
-    if !meta.cleanup_enabled {
-        let normalized = policy::normalize_output(&raw_text);
-        log::info!(
-            "dictate_ok device={} audio_bytes={} asr_ms={} cleanup_ms=0 cleanup=off",
-            device_id,
-            audio_len,
-            asr_ms
-        );
-        return Ok(Json(DictateResponse {
-            raw_text,
-            formatted_text: normalized,
-            cleanup_applied: false,
-            fallback_reason: None,
-            asr_ms,
-            cleanup_ms: 0,
-            vocabulary_revision,
-        }));
-    }
-
-    let Some(anthropic_key) = state.config.anthropic_api_key.as_ref() else {
-        let normalized = policy::normalize_output(&raw_text);
-        return Ok(Json(DictateResponse {
-            raw_text,
-            formatted_text: normalized,
-            cleanup_applied: false,
-            fallback_reason: Some("cleanup_not_configured".to_string()),
-            asr_ms,
-            cleanup_ms: 0,
-            vocabulary_revision,
-        }));
-    };
-
-    // Step 2: Anthropic Claude formatting & spoken list structuring (graceful fallback on failure).
-    let cleanup_started = Instant::now();
-    let cleanup_result = upstream::cleanup_anthropic(
-        &state.http,
-        upstream::AnthropicCleanupRequest {
-            base_url: &state.config.anthropic_base_url,
-            api_key: anthropic_key,
-            model: &state.config.anthropic_cleanup_model,
-            raw: &raw_text,
-            strength: meta.strength,
-            natural_paragraphs: meta.natural_paragraphs,
-            terms: &prompt_terms,
-            max_budget_ms: state.config.cleanup_timeout_ms,
-        },
-    )
-    .await;
-    let cleanup_ms = cleanup_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-
-    match cleanup_result {
-        Ok(formatted_text) => {
+            vocabulary_revision: *vocabulary_revision,
+        };
+        if response.raw_text.trim().is_empty() {
             log::info!(
-                "dictate_ok device={} audio_bytes={} asr_ms={} cleanup_ms={} cleanup=applied",
+                "dictate_empty device={} audio_bytes={} asr_ms={}",
                 device_id,
                 audio_len,
-                asr_ms,
-                cleanup_ms
+                asr_ms
             );
-            Ok(Json(DictateResponse {
-                raw_text,
-                formatted_text,
-                cleanup_applied: true,
-                fallback_reason: None,
-                asr_ms,
-                cleanup_ms,
-                vocabulary_revision,
-            }))
+            response.raw_text.clear();
+            response.formatted_text.clear();
+            return response;
         }
-        Err(reason) => {
-            log::warn!(
+
+        if !meta.cleanup_enabled {
+            log::info!(
+                "dictate_ok device={} audio_bytes={} asr_ms={} cleanup_ms=0 cleanup=off",
+                device_id,
+                audio_len,
+                asr_ms
+            );
+            return response;
+        }
+
+        let Some(anthropic_key) = state.config.anthropic_api_key.as_ref() else {
+            response.fallback_reason = Some("cleanup_not_configured".into());
+            return response;
+        };
+
+        // Step 2: Anthropic Claude formatting & spoken list structuring (graceful fallback on failure).
+        let cleanup_started = Instant::now();
+        let cleanup_result = upstream::cleanup_anthropic(
+            &state.http,
+            upstream::AnthropicCleanupRequest {
+                base_url: &state.config.anthropic_base_url,
+                api_key: anthropic_key,
+                model: &state.config.anthropic_cleanup_model,
+                raw: &response.raw_text,
+                strength: meta.strength,
+                natural_paragraphs: meta.natural_paragraphs,
+                terms: prompt_terms,
+                max_budget_ms: state.config.cleanup_timeout_ms,
+            },
+        )
+        .await;
+        response.cleanup_ms = cleanup_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+
+        match cleanup_result {
+            Ok(formatted_text) => {
+                log::info!(
+                    "dictate_ok device={} audio_bytes={} asr_ms={} cleanup_ms={} cleanup=applied",
+                    device_id,
+                    audio_len,
+                    asr_ms,
+                    response.cleanup_ms
+                );
+                response.formatted_text = formatted_text;
+                response.cleanup_applied = true;
+            }
+            Err(reason) => {
+                log::warn!(
                 "dictate_cleanup_fallback device={} audio_bytes={} asr_ms={} cleanup_ms={} reason={}",
                 device_id,
                 audio_len,
                 asr_ms,
-                cleanup_ms,
+                response.cleanup_ms,
                 reason
             );
-            let fallback_text = policy::normalize_output(&raw_text);
-            Ok(Json(DictateResponse {
-                raw_text,
-                formatted_text: fallback_text,
-                cleanup_applied: false,
-                fallback_reason: Some(reason.to_string()),
-                asr_ms,
-                cleanup_ms,
-                vocabulary_revision,
-            }))
+                response.fallback_reason = Some(reason.into());
+            }
         }
+        response
     }
 }

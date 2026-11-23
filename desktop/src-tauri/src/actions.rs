@@ -181,7 +181,7 @@ impl ShortcutAction for TranscribeAction {
         // Freeze the upload route, model, timeout and credential before opening
         // the microphone; never re-read them in the async transcription path.
         let cleanup_session = dictation_cleanup::capture_session(app);
-        let gateway_session = crate::cloud_gateway::capture_session(app, &cleanup_session);
+        let mut gateway_session = crate::cloud_gateway::capture_session(app, &cleanup_session);
         let use_cloud_gateway = gateway_session.is_active();
 
         // In `cloud_first` mode with a configured gateway, keep local SenseVoice
@@ -225,8 +225,8 @@ impl ShortcutAction for TranscribeAction {
             .state::<Arc<ModelManager>>()
             .get_model_info(&settings.selected_model);
 
-        // Use the app-facing model capability as the single pre-recording source
-        // for live streaming decisions. Cloud gateway mode uses post-release upload.
+        // Local live overlays follow the selected local model capability.
+        // Cloud dictation streams through the gateway without live pasting.
         let model_supports_streaming = !use_cloud_gateway
             && selected_model_info
                 .as_ref()
@@ -241,6 +241,9 @@ impl ShortcutAction for TranscribeAction {
         };
         if model_supports_streaming {
             tm.start_stream();
+        }
+        if use_cloud_gateway {
+            gateway_session.start_live(app, tm.stream_router().cloud_audio());
         }
         let plan_elapsed = plan_started.elapsed();
 
@@ -380,7 +383,7 @@ impl ShortcutAction for TranscribeAction {
         // Claim the recording before changing its UI. Cancellation drops the
         // credential-bearing session and leaves a tombstone, so a release that
         // races with Esc cannot produce a second cancellation/no-audio record.
-        let (cleanup_session, gateway_session, recording_started_at) = match CLEANUP_SESSIONS
+        let (cleanup_session, mut gateway_session, recording_started_at) = match CLEANUP_SESSIONS
             .lock()
             .ok()
             .and_then(|mut sessions| sessions.remove(binding_id))
@@ -502,7 +505,7 @@ impl ShortcutAction for TranscribeAction {
                         match complete_unless_cancelled(
                             crate::cloud_gateway::dictate_with_session(
                                 &ah,
-                                &gateway_session,
+                                &mut gateway_session,
                                 &samples,
                             ),
                             || rm.was_cancelled_since(cancel_generation),

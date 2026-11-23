@@ -135,8 +135,8 @@ struct FinalizedStreamText {
 /// Routes real-time audio frames to the active streaming worker. Shared between
 /// the [`TranscriptionManager`] (opens/closes the route) and the audio recorder's
 /// per-frame callback (feeds frames). The recorder holds an `Arc<StreamRouter>`
-/// directly, so a frame with no stream pending costs a single relaxed atomic
-/// load — no Tauri state lookup, no mutex lock.
+/// directly, so a frame with no stream pending takes no Tauri state lookup or
+/// mutex lock.
 pub struct StreamRouter {
     /// Command channel to the active streaming worker, present from
     /// `start_stream` until `finalize_stream`/`cancel_stream`.
@@ -144,6 +144,7 @@ pub struct StreamRouter {
     /// True while a stream is pending or active (channel is open). The audio
     /// callback checks this first to avoid the mutex lock when no stream runs.
     open: Arc<AtomicBool>,
+    cloud_audio: Arc<crate::cloud_gateway::AudioRoute>,
 }
 
 impl StreamRouter {
@@ -151,6 +152,7 @@ impl StreamRouter {
         Self {
             tx: Mutex::new(None),
             open: Arc::new(AtomicBool::new(false)),
+            cloud_audio: Arc::new(crate::cloud_gateway::AudioRoute::default()),
         }
     }
 
@@ -178,15 +180,19 @@ impl StreamRouter {
         *self.tx.lock().unwrap() = None;
     }
 
-    /// Forward a 16 kHz frame to the active streaming worker. Cheap no-op (a
-    /// single relaxed atomic load) when no stream is pending.
+    /// Forward a 16 kHz frame to the active local or cloud streaming worker.
     pub fn feed(&self, frame: &[f32]) {
+        self.cloud_audio.feed(frame);
         if !self.open.load(Ordering::Relaxed) {
             return;
         }
         if let Some(tx) = self.tx.lock().unwrap().as_ref() {
             let _ = tx.send(StreamCmd::Feed(frame.to_vec()));
         }
+    }
+
+    pub(crate) fn cloud_audio(&self) -> Arc<crate::cloud_gateway::AudioRoute> {
+        Arc::clone(&self.cloud_audio)
     }
 
     /// Whether a stream is pending or active.

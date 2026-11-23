@@ -889,6 +889,9 @@ pub fn run(cli_args: CliArgs) {
         .plugin(
             LogBuilder::new()
                 .level(log::LevelFilter::Trace) // Set to most verbose level globally
+                // WebSocket dependency tracing includes raw credentials and audio.
+                .level_for("tungstenite", log::LevelFilter::Off)
+                .level_for("tokio_tungstenite", log::LevelFilter::Off)
                 .max_file_size(500_000)
                 .rotation_strategy(RotationStrategy::KeepOne)
                 .clear_targets()

@@ -1092,7 +1092,7 @@
     },
     "cloudGateway": {
       "title": "Cloud gateway and multi-device sync",
-      "description": "Connect to your self-hosted gateway for consistent bilingual recognition, spoken list formatting, and synced technical vocabulary across desktop and laptop — with zero upstream API keys stored on this computer and automatic on-demand local SenseVoiceSmall offline fallback.",
+      "description": "Cloud dictation sends audio to your self-hosted gateway and transcription provider. A compatible gateway begins transcribing while you speak. If cloud recognition is unavailable, the app can use local SenseVoiceSmall.",
       "loadFailed": "Could not load cloud gateway settings.",
       "modeLabel": "Recognition engine mode",
       "modes": {

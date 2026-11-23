@@ -4,13 +4,13 @@
 //! - Client holds ZERO upstream API keys (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`).
 //! - Only `gateway_url` (in `AppSettings`) and DPAPI-encrypted `gateway-token.dpapi`
 //!   (in current Windows user `%APPDATA%`) are stored locally.
-//! - Audio is encoded in-memory to 16 kHz mono 16-bit WAV and uploaded over HTTPS;
-//!   any network/timeout/HTTP failure returns `Err` immediately so `actions.rs`
-//!   lazy-loads local `SenseVoiceSmall` on the same captured `samples` buffer.
+//! - Live dictation sends audio frames while recording. If streaming is
+//!   unavailable, the same recording can use the existing in-memory WAV upload
+//!   and then fall back to local recognition.
 
 use crate::dictation_cleanup::{
-    self, protect_secret_bytes, unprotect_secret_bytes, CleanupMode, CleanupSession,
-    CleanupStrength, SecretBytes,
+    self, protect_secret_bytes, unprotect_secret_bytes, CleanupSession, CleanupStrength,
+    SecretBytes,
 };
 use crate::managers::transcription::TranscriptionManager;
 use crate::settings::{get_settings, write_settings, RecognitionMode};
@@ -25,12 +25,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
+mod live;
+pub(crate) use live::AudioRoute;
+
 const TOKEN_FILE: &str = "gateway-token.dpapi";
 const SYNC_STATE_FILE: &str = "gateway-vocab-sync.json";
 const MAX_STATE_BYTES: u64 = 512 * 1024;
 const CONNECT_TIMEOUT_MS: u64 = 2_500;
 const BASE_DICTATE_TIMEOUT_MS: u64 = 12_000;
 const MAX_DICTATE_TIMEOUT_MS: u64 = 25_000;
+const MAX_LIVE_FINALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 
 static GATEWAY_IO: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static MULTIPART_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -179,7 +183,7 @@ pub fn validate_gateway_url(raw: &str) -> Result<String, &'static str> {
     let port_part = if let Some(rest) = authority.strip_prefix('[') {
         let (_, after_bracket) = rest.split_once(']').ok_or("invalid_gateway_url")?;
         after_bracket
-    } else if let Some((host, port)) = authority.split_once(':') {
+    } else if let Some((host, _)) = authority.split_once(':') {
         if host.is_empty() {
             return Err("invalid_gateway_url");
         }
@@ -746,6 +750,7 @@ async fn perform_vocabulary_sync(
 /// route and credentials even if settings are changed mid-utterance.
 pub(crate) struct GatewaySession {
     active: Option<ActiveGatewaySession>,
+    live: Option<live::Recording>,
 }
 
 struct ActiveGatewaySession {
@@ -759,11 +764,31 @@ struct ActiveGatewaySession {
 
 impl GatewaySession {
     pub(crate) fn inactive() -> Self {
-        Self { active: None }
+        Self {
+            active: None,
+            live: None,
+        }
     }
 
     pub(crate) fn is_active(&self) -> bool {
         self.active.is_some()
+    }
+
+    pub(crate) fn start_live(&mut self, app: &AppHandle, route: Arc<AudioRoute>) {
+        let Some(active) = &self.active else {
+            return;
+        };
+        let Ok(authorization) = bearer_header(&active.token) else {
+            return;
+        };
+        let metadata = DictateMetadata::from(active);
+        let app = app.clone();
+        self.live = Some(live::Recording::start(
+            route,
+            active.gateway_url.clone(),
+            authorization,
+            move || metadata.encode(&app),
+        ));
     }
 }
 
@@ -794,6 +819,40 @@ pub(crate) fn capture_session(app: &AppHandle, cleanup: &CleanupSession) -> Gate
             strength,
             natural_paragraphs,
         }),
+        live: None,
+    }
+}
+
+#[derive(Serialize)]
+struct DictateMetadata {
+    language: String,
+    cleanup_enabled: bool,
+    strength: &'static str,
+    natural_paragraphs: bool,
+    hint_terms: Vec<String>,
+}
+
+impl From<&ActiveGatewaySession> for DictateMetadata {
+    fn from(active: &ActiveGatewaySession) -> Self {
+        let strength = match active.strength {
+            CleanupStrength::Faithful => "faithful",
+            CleanupStrength::Light => "light",
+            CleanupStrength::Clear => "clear",
+        };
+        Self {
+            language: active.language.clone(),
+            cleanup_enabled: active.cleanup_enabled,
+            strength,
+            natural_paragraphs: active.natural_paragraphs,
+            hint_terms: Vec::new(),
+        }
+    }
+}
+
+impl DictateMetadata {
+    fn encode(mut self, app: &AppHandle) -> Result<String, &'static str> {
+        self.hint_terms = crate::vocabulary::active_hint_terms(app, 24);
+        serde_json::to_string(&self).map_err(|_| "gateway_metadata_invalid")
     }
 }
 
@@ -864,39 +923,63 @@ pub fn dictate_timeout_ms(sample_count: usize) -> u64 {
 
 pub(crate) async fn dictate_with_session(
     app: &AppHandle,
-    session: &GatewaySession,
+    session: &mut GatewaySession,
     samples: &[f32],
 ) -> Result<crate::actions::ProcessedTranscription, &'static str> {
     let active = session.active.as_ref().ok_or("gateway_not_active")?;
+    let timeout_ms = dictate_timeout_ms(samples.len());
+    let budget = Duration::from_millis(timeout_ms);
+    let started = Instant::now();
+    if let Some(live) = session.live.take() {
+        // Reserve at least half of the cloud budget for a batch retry if the
+        // live socket stalls. Both paths still share one post-release budget.
+        let live_budget = (budget / 2).min(MAX_LIVE_FINALIZE_TIMEOUT);
+        match live.finish(live_budget).await {
+            Ok(wire) => {
+                log::debug!("Live dictation finalized");
+                return Ok(process_dictate_response(app, active, wire, timeout_ms));
+            }
+            Err(reason) => {
+                log::debug!("Live dictation unavailable ({reason}); checking batch fallback");
+            }
+        }
+    }
+    let wire = dictate_batch(
+        app,
+        active,
+        samples,
+        budget.saturating_sub(started.elapsed()),
+    )
+    .await?;
+    Ok(process_dictate_response(app, active, wire, timeout_ms))
+}
+
+async fn dictate_batch(
+    app: &AppHandle,
+    active: &ActiveGatewaySession,
+    samples: &[f32],
+    budget: Duration,
+) -> Result<WireDictateResponse, &'static str> {
+    let started = Instant::now();
     let wav_bytes = encode_wav_16k_mono_in_memory(samples)?;
-    let hint_terms = crate::vocabulary::active_hint_terms(app, 24);
-    let strength_str = match active.strength {
-        CleanupStrength::Faithful => "faithful",
-        CleanupStrength::Light => "light",
-        CleanupStrength::Clear => "clear",
-    };
-    let metadata_json = serde_json::to_string(&json!({
-        "language": active.language,
-        "cleanup_enabled": active.cleanup_enabled,
-        "strength": strength_str,
-        "natural_paragraphs": active.natural_paragraphs,
-        "hint_terms": hint_terms,
-    }))
-    .map_err(|_| "gateway_metadata_invalid")?;
+    let metadata_json = DictateMetadata::from(active).encode(app)?;
 
     let (content_type, body) = build_multipart_dictate_body(&wav_bytes, &metadata_json);
     drop(wav_bytes);
 
     let client = GATEWAY_HTTP.as_ref().map_err(|code| *code)?;
     let auth = bearer_header(&active.token)?;
-    let timeout_ms = dictate_timeout_ms(samples.len());
+    let remaining = budget.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err("gateway_timeout");
+    }
 
     let mut response = client
         .post(format!("{}/v1/dictate", active.gateway_url))
         .header(reqwest::header::AUTHORIZATION, auth)
         .header(reqwest::header::CONTENT_TYPE, content_type)
         .body(body)
-        .timeout(Duration::from_millis(timeout_ms))
+        .timeout(remaining)
         .send()
         .await
         .map_err(|e| {
@@ -930,9 +1013,15 @@ pub(crate) async fn dictate_with_session(
         resp_bytes.extend_from_slice(&chunk);
     }
 
-    let wire: WireDictateResponse =
-        serde_json::from_slice(&resp_bytes).map_err(|_| "gateway_invalid_response")?;
+    serde_json::from_slice(&resp_bytes).map_err(|_| "gateway_invalid_response")
+}
 
+fn process_dictate_response(
+    app: &AppHandle,
+    active: &ActiveGatewaySession,
+    wire: WireDictateResponse,
+    timeout_ms: u64,
+) -> crate::actions::ProcessedTranscription {
     let prepared_raw = crate::vocabulary::apply_confirmed(app, &wire.raw_text);
     let (final_candidate, cleanup_outcome) = if wire.raw_text.trim().is_empty() {
         (String::new(), "off".to_string())
@@ -959,7 +1048,7 @@ pub(crate) async fn dictate_with_session(
     };
 
     let final_text = crate::dictation_lifecycle::normalize_output(&final_candidate);
-    Ok(crate::actions::ProcessedTranscription {
+    crate::actions::ProcessedTranscription {
         raw_text: wire.raw_text,
         final_text: final_text.clone(),
         post_processed_text: Some(final_text),
@@ -969,7 +1058,7 @@ pub(crate) async fn dictate_with_session(
         cleanup_budget_ms: timeout_ms,
         cleanup_outcome,
         gateway_asr_ms: Some(wire.asr_ms),
-    })
+    }
 }
 
 #[cfg(test)]
