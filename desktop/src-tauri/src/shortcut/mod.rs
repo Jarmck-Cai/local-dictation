@@ -32,13 +32,14 @@ use crate::tray;
 // Note: Commands are accessed via shortcut::handy_keys:: in lib.rs
 
 /// Initialize shortcuts using the configured implementation
+#[cfg(not(target_os = "macos"))]
 pub fn init_shortcuts(app: &AppHandle) {
     let user_settings = settings::load_or_create_app_settings(app);
 
     // Check which implementation to use
     match user_settings.keyboard_implementation {
         KeyboardImplementation::Tauri => {
-            tauri_impl::init_shortcuts(app);
+            let _ = tauri_impl::init_shortcuts(app);
         }
         KeyboardImplementation::HandyKeys => {
             if let Err(e) = handy_keys::init_shortcuts(app) {
@@ -51,9 +52,19 @@ pub fn init_shortcuts(app: &AppHandle) {
                 settings.keyboard_implementation = KeyboardImplementation::Tauri;
                 settings::write_settings(app, settings);
 
-                tauri_impl::init_shortcuts(app);
+                let _ = tauri_impl::init_shortcuts(app);
             }
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn init_macos_shortcuts(app: &AppHandle) -> Result<(), String> {
+    // Preserve the configured backend. A failed registration can be retried
+    // after an authorization change or after editing the binding.
+    match settings::get_settings(app).keyboard_implementation {
+        KeyboardImplementation::Tauri => tauri_impl::init_shortcuts(app),
+        KeyboardImplementation::HandyKeys => handy_keys::init_shortcuts(app),
     }
 }
 
@@ -611,7 +622,7 @@ fn initialize_handy_keys_with_rollback(app: &AppHandle) -> Result<bool, String> 
         settings.keyboard_implementation = KeyboardImplementation::Tauri;
         settings::write_settings(app, settings);
         crate::secure_input::reconcile_fallback(app);
-        tauri_impl::init_shortcuts(app);
+        let _ = tauri_impl::init_shortcuts(app);
         return Err(format!(
             "Failed to initialize HandyKeys: {}. Reverted to Tauri.",
             e

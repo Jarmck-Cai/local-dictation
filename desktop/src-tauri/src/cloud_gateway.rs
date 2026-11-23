@@ -273,8 +273,7 @@ fn read_token(_app: &AppHandle) -> Result<SecretBytes, &'static str> {
 
 #[cfg(target_os = "macos")]
 fn persist_token(_app: &AppHandle, token: SecretBytes) -> Result<(), &'static str> {
-    crate::keychain::save(crate::keychain::GATEWAY, &token)
-        .map_err(|_| "gateway_token_unavailable")
+    crate::keychain::save(crate::keychain::GATEWAY, &token).map_err(|_| "gateway_token_unavailable")
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -312,20 +311,28 @@ fn save_sync_state(app: &AppHandle, state: &PersistedSyncState) -> Result<(), &'
     Ok(())
 }
 
+fn preferred_recognition_mode(mode: RecognitionMode, gateway_ready: bool) -> RecognitionMode {
+    if cfg!(target_os = "macos") && !gateway_ready {
+        RecognitionMode::LocalOnly
+    } else {
+        mode
+    }
+}
+
 fn build_view(app: &AppHandle) -> CloudGatewayView {
     let settings = get_settings(app);
     let url = validate_gateway_url(&settings.gateway_url).unwrap_or_default();
     let token_configured = load_token(app).is_ok();
     let gateway_ready = !url.is_empty() && token_configured;
-    let effective_mode =
-        if settings.recognition_mode == RecognitionMode::CloudFirst && gateway_ready {
-            RecognitionMode::CloudFirst
-        } else {
-            RecognitionMode::LocalOnly
-        };
+    let recognition_mode = preferred_recognition_mode(settings.recognition_mode, gateway_ready);
+    let effective_mode = if recognition_mode == RecognitionMode::CloudFirst && gateway_ready {
+        RecognitionMode::CloudFirst
+    } else {
+        RecognitionMode::LocalOnly
+    };
     let sync = load_sync_state(app);
     CloudGatewayView {
-        recognition_mode: settings.recognition_mode,
+        recognition_mode,
         gateway_url: settings.gateway_url,
         auto_sync_vocabulary: settings.gateway_auto_sync_vocabulary,
         token_configured,
@@ -377,7 +384,14 @@ pub fn save_cloud_gateway_config(
             .lock()
             .map_err(|_| "gateway_storage_unavailable")?;
         let mut settings = get_settings(&app);
-        settings.recognition_mode = config.recognition_mode;
+        #[cfg(target_os = "macos")]
+        let mode = preferred_recognition_mode(
+            config.recognition_mode,
+            !cleaned_url.is_empty() && load_token(&app).is_ok(),
+        );
+        #[cfg(not(target_os = "macos"))]
+        let mode = config.recognition_mode;
+        settings.recognition_mode = mode;
         settings.gateway_url = cleaned_url;
         settings.gateway_auto_sync_vocabulary = config.auto_sync_vocabulary;
         write_settings(&app, settings);
@@ -403,7 +417,13 @@ pub fn set_cloud_gateway_token(app: AppHandle, token: String) -> Result<CloudGat
         let _lock = GATEWAY_IO
             .lock()
             .map_err(|_| "gateway_storage_unavailable")?;
+        #[cfg(target_os = "macos")]
+        let lacked_token = matches!(load_token(&app), Err("missing_gateway_token"));
         persist_token(&app, secret).map_err(str::to_string)?;
+        #[cfg(target_os = "macos")]
+        if lacked_token {
+            set_local_recognition(&app);
+        }
         build_view(&app)
     };
     if view.gateway_ready && view.auto_sync_vocabulary {
@@ -421,8 +441,11 @@ pub fn clear_cloud_gateway_token(app: AppHandle) -> Result<CloudGatewayView, Str
             .lock()
             .map_err(|_| "gateway_storage_unavailable")?;
         #[cfg(target_os = "macos")]
-        crate::keychain::clear(crate::keychain::GATEWAY)
-            .map_err(|_| "gateway_token_unavailable")?;
+        {
+            crate::keychain::clear(crate::keychain::GATEWAY)
+                .map_err(|_| "gateway_token_unavailable")?;
+            set_local_recognition(&app);
+        }
         #[cfg(not(target_os = "macos"))]
         {
             let path = token_storage_path(&app).map_err(str::to_string)?;
@@ -439,6 +462,15 @@ pub fn clear_cloud_gateway_token(app: AppHandle) -> Result<CloudGatewayView, Str
     }
     let _ = app.emit("cloud-gateway-updated", &view);
     Ok(view)
+}
+
+#[cfg(target_os = "macos")]
+fn set_local_recognition(app: &AppHandle) {
+    let mut settings = get_settings(app);
+    if settings.recognition_mode != RecognitionMode::LocalOnly {
+        settings.recognition_mode = RecognitionMode::LocalOnly;
+        write_settings(app, settings);
+    }
 }
 
 fn bearer_header(token: &SecretBytes) -> Result<reqwest::header::HeaderValue, &'static str> {
@@ -1091,23 +1123,40 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn unconfigured_gateway_uses_local_even_with_legacy_cloud_preference() {
+        assert_eq!(
+            preferred_recognition_mode(RecognitionMode::CloudFirst, false),
+            RecognitionMode::LocalOnly,
+        );
+        assert_eq!(
+            preferred_recognition_mode(RecognitionMode::CloudFirst, true),
+            RecognitionMode::CloudFirst,
+        );
+        assert_eq!(
+            preferred_recognition_mode(RecognitionMode::LocalOnly, true),
+            RecognitionMode::LocalOnly,
+        );
+    }
+
+    #[test]
     fn validates_gateway_urls_and_rejects_embedded_credentials_or_queries() {
         assert_eq!(validate_gateway_url("  ").unwrap(), "");
         assert_eq!(
-            validate_gateway_url("https://dictation.astrmind.com/").unwrap(),
-            "https://dictation.astrmind.com"
+            validate_gateway_url("https://gateway.example.com/").unwrap(),
+            "https://gateway.example.com"
         );
         assert_eq!(
             validate_gateway_url("http://127.0.0.1:8787").unwrap(),
             "http://127.0.0.1:8787"
         );
         for bad in [
-            "ftp://dictation.astrmind.com",
-            "https://user:pass@dictation.astrmind.com",
-            "https://dictation.astrmind.com?token=secret",
-            "https://dictation.astrmind.com#frag",
-            "https://dictation.astrmind.com:0",
-            "https://dictation.astrmind.com:abc",
+            "ftp://gateway.example.com",
+            "https://user:pass@gateway.example.com",
+            "https://gateway.example.com?token=secret",
+            "https://gateway.example.com#frag",
+            "https://gateway.example.com:0",
+            "https://gateway.example.com:abc",
         ] {
             assert_eq!(
                 validate_gateway_url(bad),

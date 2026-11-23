@@ -140,6 +140,11 @@ pub fn check_apple_intelligence_available() -> bool {
 #[specta::specta]
 #[tauri::command]
 pub fn initialize_enigo(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if !crate::input::macos_accessibility_granted() {
+        return Err("accessibility_permission_required".into());
+    }
+
     use crate::input::EnigoState;
 
     // Check if already initialized
@@ -178,13 +183,20 @@ pub struct ShortcutsInitialized;
 #[specta::specta]
 #[tauri::command]
 pub fn initialize_shortcuts(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if !crate::input::macos_accessibility_granted() {
+        return Err("accessibility_permission_required".into());
+    }
+
     // Check if already initialized
     if app.try_state::<ShortcutsInitialized>().is_some() {
         log::debug!("Shortcuts already initialized");
         return Ok(());
     }
 
-    // Initialize shortcuts
+    #[cfg(target_os = "macos")]
+    crate::shortcut::init_macos_shortcuts(&app)?;
+    #[cfg(not(target_os = "macos"))]
     crate::shortcut::init_shortcuts(&app);
 
     // Mark as initialized before reconciling the macOS Secure Input fallback.
@@ -193,4 +205,29 @@ pub fn initialize_shortcuts(app: AppHandle) -> Result<(), String> {
 
     log::info!("Shortcuts initialized successfully");
     Ok(())
+}
+
+/// Opens a fixed macOS permission pane when the user asks to grant access.
+#[tauri::command]
+#[specta::specta]
+pub fn open_dictation_privacy_settings(app: AppHandle, permission: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let pane = match permission.as_str() {
+            "accessibility" => "Privacy_Accessibility",
+            "microphone" => "Privacy_Microphone",
+            _ => return Err("unknown_dictation_permission".into()),
+        };
+        app.opener()
+            .open_url(
+                format!("x-apple.systempreferences:com.apple.preference.security?{pane}"),
+                None::<&str>,
+            )
+            .map_err(|_| "privacy_settings_unavailable".into())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, permission);
+        Err("privacy_settings_unavailable".into())
+    }
 }

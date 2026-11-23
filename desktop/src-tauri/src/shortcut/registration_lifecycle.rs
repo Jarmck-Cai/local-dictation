@@ -62,6 +62,11 @@ impl<T> Default for RegisteredBindings<T> {
     }
 }
 impl<T> RegisteredBindings<T> {
+    #[cfg(target_os = "macos")]
+    pub fn identity(&self, id: &str) -> Option<&T> {
+        self.0.get(id)
+    }
+
     pub fn record(&mut self, id: String, identity: T) {
         self.0.insert(id, identity);
     }

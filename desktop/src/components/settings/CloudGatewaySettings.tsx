@@ -6,6 +6,7 @@ import { Cloud, RefreshCw, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import {
   cloudGatewayCommands,
+  canEnableMacGateway,
   classifyGatewayErrorCode,
   gatewayEffectiveBannerKey,
   isValidGatewayUrlInput,
@@ -28,6 +29,16 @@ export const CloudGatewaySettings = () => {
   const [loadFailed, setLoadFailed] = useState(false);
   const [tokenInput, setTokenInput] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [savedCloudUrl, setSavedCloudUrl] = useState("");
+  const [verifiedUrl, setVerifiedUrl] = useState("");
+
+  const rememberSavedRoute = useCallback((config: CloudGatewayView) => {
+    setSavedCloudUrl(
+      config.effective_mode === "cloud_first"
+        ? normalizeGatewayUrlInput(config.gateway_url)
+        : "",
+    );
+  }, []);
   const [testResult, setTestResult] =
     useState<GatewayConnectionTestResult | null>(null);
 
@@ -35,21 +46,28 @@ export const CloudGatewaySettings = () => {
     setBusy(true);
     setLoadFailed(false);
     try {
-      setView(await cloudGatewayCommands.getConfig());
+      const config = await cloudGatewayCommands.getConfig();
+      setView(config);
+      rememberSavedRoute(config);
       setDirty(false);
     } catch {
       setLoadFailed(true);
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [rememberSavedRoute]);
 
   useEffect(() => {
-    void load();
+    if (isMac) void load();
+  }, [isMac, load]);
+
+  useEffect(() => {
+    if (!isMac) void load();
     let active = true;
     let unlisten: (() => void) | undefined;
     void listen<CloudGatewayView>("cloud-gateway-updated", (event) => {
       if (active) {
+        rememberSavedRoute(event.payload);
         setView((prev) =>
           dirty && prev
             ? {
@@ -69,7 +87,16 @@ export const CloudGatewaySettings = () => {
       active = false;
       unlisten?.();
     };
-  }, [load, dirty]);
+  }, [dirty, isMac, load, rememberSavedRoute]);
+
+  const editedUrl = normalizeGatewayUrlInput(view?.gateway_url ?? "");
+  const canEnableCloud =
+    !isMac ||
+    Boolean(
+      view?.token_configured &&
+        editedUrl &&
+        (editedUrl === savedCloudUrl || editedUrl === verifiedUrl),
+    );
 
   const saveConfig = async () => {
     if (!view) return;
@@ -80,11 +107,12 @@ export const CloudGatewaySettings = () => {
     setBusy(true);
     try {
       const updated = await cloudGatewayCommands.saveConfig({
-        recognition_mode: view.recognition_mode,
+        recognition_mode: canEnableCloud ? view.recognition_mode : "local_only",
         gateway_url: normalizeGatewayUrlInput(view.gateway_url),
         auto_sync_vocabulary: view.auto_sync_vocabulary,
       });
       setView(updated);
+      rememberSavedRoute(updated);
       setDirty(false);
       toast.success(t("dictation.cloudGateway.saved"));
     } catch (err) {
@@ -101,11 +129,15 @@ export const CloudGatewaySettings = () => {
       const updated = clear
         ? await cloudGatewayCommands.clearToken()
         : await cloudGatewayCommands.setToken(tokenInput.trim());
+      rememberSavedRoute(updated);
+      setVerifiedUrl("");
       setView((prev) =>
         prev
           ? {
               ...updated,
-              recognition_mode: prev.recognition_mode,
+              recognition_mode: isMac
+                ? updated.recognition_mode
+                : prev.recognition_mode,
               gateway_url: prev.gateway_url,
               auto_sync_vocabulary: prev.auto_sync_vocabulary,
             }
@@ -137,9 +169,13 @@ export const CloudGatewaySettings = () => {
     }
     setTesting(true);
     setTestResult(null);
+    setVerifiedUrl("");
     try {
       const result = await cloudGatewayCommands.testConnection(cleanedUrl);
       setTestResult(result);
+      setVerifiedUrl(
+        result.authenticated && result.asr_ready ? cleanedUrl : "",
+      );
       if (result.authenticated && result.asr_ready) {
         toast.success(
           t("dictation.cloudGateway.testSuccess", {
@@ -162,7 +198,9 @@ export const CloudGatewaySettings = () => {
     try {
       if (dirty && view) {
         const saved = await cloudGatewayCommands.saveConfig({
-          recognition_mode: view.recognition_mode,
+          recognition_mode: canEnableCloud
+            ? view.recognition_mode
+            : "local_only",
           gateway_url: normalizeGatewayUrlInput(view.gateway_url),
           auto_sync_vocabulary: view.auto_sync_vocabulary,
         });
@@ -186,7 +224,17 @@ export const CloudGatewaySettings = () => {
     }
   };
 
-  const bannerKey = view ? gatewayEffectiveBannerKey(view) : null;
+  const selectedMode =
+    view?.recognition_mode === "cloud_first" && canEnableCloud
+      ? "cloud_first"
+      : "local_only";
+  const bannerKey = view
+    ? isMac
+      ? savedCloudUrl
+        ? "cloudActive"
+        : "localOnly"
+      : gatewayEffectiveBannerKey(view)
+    : null;
 
   return (
     <SettingsGroup title={t("dictation.cloudGateway.title")}>
@@ -224,12 +272,12 @@ export const CloudGatewaySettings = () => {
                   <Button
                     key={mode}
                     variant={
-                      view.recognition_mode === mode
-                        ? "primary-soft"
-                        : "secondary"
+                      selectedMode === mode ? "primary-soft" : "secondary"
                     }
-                    aria-pressed={view.recognition_mode === mode}
-                    disabled={busy}
+                    aria-pressed={selectedMode === mode}
+                    disabled={
+                      busy || (mode === "cloud_first" && !canEnableCloud)
+                    }
                     onClick={() => {
                       setView({ ...view, recognition_mode: mode });
                       setDirty(true);
@@ -240,6 +288,11 @@ export const CloudGatewaySettings = () => {
                 ),
               )}
             </div>
+            {isMac && !canEnableCloud && (
+              <p className="text-xs text-text/65">
+                {t("dictation.cloudGateway.enableCloudHint")}
+              </p>
+            )}
             {bannerKey && (
               <p className="text-xs text-text/65 flex items-center gap-1.5">
                 <ShieldCheck
@@ -256,11 +309,15 @@ export const CloudGatewaySettings = () => {
                 {t("dictation.cloudGateway.urlLabel")}
                 <Input
                   value={view.gateway_url}
-                  disabled={busy}
+                  disabled={busy || (isMac && testing)}
                   spellCheck={false}
                   placeholder={t("dictation.cloudGateway.urlPlaceholder")}
                   onChange={(event) => {
                     setView({ ...view, gateway_url: event.target.value });
+                    if (isMac) {
+                      setVerifiedUrl("");
+                      setTestResult(null);
+                    }
                     setDirty(true);
                   }}
                 />
@@ -282,7 +339,7 @@ export const CloudGatewaySettings = () => {
                     autoComplete="new-password"
                     spellCheck={false}
                     value={tokenInput}
-                    disabled={busy}
+                    disabled={busy || (isMac && testing)}
                     aria-label={t("dictation.cloudGateway.tokenLabel")}
                     placeholder={t(
                       isMac
@@ -294,7 +351,11 @@ export const CloudGatewaySettings = () => {
                   />
                   <Button
                     variant="secondary"
-                    disabled={busy || tokenInput.trim().length < 12}
+                    disabled={
+                      busy ||
+                      (isMac && testing) ||
+                      tokenInput.trim().length < 12
+                    }
                     onClick={() => void updateToken(false)}
                   >
                     {t("dictation.cloudGateway.saveToken")}
@@ -302,7 +363,7 @@ export const CloudGatewaySettings = () => {
                   {view.token_configured && (
                     <Button
                       variant="danger-ghost"
-                      disabled={busy}
+                      disabled={busy || (isMac && testing)}
                       onClick={() => void updateToken(true)}
                     >
                       {t("dictation.cloudGateway.removeToken")}

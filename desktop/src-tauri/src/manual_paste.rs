@@ -346,12 +346,11 @@ pub(crate) fn any_keyboard_key_down() -> Result<bool, &'static str> {
 pub(crate) fn any_keyboard_key_down() -> Result<bool, &'static str> {
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
-        fn AXIsProcessTrusted() -> bool;
         fn CGEventSourceKeyState(state_id: i32, key: u16) -> bool;
     }
     // Query only aggregate state in the current login session. Caps Lock is a
     // latched toggle and is deliberately excluded from physical hold checks.
-    if !unsafe { AXIsProcessTrusted() } || crate::secure_input::is_enabled_now() {
+    if !crate::input::macos_accessibility_granted() || crate::secure_input::is_enabled_now() {
         return Err("keyboard_unavailable");
     }
     const COMBINED_SESSION: i32 = 0;

@@ -1,106 +1,182 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { type } from "@tauri-apps/plugin-os";
 import {
   checkAccessibilityPermission,
+  checkMicrophonePermission,
   requestAccessibilityPermission,
+  requestMicrophonePermission,
 } from "tauri-plugin-macos-permissions-api";
+import { commands } from "@/bindings";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { Button } from "./ui/Button";
 
-// Define permission state type
-type PermissionState = "request" | "verify" | "granted";
+type Permission = "accessibility" | "microphone";
+type Access = "granted" | "required" | "unknown";
 
-// Define button configuration type
-interface ButtonConfig {
-  text: string;
-  className: string;
-}
+const permissions: readonly Permission[] = ["microphone", "accessibility"];
 
-const AccessibilityPermissions: React.FC = () => {
+export default function AccessibilityPermissions() {
   const { t } = useTranslation();
-  const [hasAccessibility, setHasAccessibility] = useState<boolean>(false);
-  const [permissionState, setPermissionState] =
-    useState<PermissionState>("request");
+  const refreshAudioDevices = useSettingsStore(
+    (state) => state.refreshAudioDevices,
+  );
+  const [access, setAccess] = useState<Record<Permission, Access> | null>(null);
+  const [startupFailed, setStartupFailed] = useState(false);
+  const [actionFailed, setActionFailed] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const pendingCheck = useRef(false);
+  const hadMicrophone = useRef(false);
 
-  // Accessibility permissions are only required on macOS
-  const isMacOS = type() === "macos";
+  const recheck = useCallback(async () => {
+    if (pendingCheck.current) return;
+    pendingCheck.current = true;
+    setChecking(true);
+    const [accessibility, microphone] = await Promise.allSettled([
+      checkAccessibilityPermission(),
+      checkMicrophonePermission(),
+    ]);
+    const result = (permission: PromiseSettledResult<boolean>): Access =>
+      permission.status === "rejected"
+        ? "unknown"
+        : permission.value
+          ? "granted"
+          : "required";
+    const checked = {
+      accessibility: result(accessibility),
+      microphone: result(microphone),
+    };
+    setAccess(checked);
 
-  // Check permissions without requesting
-  const checkPermissions = async (): Promise<boolean> => {
-    const hasPermissions: boolean = await checkAccessibilityPermission();
-    setHasAccessibility(hasPermissions);
-    setPermissionState(hasPermissions ? "granted" : "verify");
-    return hasPermissions;
-  };
-
-  // Handle the unified button action based on current state
-  const handleButtonClick = async (): Promise<void> => {
-    if (permissionState === "request") {
-      try {
-        await requestAccessibilityPermission();
-        // After system prompt, transition to verification state
-        setPermissionState("verify");
-      } catch (error) {
-        console.error("Error requesting permissions:", error);
-        setPermissionState("verify");
+    try {
+      if (checked.accessibility === "granted") {
+        const results = await Promise.allSettled([
+          commands.initializeEnigo(),
+          commands.initializeShortcuts(),
+        ]);
+        setStartupFailed(
+          results.some(
+            (call) => call.status !== "fulfilled" || call.value.status !== "ok",
+          ),
+        );
+      } else {
+        setStartupFailed(false);
       }
-    } else if (permissionState === "verify") {
-      // State is "verify" - check if permission was granted
-      await checkPermissions();
+      if (checked.microphone === "granted" && !hadMicrophone.current) {
+        void refreshAudioDevices();
+      }
+      hadMicrophone.current = checked.microphone === "granted";
+    } finally {
+      setChecking(false);
+      pendingCheck.current = false;
+    }
+  }, [refreshAudioDevices]);
+
+  useEffect(() => {
+    void recheck();
+    const onFocus = () => void recheck();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [recheck]);
+
+  const openSettings = async (permission: Permission) => {
+    setActionFailed(false);
+    try {
+      const result = await commands.openDictationPrivacySettings(permission);
+      if (result.status !== "ok") setActionFailed(true);
+    } catch {
+      setActionFailed(true);
     }
   };
 
-  // On app boot - check permissions (only on macOS)
-  useEffect(() => {
-    if (!isMacOS) return;
+  const request = async (permission: Permission) => {
+    setActionFailed(false);
+    try {
+      if (permission === "microphone") await requestMicrophonePermission();
+      else await requestAccessibilityPermission();
+      await recheck();
+    } catch {
+      setActionFailed(true);
+    }
+  };
 
-    const initialSetup = async (): Promise<void> => {
-      const hasPermissions: boolean = await checkAccessibilityPermission();
-      setHasAccessibility(hasPermissions);
-      setPermissionState(hasPermissions ? "granted" : "request");
-    };
-
-    initialSetup();
-  }, [isMacOS]);
-
-  // Skip rendering on non-macOS platforms or if permission is already granted
-  if (!isMacOS || hasAccessibility) {
+  if (
+    !access ||
+    (!startupFailed &&
+      permissions.every((permission) => access[permission] === "granted"))
+  ) {
     return null;
   }
 
-  // Configure button text and style based on state
-  const buttonConfig: Record<PermissionState, ButtonConfig | null> = {
-    request: {
-      text: t("accessibility.openSettings"),
-      className:
-        "px-2 py-1 text-sm font-semibold bg-mid-gray/10 border  border-mid-gray/80 hover:bg-logo-primary/10 rounded cursor-pointer hover:border-logo-primary",
-    },
-    verify: {
-      text: t("accessibility.openSettings"),
-      className:
-        "bg-gray-100 hover:bg-gray-200 text-gray-800 font-medium py-1 px-3 rounded-md text-sm flex items-center justify-center cursor-pointer",
-    },
-    granted: null,
-  };
-
-  const config = buttonConfig[permissionState] as ButtonConfig;
-
   return (
-    <div className="p-4 w-full rounded-lg border border-mid-gray">
-      <div className="flex justify-between items-center gap-2">
-        <div className="">
-          <p className="text-sm font-medium">
-            {t("accessibility.permissionsDescription")}
+    <section
+      aria-labelledby="mac-permission-title"
+      className="max-w-3xl mx-auto mb-5 rounded-lg border border-warning/25 bg-warning/10 p-4 space-y-3"
+    >
+      <h2 id="mac-permission-title" className="text-sm font-semibold">
+        {t("onboarding.permissions.title")}
+      </h2>
+      {permissions.map((permission) => (
+        <div key={permission} className="space-y-1.5">
+          <h3 className="text-sm font-medium">
+            {t(
+              permission === "microphone"
+                ? "onboarding.permissions.microphone.title"
+                : "onboarding.permissions.accessibility.title",
+            )}
+          </h3>
+          <p className="text-xs text-text/70">
+            {t(
+              permission === "accessibility"
+                ? "onboarding.permissions.macAccessibilityHelp"
+                : "onboarding.permissions.macMicrophoneHelp",
+            )}
           </p>
+          {access[permission] === "granted" ? (
+            <p className="text-xs">{t("onboarding.permissions.granted")}</p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={checking}
+                onClick={() => void request(permission)}
+              >
+                {t("onboarding.permissions.grant")}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void openSettings(permission)}
+              >
+                {t("accessibility.openSettings")}
+              </Button>
+            </div>
+          )}
         </div>
-        <button
-          onClick={handleButtonClick}
-          className={`min-h-10 ${config.className}`}
-        >
-          {config.text}
-        </button>
-      </div>
-    </div>
+      ))}
+      {permissions.some((permission) => access[permission] === "unknown") && (
+        <p role="alert" className="text-xs">
+          {t("onboarding.permissions.errors.checkFailed")}
+        </p>
+      )}
+      {startupFailed && (
+        <p role="alert" className="text-xs">
+          {t("onboarding.permissions.macInputFailed")}
+        </p>
+      )}
+      {actionFailed && (
+        <p role="alert" className="text-xs">
+          {t("onboarding.permissions.errors.requestFailed")}
+        </p>
+      )}
+      <Button
+        variant="secondary"
+        size="sm"
+        disabled={checking}
+        onClick={() => void recheck()}
+      >
+        {t("onboarding.permissions.recheck")}
+      </Button>
+    </section>
   );
-};
-
-export default AccessibilityPermissions;
+}

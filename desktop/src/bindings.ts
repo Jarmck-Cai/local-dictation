@@ -640,6 +640,14 @@ async initializeEnigo() : Promise<Result<null, string>> {
  * On macOS, this should be called after accessibility permissions are granted.
  * This is idempotent - calling it multiple times is safe.
  */
+async openDictationPrivacySettings(permission: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_dictation_privacy_settings", { permission }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e as any };
+}
+},
 async initializeShortcuts() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("initialize_shortcuts") };

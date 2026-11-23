@@ -75,6 +75,17 @@ export function gatewayEffectiveBannerKey(
   return "cloudUnconfiguredLocal";
 }
 
+/** A saved cloud route remains usable, while a new route needs a passing test. */
+export function canEnableMacGateway(
+  draft: Pick<CloudGatewayView, "gateway_url" | "token_configured"> | null,
+  savedCloudUrl: string,
+  verifiedUrl: string,
+): boolean {
+  if (!draft?.token_configured) return false;
+  const url = normalizeGatewayUrlInput(draft.gateway_url);
+  return url !== "" && (url === savedCloudUrl || url === verifiedUrl);
+}
+
 export function classifyGatewayErrorCode(
   err: unknown,
 ):

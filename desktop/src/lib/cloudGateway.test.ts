@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  canEnableMacGateway,
   classifyGatewayErrorCode,
   gatewayEffectiveBannerKey,
   isValidGatewayUrlInput,
@@ -7,19 +8,16 @@ import {
 } from "./cloudGateway";
 
 assert.equal(
-  normalizeGatewayUrlInput(" https://dictation.astrmind.com/// "),
-  "https://dictation.astrmind.com",
+  normalizeGatewayUrlInput(" https://gateway.example.com/// "),
+  "https://gateway.example.com",
 );
 assert.equal(isValidGatewayUrlInput(""), true);
-assert.equal(isValidGatewayUrlInput("https://dictation.astrmind.com"), true);
+assert.equal(isValidGatewayUrlInput("https://gateway.example.com"), true);
 assert.equal(isValidGatewayUrlInput("http://127.0.0.1:8787"), true);
-assert.equal(isValidGatewayUrlInput("ftp://dictation.astrmind.com"), false);
+assert.equal(isValidGatewayUrlInput("ftp://gateway.example.com"), false);
+assert.equal(isValidGatewayUrlInput("https://tok@gateway.example.com"), false);
 assert.equal(
-  isValidGatewayUrlInput("https://tok@dictation.astrmind.com"),
-  false,
-);
-assert.equal(
-  isValidGatewayUrlInput("https://dictation.astrmind.com?token=abc"),
+  isValidGatewayUrlInput("https://gateway.example.com?token=abc"),
   false,
 );
 
@@ -56,6 +54,24 @@ assert.equal(
 assert.equal(classifyGatewayErrorCode("unexpected_internal"), "generic");
 assert.equal(classifyGatewayErrorCode(new Error("boom")), "generic");
 
+const example = "https://gateway.example.com";
+const draft = { gateway_url: example, token_configured: true };
+assert.equal(canEnableMacGateway(null, "", ""), false);
+assert.equal(
+  canEnableMacGateway({ ...draft, token_configured: false }, "", example),
+  false,
+);
+assert.equal(canEnableMacGateway(draft, "", ""), false);
+assert.equal(canEnableMacGateway(draft, "", example), true);
+assert.equal(
+  canEnableMacGateway({ ...draft, gateway_url: example + "/" }, example, ""),
+  true,
+);
+assert.equal(
+  canEnableMacGateway({ ...draft, gateway_url: example + "/new" }, "", example),
+  false,
+);
+
 console.log(
-  "cloudGateway: URL validation, effective mode banners, and error mapping assertions passed",
+  "cloudGateway: URL validation, effective mode, Mac activation, and error mapping assertions passed",
 );

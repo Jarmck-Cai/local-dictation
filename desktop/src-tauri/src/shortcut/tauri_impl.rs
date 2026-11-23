@@ -19,10 +19,11 @@ static REGISTERED_SHORTCUTS: LazyLock<Mutex<RegisteredBindings<Shortcut>>> =
     LazyLock::new(|| Mutex::new(RegisteredBindings::default()));
 
 /// Initialize shortcuts using Tauri's global-shortcut plugin
-pub fn init_shortcuts(app: &AppHandle) {
+pub fn init_shortcuts(app: &AppHandle) -> Result<(), String> {
     let default_bindings = settings::get_default_settings().bindings;
     let user_settings = settings::load_or_create_app_settings(app);
 
+    let mut result = Ok(());
     // Register all default shortcuts, applying user customizations
     for (id, default_binding) in default_bindings {
         if id == "cancel" {
@@ -39,9 +40,13 @@ pub fn init_shortcuts(app: &AppHandle) {
             .unwrap_or(default_binding);
 
         if let Err(e) = register_shortcut(app, binding) {
+            if cfg!(target_os = "macos") && id == "transcribe" {
+                result = Err("dictation_shortcut_registration_failed".into());
+            }
             error!("Failed to register shortcut {} during init: {}", id, e);
         }
     }
+    result
 }
 
 /// Validate a shortcut string for the Tauri global-shortcut implementation.
@@ -108,6 +113,12 @@ pub fn register_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<()
     let mut registrations = REGISTERED_SHORTCUTS
         .lock()
         .map_err(|_| "Shortcut registration lock unavailable")?;
+    #[cfg(target_os = "macos")]
+    if registrations.identity(&binding.id) == Some(&shortcut)
+        && app.global_shortcut().is_registered(shortcut)
+    {
+        return Ok(());
+    }
     // Prevent duplicate registrations that would silently shadow one another
     if app.global_shortcut().is_registered(shortcut) {
         let error_msg = format!("Shortcut '{}' is already in use", binding.current_binding);

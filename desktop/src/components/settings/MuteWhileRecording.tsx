@@ -2,6 +2,7 @@ import React from "react";
 import { useTranslation } from "react-i18next";
 import { ToggleSwitch } from "../ui/ToggleSwitch";
 import { useSettings } from "../../hooks/useSettings";
+import { useOsType } from "../../hooks/useOsType";
 
 interface MuteWhileRecordingToggleProps {
   descriptionMode?: "inline" | "tooltip";
@@ -12,6 +13,8 @@ export const MuteWhileRecording: React.FC<MuteWhileRecordingToggleProps> =
   React.memo(({ descriptionMode = "tooltip", grouped = false }) => {
     const { t } = useTranslation();
     const { getSetting, updateSetting, isUpdating } = useSettings();
+
+    if (useOsType() === "macos") return null;
 
     const muteEnabled = getSetting("mute_while_recording") ?? false;
 

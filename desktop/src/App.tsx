@@ -22,9 +22,13 @@ import { getLanguageDirection, initializeRTL } from "@/lib/utils/rtl";
 import { DictationDataProvider } from "./hooks/DictationData";
 import { DictationStatus } from "./components/settings/DictationStatus";
 import { pasteErrorCode } from "./lib/dictationState";
+import { useOsType } from "./hooks/useOsType";
+import AccessibilityPermissions from "./components/AccessibilityPermissions";
+import { MacGatewaySetup } from "./components/onboarding/MacGatewaySetup";
 
 function App() {
   const { t, i18n } = useTranslation();
+  const isMac = useOsType() === "macos";
   const [currentSection, setCurrentSection] =
     useState<SidebarSection>("history");
   const [microphoneDenied, setMicrophoneDenied] = useState(false);
@@ -59,6 +63,11 @@ function App() {
   useEffect(() => {
     if (!settings || initialized.current) return;
     initialized.current = true;
+    if (isMac) {
+      // The permission panel initializes Mac input after authorization.
+      void refreshOutputDevices();
+      return;
+    }
     void Promise.all([
       commands.initializeEnigo(),
       commands.initializeShortcuts(),
@@ -71,7 +80,14 @@ function App() {
     void refreshAudioDevices();
     void refreshOutputDevices();
     void checkMicrophone();
-  }, [settings, refreshAudioDevices, refreshOutputDevices, checkMicrophone, t]);
+  }, [
+    settings,
+    isMac,
+    refreshAudioDevices,
+    refreshOutputDevices,
+    checkMicrophone,
+    t,
+  ]);
 
   useEffect(() => {
     let disposed = false;
@@ -88,7 +104,11 @@ function App() {
       if (event.error_type === "microphone_permission_denied") {
         setMicrophoneDenied(true);
         toast.error(t("errors.micPermissionDeniedTitle"), {
-          description: t("errors.micPermissionDenied.windows"),
+          description: t(
+            isMac
+              ? "errors.micPermissionDenied.macos"
+              : "errors.micPermissionDenied.windows",
+          ),
         });
       } else if (event.error_type === "no_input_device") {
         toast.error(t("errors.noInputDeviceTitle"), {
@@ -171,7 +191,7 @@ function App() {
       disposed = true;
       unlisteners.forEach((stop) => stop());
     };
-  }, [t]);
+  }, [isMac, t]);
 
   // Mount settings controls only after the shared store finishes its first read.
   // Each control uses the same hook; mounting them sooner would repeat startup I/O.
@@ -211,7 +231,13 @@ function App() {
             ref={scrollRef}
             className={`qs-content flex-1 overflow-y-auto${currentSection === "meetings" ? " qs-meeting-container" : ""}`}
           >
-            {microphoneDenied && (
+            {isMac && <AccessibilityPermissions />}
+            {isMac && (
+              <MacGatewaySetup
+                onConfigure={() => setCurrentSection("general")}
+              />
+            )}
+            {!isMac && microphoneDenied && (
               <div className="max-w-3xl mx-auto mb-5 rounded-lg border border-warning/25 bg-warning/10 p-4 space-y-3">
                 <p className="text-sm">
                   {t("errors.micPermissionDenied.windows")}

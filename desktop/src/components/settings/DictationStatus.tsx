@@ -142,16 +142,18 @@ export const DictationStatus = () => {
       cloud.consecutive_failures >= 3);
   const modeLabel = cloudGatewayActive
     ? t("dictation.footer.cloudGatewayMode")
-    : !config
-      ? t("dictation.footer.modeUnavailable")
-      : config.mode === "claude" && paused
-        ? t("dictation.footer.cloudPaused")
-        : config.mode === "off"
-          ? t("dictation.cleanup.hints.off")
-          : t("dictation.footer.mode", {
-              mode: t(`dictation.cleanup.modes.${config.mode}`),
-              strength: t(`dictation.cleanup.strengths.${config.strength}`),
-            });
+    : osType === "macos" && gateway?.effective_mode === "local_only"
+      ? t("dictation.cloudGateway.modes.local_only")
+      : !config
+        ? t("dictation.footer.modeUnavailable")
+        : config.mode === "claude" && paused
+          ? t("dictation.footer.cloudPaused")
+          : config.mode === "off"
+            ? t("dictation.cleanup.hints.off")
+            : t("dictation.footer.mode", {
+                mode: t(`dictation.cleanup.modes.${config.mode}`),
+                strength: t(`dictation.cleanup.strengths.${config.strength}`),
+              });
 
   return (
     <footer className="qs-status-footer">

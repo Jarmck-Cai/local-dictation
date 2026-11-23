@@ -546,8 +546,8 @@ pub struct AppSettings {
     /// automatic on-demand local SenseVoice fallback; unconfigured gateway stays local).
     #[serde(default)]
     pub recognition_mode: RecognitionMode,
-    /// Self-hosted dictation gateway base URL (e.g. `https://dictation.astrmind.com`).
-    /// Device Bearer token is stored separately in Windows DPAPI (`gateway-token.dpapi`).
+    /// Self-hosted dictation gateway base URL (e.g. `https://gateway.example.com`).
+    /// Device Bearer token is stored separately using DPAPI or macOS Keychain.
     #[serde(default)]
     pub gateway_url: String,
     /// Automatically sync confirmed and frequent technical vocabulary with the gateway.
@@ -1030,7 +1030,7 @@ pub fn get_default_settings() -> AppSettings {
         post_process_models: default_post_process_models(),
         post_process_prompts: default_post_process_prompts(),
         post_process_selected_prompt_id: None,
-        mute_while_recording: true,
+        mute_while_recording: !cfg!(target_os = "macos"),
         append_trailing_space: false,
         app_language: default_app_language(),
         theme: default_theme(),
@@ -1053,7 +1053,11 @@ pub fn get_default_settings() -> AppSettings {
         vad_enabled: default_vad_enabled(),
         vad_backend: VadBackend::default(),
         overlay_style: OverlayStyle::Minimal,
-        recognition_mode: RecognitionMode::CloudFirst,
+        recognition_mode: if cfg!(target_os = "macos") {
+            RecognitionMode::LocalOnly
+        } else {
+            RecognitionMode::CloudFirst
+        },
         gateway_url: String::new(),
         gateway_auto_sync_vocabulary: default_gateway_auto_sync_vocabulary(),
     }

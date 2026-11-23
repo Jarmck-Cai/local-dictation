@@ -90,11 +90,23 @@ impl HandyKeysState {
     pub fn new(app: AppHandle) -> Result<Self, String> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ManagerCommand>();
 
+        #[cfg(target_os = "macos")]
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+
         // Start the manager thread
         let app_clone = app.clone();
         let thread_handle = thread::spawn(move || {
-            Self::manager_thread(cmd_rx, app_clone);
+            Self::manager_thread(
+                cmd_rx,
+                app_clone,
+                #[cfg(target_os = "macos")]
+                started_tx,
+            );
         });
+        #[cfg(target_os = "macos")]
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .map_err(|_| "shortcut_backend_unavailable")?;
 
         Ok(Self {
             command_sender: Mutex::new(cmd_tx),
@@ -107,7 +119,11 @@ impl HandyKeysState {
     }
 
     /// The main manager thread - owns the HotkeyManager and processes commands
-    fn manager_thread(cmd_rx: Receiver<ManagerCommand>, app: AppHandle) {
+    fn manager_thread(
+        cmd_rx: Receiver<ManagerCommand>,
+        app: AppHandle,
+        #[cfg(target_os = "macos")] started: mpsc::SyncSender<()>,
+    ) {
         info!("handy-keys manager thread started");
 
         // Create the HotkeyManager in this thread
@@ -118,6 +134,11 @@ impl HandyKeysState {
                 return;
             }
         };
+
+        #[cfg(target_os = "macos")]
+        if started.send(()).is_err() {
+            return;
+        }
 
         // Maps binding IDs to HotkeyIds and hotkey strings
         let mut binding_to_hotkey: HashMap<String, HotkeyId> = HashMap::new();
@@ -191,6 +212,18 @@ impl HandyKeysState {
         binding_id: &str,
         hotkey_string: &str,
     ) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        if let Some((_, current)) = binding_to_hotkey
+            .get(binding_id)
+            .and_then(|id| hotkey_to_binding.get(id))
+        {
+            return if current == hotkey_string {
+                Ok(())
+            } else {
+                Err("Shortcut binding already registered".into())
+            };
+        }
+
         let hotkey: Hotkey = hotkey_string
             .parse()
             .map_err(|e| format!("Failed to parse hotkey '{}': {}", hotkey_string, e))?;
@@ -424,8 +457,16 @@ pub fn validate_shortcut(raw: &str) -> Result<(), String> {
 
 /// Initialize handy-keys shortcuts
 pub fn init_shortcuts(app: &AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if app.try_state::<HandyKeysState>().is_none() {
+        app.manage(HandyKeysState::new(app.clone())?);
+    }
+    #[cfg(target_os = "macos")]
+    let state = app.state::<HandyKeysState>();
+    #[cfg(not(target_os = "macos"))]
     let state = HandyKeysState::new(app.clone())?;
 
+    let mut result = Ok(());
     let default_bindings = settings::get_default_settings().bindings;
     let user_settings = settings::load_or_create_app_settings(app);
 
@@ -448,6 +489,9 @@ pub fn init_shortcuts(app: &AppHandle) -> Result<(), String> {
         if let Err(e) = crate::manual_paste::ensure_binding_available(app, &binding)
             .and_then(|_| state.register(&binding))
         {
+            if cfg!(target_os = "macos") && id == "transcribe" {
+                result = Err("dictation_shortcut_registration_failed".into());
+            }
             error!(
                 "Failed to register handy-keys shortcut {} during init: {}",
                 id, e
@@ -455,9 +499,9 @@ pub fn init_shortcuts(app: &AppHandle) -> Result<(), String> {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     app.manage(state);
-    info!("handy-keys shortcuts initialized");
-    Ok(())
+    result
 }
 
 /// Register a shortcut

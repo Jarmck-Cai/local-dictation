@@ -25,6 +25,10 @@ MACOSX_DEPLOYMENT_TARGET=14.0 CMAKE_POLICY_VERSION_MINIMUM=3.5 \
 
 [macOS GitHub Actions](https://github.com/Jarmck-Cai/local-dictation/actions/workflows/macos.yml) 构建并校验 Apple Silicon DMG。产物使用 ad-hoc 签名，面向预览验证。Intel 使用同一份适配源码，ONNX Runtime 1.24.2 的动态库需要单独配置，构建路径可参考 [Handy 的 Intel ONNX 准备步骤](../desktop/.github/workflows/build.yml)。Intel 安装包尚待构建和验收。
 
+## Beta 5 的 Mac 首启更新
+
+`0.1.12-beta.5.macos.1` 在权限缺失时引导授权麦克风及辅助功能，返回应用可重新检测并初始化快捷键。未配置网关时默认用本地 SenseVoice，可稍后在设置中用连接测试启用云端优先。Mac 听写忽略旧配置的播放静音选项。授权、覆盖升级、旧静音配置及云端切换需在真机验证。
+
 ## 原生验收
 
 依次检查安装与升级后历史读取、Option+Space 本地听写、云端实时与断网回退、普通应用和浏览器的落字、复制新内容优先、Ctrl+Shift+F9 补贴，以及保存与清除钥匙串中的设备令牌。首次运行授予麦克风和辅助功能权限。macOS 15+ 会议选定麦克风并显式开始后，系统可能要求屏幕与系统音频录制权限。用耳机和外放分别验证双路录音、停止、设备断开、中断恢复、导出和回声消除效果。会议源标签表示录音来源。CI 构建、文件校验和合成回归与这些交互式验收分别记录。

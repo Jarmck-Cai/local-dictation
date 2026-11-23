@@ -499,6 +499,11 @@ impl AudioRecordingManager {
     /// Snapshots the system's prior mute state first so `remove_mute` can
     /// restore it instead of unconditionally unmuting.
     pub fn apply_mute(&self) {
+        // macOS has no playback mute backend. Ignore the preference even
+        // when a previous version saved it as enabled.
+        if cfg!(target_os = "macos") {
+            return;
+        }
         let settings = get_settings(&self.app_handle);
         if !settings.mute_while_recording {
             return;
