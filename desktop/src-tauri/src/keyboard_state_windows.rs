@@ -66,13 +66,10 @@ impl Context {
         self.changed();
         self.state.borrow_mut().fail();
     }
-    fn revoke(&self) {
-        self.changed();
-        self.state.borrow_mut().revoke();
-    }
     fn reset(&self) {
+        // A desktop or session change invalidates prepared snapshots. A hold
+        // already observed still needs a release or removal of its device.
         self.changed();
-        self.state.borrow_mut().reset();
     }
 }
 
@@ -145,8 +142,6 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
                 context.changed();
                 if w.0 == 2 {
                     context.state.borrow_mut().remove_device(l.0 as usize);
-                } else {
-                    context.state.borrow_mut().device_changed();
                 }
             }
             WM_WTSSESSION_CHANGE => context.reset(),
@@ -356,7 +351,6 @@ fn run(
     if resources.desktop_hook.is_invalid() {
         return Err(UNAVAILABLE);
     }
-    let began = Instant::now();
     alive.store(true, Ordering::Release);
     ready.send(Ok(hwnd.0 as usize)).map_err(|_| UNAVAILABLE)?;
     loop {
@@ -380,19 +374,12 @@ fn run(
         if DESKTOP_RESET.with(|flag| flag.replace(false)) {
             context.reset();
         }
-        if drain_raw(hwnd, &context) && !unsafe { GetForegroundWindow() }.is_invalid() {
-            let generation = context.generation.load(Ordering::Acquire);
-            let high = async_high();
-            if context.generation.load(Ordering::Acquire) == generation {
-                context.state.borrow_mut().baseline(high);
-            }
-        }
         for _ in 0..16 {
             let Ok(request) = requests.try_recv() else {
                 break;
             };
             let result = if Instant::now() >= request.deadline {
-                context.revoke();
+                context.changed();
                 Err(UNAVAILABLE)
             } else if !ours(hwnd) || !drain_raw(hwnd, &context) {
                 context.fail();
@@ -401,20 +388,14 @@ fn run(
                 let generation = context.generation.load(Ordering::Acquire);
                 let high = async_high();
                 let ordinary = ordinary_down();
-                let available = context.state.borrow().available();
-                let result = context.state.borrow_mut().query(
-                    ordinary,
-                    high,
-                    request.bound,
-                    began.elapsed().as_millis() as u64,
-                );
-                if !available {
+                let result = context.state.borrow().query(ordinary, high, request.bound);
+                if result == Decision::Unknown {
                     Err(UNAVAILABLE)
                 } else if Instant::now() >= request.deadline
                     || unsafe { GetQueueStatus(QS_RAWINPUT) } >> 16 != 0
                     || context.generation.load(Ordering::Acquire) != generation
                 {
-                    context.revoke();
+                    context.changed();
                     Err(UNAVAILABLE)
                 } else if result == Decision::Ready {
                     Ok(Prepared {
