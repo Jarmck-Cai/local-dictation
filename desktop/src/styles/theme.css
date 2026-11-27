@@ -4,13 +4,17 @@
   /* Palette source of truth. Each themed color is defined once as a
      light/dark pair; the active tokens below and the `data-theme` overrides
      in App.css reference these, so a hex value lives in exactly one place. */
-  --light-color-text: #1c3025;
-  --light-color-background: #f8faf8;
+  --light-color-text: #202b24;
+  --light-color-background: #f8f9f7;
+  --light-color-surface: #fff;
+  --light-color-muted: #54635b;
   --light-color-logo-primary: #96cbaa;
   --light-color-logo-stroke: #254c37;
 
-  --dark-color-text: #edf6ef;
-  --dark-color-background: #202a24;
+  --dark-color-text: #edf3ef;
+  --dark-color-background: #1d241f;
+  --dark-color-surface: #252e28;
+  --dark-color-muted: #a9b6ad;
   --dark-color-logo-primary: #9bd1ae;
   --dark-color-logo-stroke: #cce7d5;
 
@@ -31,6 +35,8 @@
      below, or is forced by `data-theme` (see the overrides below). */
   --color-text: var(--light-color-text);
   --color-background: var(--light-color-background);
+  --color-surface: var(--light-color-surface);
+  --color-muted: var(--light-color-muted);
   --color-logo-primary: var(--light-color-logo-primary);
   --color-logo-stroke: var(--light-color-logo-stroke);
   --color-warning: var(--light-color-warning);
@@ -41,6 +47,8 @@
   :root {
     --color-text: var(--dark-color-text);
     --color-background: var(--dark-color-background);
+    --color-surface: var(--dark-color-surface);
+    --color-muted: var(--dark-color-muted);
     --color-logo-primary: var(--dark-color-logo-primary);
     --color-logo-stroke: var(--dark-color-logo-stroke);
     --color-warning: var(--dark-color-warning);
@@ -61,6 +69,8 @@
 :root[data-theme="light"] {
   --color-text: var(--light-color-text);
   --color-background: var(--light-color-background);
+  --color-surface: var(--light-color-surface);
+  --color-muted: var(--light-color-muted);
   --color-logo-primary: var(--light-color-logo-primary);
   --color-logo-stroke: var(--light-color-logo-stroke);
   --color-warning: var(--light-color-warning);
@@ -70,6 +80,8 @@
 :root[data-theme="dark"] {
   --color-text: var(--dark-color-text);
   --color-background: var(--dark-color-background);
+  --color-surface: var(--dark-color-surface);
+  --color-muted: var(--dark-color-muted);
   --color-logo-primary: var(--dark-color-logo-primary);
   --color-logo-stroke: var(--dark-color-logo-stroke);
   --color-warning: var(--dark-color-warning);

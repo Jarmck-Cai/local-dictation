@@ -240,48 +240,61 @@ const RecordingOverlay: React.FC = () => {
   if (failures !== 0) {
     return (
       <div dir={direction} className={`ov-stage ${position} ov-fade show`}>
-        <div className="scard error" role="alert">
-          {(failures & 1) !== 0 && (
-            <div>
-              <strong>
-                {t(
-                  pasteFailureCode === "failed"
-                    ? "errors.pasteFailedTitle"
-                    : `dictation.autoPaste.${pasteFailureCode}.title`,
-                )}
-              </strong>
-              <p>
-                {t(
-                  pasteFailureCode === "failed"
-                    ? "errors.pasteFailed"
-                    : `dictation.autoPaste.${pasteFailureCode}.description`,
-                )}
-              </p>
-            </div>
-          )}
-          {(failures & 2) !== 0 && <p>{t("dictation.muteFailed")}</p>}
-          {(failures & 4) !== 0 && <p>{t("dictation.meetingCaptureBusy")}</p>}
-          <div className="error-actions">
-            {(failures & 3) !== 0 && (
-              <button
-                disabled={copyState === "copying"}
-                aria-busy={copyState === "copying"}
-                onClick={() => void copyController.copy()}
-              >
-                {t(
-                  copyState === "copied"
-                    ? "dictation.history.copied"
-                    : "dictation.history.copyFinal",
-                )}
-              </button>
+        <div className="scard error">
+          <div className="error-message" role="alert">
+            {(failures & 1) !== 0 && (
+              <div>
+                <strong>
+                  {t(
+                    pasteFailureCode === "failed"
+                      ? "errors.pasteFailedTitle"
+                      : `dictation.autoPaste.${pasteFailureCode}.title`,
+                  )}
+                </strong>
+                <p>
+                  {t(
+                    pasteFailureCode === "failed"
+                      ? "errors.pasteFailed"
+                      : `dictation.autoPaste.${pasteFailureCode}.description`,
+                  )}
+                </p>
+              </div>
             )}
-            <button onClick={() => void copyController.dismiss()}>
-              {t("common.close")}
-            </button>
+            {(failures & 2) !== 0 && <p>{t("dictation.muteFailed")}</p>}
+            {(failures & 4) !== 0 && <p>{t("dictation.meetingCaptureBusy")}</p>}
           </div>
-          {copyState === "failed" && (
-            <p>{t("dictation.history.copyLatestFailed")}</p>
-          )}
+          <div>
+            <div className="error-actions">
+              {(failures & 3) !== 0 && (
+                <button
+                  type="button"
+                  className="error-copy"
+                  disabled={copyState === "copying"}
+                  aria-busy={copyState === "copying"}
+                  onClick={() => void copyController.copy()}
+                >
+                  {t(
+                    copyState === "copied"
+                      ? "dictation.history.copied"
+                      : "dictation.history.copyFinal",
+                  )}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => void copyController.dismiss()}
+              >
+                {t("common.close")}
+              </button>
+            </div>
+            <div role="status">
+              {copyState === "failed" && (
+                <p className="error-copy-failure">
+                  {t("dictation.history.copyLatestFailed")}
+                </p>
+              )}
+            </div>
+          </div>
         </div>
       </div>
     );

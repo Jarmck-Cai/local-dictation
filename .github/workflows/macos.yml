@@ -2,7 +2,7 @@ name: macOS preview
 
 on:
   push:
-    branches: [codex/macos-beta5]
+    branches: [codex/macos-0.1.12]
   workflow_dispatch:
 
 concurrency:

@@ -110,7 +110,7 @@ export default function AccessibilityPermissions() {
   return (
     <section
       aria-labelledby="mac-permission-title"
-      className="max-w-3xl mx-auto mb-5 rounded-lg border border-warning/25 bg-warning/10 p-4 space-y-3"
+      className="qs-page mb-5 rounded-lg border border-warning/25 bg-warning/10 p-4 space-y-3"
     >
       <h2 id="mac-permission-title" className="text-sm font-semibold">
         {t("onboarding.permissions.title")}

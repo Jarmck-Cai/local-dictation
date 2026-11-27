@@ -68,10 +68,10 @@ export const Meetings = () => {
     <div className="qs-page qs-meetings qs-meeting-workspace">
       <header className="qs-meeting-heading">
         <div className="qs-meeting-toolbar">
-          <h1>
-            {t("meetings.title")}
+          <div className="qs-meeting-page-title">
+            <h1>{t("meetings.nav")}</h1>
             <span className="qs-meeting-beta">{t("meetings.beta")}</span>
-          </h1>
+          </div>
           <div className="qs-meeting-heading-actions">
             <Button
               type="button"
@@ -85,7 +85,7 @@ export const Meetings = () => {
             </Button>
             <Button
               type="button"
-              variant="primary-soft"
+              variant="primary"
               size="sm"
               disabled={recordingBlocked}
               onClick={() => setNewRecordingOpen(true)}

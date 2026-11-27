@@ -6,7 +6,7 @@ import { summarizeUsage } from "@/lib/usageSummary";
 import { Button } from "../ui/Button";
 import { LatestDictationTiming } from "./DictationTiming";
 
-export const UsageOverview = () => {
+export const UsageOverview = ({ compact = false }: { compact?: boolean }) => {
   const { t, i18n } = useTranslation();
   const { history, timing } = useDictationData();
   const [, setClock] = useState(0);
@@ -24,72 +24,77 @@ export const UsageOverview = () => {
   const number = (value: number) => value.toLocaleString(i18n.language);
   const unavailable = t("dictation.usage.unavailable");
   return (
-    <section className="qs-usage" aria-label={t("dictation.usage.title")}>
-      <div className="qs-period">
-        <span>{t("dictation.usage.period")}</span>
-        <span>{t("dictation.usage.scope")}</span>
+    <section
+      className={`qs-usage${compact ? " qs-usage-compact" : ""}`}
+      aria-label={t("dictation.usage.title")}
+    >
+      <div className="qs-usage-values">
+        <div className="qs-period">
+          <span>{t("dictation.usage.period")}</span>
+          {!compact && <span>{t("dictation.usage.scope")}</span>}
+        </div>
+        <dl className="qs-stats" aria-busy={loading}>
+          <div className="qs-stat">
+            <dt>{t("dictation.usage.transcriptions")}</dt>
+            <dd>
+              <strong>
+                {historyFailed || loading
+                  ? unavailable
+                  : number(summary.transcriptions)}
+              </strong>
+              <span>{t("dictation.usage.times")}</span>
+            </dd>
+          </div>
+          <div className="qs-stat">
+            <dt>{t("dictation.usage.generated")}</dt>
+            <dd>
+              <strong>
+                {historyFailed || loading
+                  ? unavailable
+                  : number(summary.characters)}
+              </strong>
+              <span>{t("dictation.usage.characters")}</span>
+            </dd>
+          </div>
+          <div className="qs-stat qs-stat-saved">
+            <dt>
+              {t("dictation.usage.savedTime")}
+              <button
+                type="button"
+                className="qs-info"
+                aria-label={t("dictation.usage.explain")}
+                aria-expanded={explaining}
+                aria-controls={explanationId}
+                onClick={() => setExplaining((value) => !value)}
+              >
+                <Info size={14} aria-hidden="true" />
+              </button>
+            </dt>
+            <dd>
+              <strong>
+                {loading ||
+                historyFailed ||
+                timing.failed ||
+                !summary.estimatedSamples
+                  ? unavailable
+                  : (summary.savedMs / 60_000).toLocaleString(i18n.language, {
+                      maximumFractionDigits: 1,
+                    })}
+              </strong>
+              <span>{t("dictation.usage.minutes")}</span>
+            </dd>
+            {usageReady && !compact && (
+              <p className="text-[10px] leading-snug text-text/50">
+                {summary.estimatedSamples
+                  ? t("dictation.usage.estimateSamples", {
+                      count: summary.estimatedSamples,
+                    })
+                  : t("dictation.usage.noEstimate")}
+              </p>
+            )}
+          </div>
+        </dl>
       </div>
-      <dl className="qs-stats" aria-busy={loading}>
-        <div className="qs-stat">
-          <dt>{t("dictation.usage.transcriptions")}</dt>
-          <dd>
-            <strong>
-              {historyFailed || loading
-                ? unavailable
-                : number(summary.transcriptions)}
-            </strong>
-            <span>{t("dictation.usage.times")}</span>
-          </dd>
-        </div>
-        <div className="qs-stat">
-          <dt>{t("dictation.usage.generated")}</dt>
-          <dd>
-            <strong>
-              {historyFailed || loading
-                ? unavailable
-                : number(summary.characters)}
-            </strong>
-            <span>{t("dictation.usage.characters")}</span>
-          </dd>
-        </div>
-        <div className="qs-stat qs-stat-saved">
-          <dt>
-            {t("dictation.usage.savedTime")}
-            <button
-              type="button"
-              className="qs-info"
-              aria-label={t("dictation.usage.explain")}
-              aria-expanded={explaining}
-              aria-controls={explanationId}
-              onClick={() => setExplaining((value) => !value)}
-            >
-              <Info size={14} aria-hidden="true" />
-            </button>
-          </dt>
-          <dd>
-            <strong>
-              {loading ||
-              historyFailed ||
-              timing.failed ||
-              !summary.estimatedSamples
-                ? unavailable
-                : (summary.savedMs / 60_000).toLocaleString(i18n.language, {
-                    maximumFractionDigits: 1,
-                  })}
-            </strong>
-            <span>{t("dictation.usage.minutes")}</span>
-          </dd>
-          {usageReady && (
-            <p className="text-[10px] leading-snug text-text/50">
-              {summary.estimatedSamples
-                ? t("dictation.usage.estimateSamples", {
-                    count: summary.estimatedSamples,
-                  })
-                : t("dictation.usage.noEstimate")}
-            </p>
-          )}
-        </div>
-      </dl>
       <div
         id={explanationId}
         hidden={!explaining}

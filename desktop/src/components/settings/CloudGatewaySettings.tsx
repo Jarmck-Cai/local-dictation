@@ -1,16 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useOsType } from "@/hooks/useOsType";
 import { useTranslation } from "react-i18next";
-import { Cloud, RefreshCw, ShieldCheck } from "lucide-react";
+import { ChevronDown, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import {
-  cloudGatewayCommands,
   canEnableMacGateway,
+  cloudGatewayCommands,
   classifyGatewayErrorCode,
   gatewayEffectiveBannerKey,
   isValidGatewayUrlInput,
   normalizeGatewayUrlInput,
+  type CloudGatewayConfig,
   type CloudGatewayView,
   type GatewayConnectionTestResult,
   type RecognitionMode,
@@ -19,7 +20,11 @@ import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { SettingsGroup } from "../ui/SettingsGroup";
 
-export const CloudGatewaySettings = () => {
+type ConnectionDraft = Partial<
+  Pick<CloudGatewayConfig, "gateway_url" | "auto_sync_vocabulary">
+>;
+
+export const useCloudGatewaySettings = () => {
   const { t } = useTranslation();
   const isMac = useOsType() === "macos";
   const [view, setView] = useState<CloudGatewayView | null>(null);
@@ -28,92 +33,101 @@ export const CloudGatewaySettings = () => {
   const [syncing, setSyncing] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [tokenInput, setTokenInput] = useState("");
-  const [dirty, setDirty] = useState(false);
-  const [savedCloudUrl, setSavedCloudUrl] = useState("");
   const [verifiedUrl, setVerifiedUrl] = useState("");
-
-  const rememberSavedRoute = useCallback((config: CloudGatewayView) => {
-    setSavedCloudUrl(
-      config.effective_mode === "cloud_first"
-        ? normalizeGatewayUrlInput(config.gateway_url)
-        : "",
-    );
-  }, []);
+  const [modeDraft, setModeDraft] = useState<RecognitionMode | null>(null);
+  const [connectionDraft, setConnectionDraft] = useState<ConnectionDraft>({});
   const [testResult, setTestResult] =
     useState<GatewayConnectionTestResult | null>(null);
+
+  const savedCloudUrl =
+    view?.effective_mode === "cloud_first"
+      ? normalizeGatewayUrlInput(view.gateway_url)
+      : "";
+  const canUseCloudAt = (gatewayUrl: string) =>
+    !isMac ||
+    canEnableMacGateway(
+      {
+        gateway_url: gatewayUrl,
+        token_configured: view?.token_configured ?? false,
+      },
+      savedCloudUrl,
+      verifiedUrl,
+    );
+  const canEnableCloud = canUseCloudAt(view?.gateway_url ?? "");
+  const mode =
+    modeDraft === "cloud_first" && !canEnableCloud
+      ? view?.recognition_mode
+      : (modeDraft ?? view?.recognition_mode);
+  const url = connectionDraft.gateway_url ?? view?.gateway_url ?? "";
+  const autoSync =
+    connectionDraft.auto_sync_vocabulary ?? view?.auto_sync_vocabulary ?? false;
+  const modeDirty = mode !== view?.recognition_mode;
+  const connectionDirty =
+    view !== null &&
+    (url !== view.gateway_url || autoSync !== view.auto_sync_vocabulary);
+
+  const updateConnectionDraft = (change: ConnectionDraft) => {
+    setConnectionDraft((previous) => ({ ...previous, ...change }));
+    if (change.gateway_url !== undefined) {
+      setVerifiedUrl("");
+      setTestResult(null);
+    }
+  };
 
   const load = useCallback(async () => {
     setBusy(true);
     setLoadFailed(false);
     try {
-      const config = await cloudGatewayCommands.getConfig();
-      setView(config);
-      rememberSavedRoute(config);
-      setDirty(false);
+      setView(await cloudGatewayCommands.getConfig());
     } catch {
       setLoadFailed(true);
     } finally {
       setBusy(false);
     }
-  }, [rememberSavedRoute]);
+  }, []);
 
   useEffect(() => {
-    if (isMac) void load();
-  }, [isMac, load]);
-
-  useEffect(() => {
-    if (!isMac) void load();
+    void load();
     let active = true;
     let unlisten: (() => void) | undefined;
     void listen<CloudGatewayView>("cloud-gateway-updated", (event) => {
-      if (active) {
-        rememberSavedRoute(event.payload);
-        setView((prev) =>
-          dirty && prev
-            ? {
-                ...event.payload,
-                recognition_mode: prev.recognition_mode,
-                gateway_url: prev.gateway_url,
-                auto_sync_vocabulary: prev.auto_sync_vocabulary,
-              }
-            : event.payload,
-        );
-      }
-    }).then((fn) => {
-      if (!active) fn();
-      else unlisten = fn;
-    });
+      if (active) setView(event.payload);
+    })
+      .then((fn) => {
+        if (!active) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {
+        // Configuration can still be read and saved through commands.
+      });
     return () => {
       active = false;
       unlisten?.();
     };
-  }, [dirty, isMac, load, rememberSavedRoute]);
+  }, [load]);
 
-  const editedUrl = normalizeGatewayUrlInput(view?.gateway_url ?? "");
-  const canEnableCloud =
-    !isMac ||
-    Boolean(
-      view?.token_configured &&
-        editedUrl &&
-        (editedUrl === savedCloudUrl || editedUrl === verifiedUrl),
-    );
+  const persistConfig = (config: CloudGatewayConfig) =>
+    cloudGatewayCommands.saveConfig({
+      ...config,
+      gateway_url: normalizeGatewayUrlInput(config.gateway_url),
+      recognition_mode: canUseCloudAt(config.gateway_url)
+        ? config.recognition_mode
+        : "local_only",
+    });
 
-  const saveConfig = async () => {
-    if (!view) return;
-    if (!isValidGatewayUrlInput(view.gateway_url)) {
+  const saveConfig = async (
+    config: CloudGatewayConfig,
+    clearDraft: () => void,
+  ) => {
+    if (!isValidGatewayUrlInput(config.gateway_url)) {
       toast.error(t("dictation.cloudGateway.errors.invalid_gateway_url"));
       return;
     }
     setBusy(true);
     try {
-      const updated = await cloudGatewayCommands.saveConfig({
-        recognition_mode: canEnableCloud ? view.recognition_mode : "local_only",
-        gateway_url: normalizeGatewayUrlInput(view.gateway_url),
-        auto_sync_vocabulary: view.auto_sync_vocabulary,
-      });
+      const updated = await persistConfig(config);
       setView(updated);
-      rememberSavedRoute(updated);
-      setDirty(false);
+      clearDraft();
       toast.success(t("dictation.cloudGateway.saved"));
     } catch (err) {
       const code = classifyGatewayErrorCode(err);
@@ -123,26 +137,39 @@ export const CloudGatewaySettings = () => {
     }
   };
 
+  const saveMode = () => {
+    if (!view || !mode) return;
+    void saveConfig(
+      {
+        recognition_mode: mode,
+        gateway_url: view.gateway_url,
+        auto_sync_vocabulary: view.auto_sync_vocabulary,
+      },
+      () => setModeDraft(null),
+    );
+  };
+
+  const saveConnection = () => {
+    if (!view) return;
+    void saveConfig(
+      {
+        recognition_mode: view.recognition_mode,
+        gateway_url: url,
+        auto_sync_vocabulary: autoSync,
+      },
+      () => setConnectionDraft({}),
+    );
+  };
+
   const updateToken = async (clear: boolean) => {
     setBusy(true);
     try {
       const updated = clear
         ? await cloudGatewayCommands.clearToken()
         : await cloudGatewayCommands.setToken(tokenInput.trim());
-      rememberSavedRoute(updated);
+      setView(updated);
+      setModeDraft(null);
       setVerifiedUrl("");
-      setView((prev) =>
-        prev
-          ? {
-              ...updated,
-              recognition_mode: isMac
-                ? updated.recognition_mode
-                : prev.recognition_mode,
-              gateway_url: prev.gateway_url,
-              auto_sync_vocabulary: prev.auto_sync_vocabulary,
-            }
-          : updated,
-      );
       setTestResult(null);
       toast.success(
         t(
@@ -161,22 +188,19 @@ export const CloudGatewaySettings = () => {
   };
 
   const runTest = async () => {
-    if (!view) return;
-    const cleanedUrl = normalizeGatewayUrlInput(view.gateway_url);
+    const cleanedUrl = normalizeGatewayUrlInput(url);
     if (!cleanedUrl || !isValidGatewayUrlInput(cleanedUrl)) {
       toast.error(t("dictation.cloudGateway.errors.invalid_gateway_url"));
       return;
     }
     setTesting(true);
-    setTestResult(null);
     setVerifiedUrl("");
+    setTestResult(null);
     try {
       const result = await cloudGatewayCommands.testConnection(cleanedUrl);
       setTestResult(result);
-      setVerifiedUrl(
-        result.authenticated && result.asr_ready ? cleanedUrl : "",
-      );
       if (result.authenticated && result.asr_ready) {
+        setVerifiedUrl(cleanedUrl);
         toast.success(
           t("dictation.cloudGateway.testSuccess", {
             ms: result.latency_ms,
@@ -196,16 +220,14 @@ export const CloudGatewaySettings = () => {
   const runSync = async (fullSync: boolean) => {
     setSyncing(true);
     try {
-      if (dirty && view) {
-        const saved = await cloudGatewayCommands.saveConfig({
-          recognition_mode: canEnableCloud
-            ? view.recognition_mode
-            : "local_only",
-          gateway_url: normalizeGatewayUrlInput(view.gateway_url),
-          auto_sync_vocabulary: view.auto_sync_vocabulary,
+      if (connectionDirty && view) {
+        const saved = await persistConfig({
+          recognition_mode: view.recognition_mode,
+          gateway_url: normalizeGatewayUrlInput(url),
+          auto_sync_vocabulary: autoSync,
         });
         setView(saved);
-        setDirty(false);
+        setConnectionDraft({});
       }
       const res = await cloudGatewayCommands.syncVocabulary(fullSync);
       const refreshed = await cloudGatewayCommands.getConfig();
@@ -224,31 +246,57 @@ export const CloudGatewaySettings = () => {
     }
   };
 
-  const selectedMode =
-    view?.recognition_mode === "cloud_first" && canEnableCloud
-      ? "cloud_first"
-      : "local_only";
-  const bannerKey = view
-    ? isMac
-      ? savedCloudUrl
-        ? "cloudActive"
-        : "localOnly"
-      : gatewayEffectiveBannerKey(view)
-    : null;
+  return {
+    view,
+    busy: busy || testing || syncing,
+    testing,
+    syncing,
+    loadFailed,
+    isMac,
+    canEnableCloud,
+    mode,
+    setModeDraft,
+    modeDirty,
+    url,
+    autoSync,
+    connectionDirty,
+    updateConnectionDraft,
+    tokenInput,
+    setTokenInput,
+    testResult,
+    load,
+    saveMode,
+    saveConnection,
+    updateToken,
+    runTest,
+    runSync,
+  };
+};
+
+interface GatewaySettingsProps {
+  settings: ReturnType<typeof useCloudGatewaySettings>;
+}
+
+export const RecognitionModeSettings = ({ settings }: GatewaySettingsProps) => {
+  const { t } = useTranslation();
+  const {
+    view,
+    busy,
+    loadFailed,
+    isMac,
+    canEnableCloud,
+    mode,
+    modeDirty,
+    setModeDraft,
+    load,
+    saveMode,
+  } = settings;
+
+  const bannerKey = view ? gatewayEffectiveBannerKey(view) : null;
 
   return (
-    <SettingsGroup title={t("dictation.cloudGateway.title")}>
-      <div className="p-4 space-y-4">
-        <div className="flex items-start gap-3">
-          <Cloud
-            size={20}
-            className="mt-0.5 shrink-0 text-logo-primary"
-            aria-hidden="true"
-          />
-          <p className="text-sm text-text/65">
-            {t("dictation.cloudGateway.description")}
-          </p>
-        </div>
+    <SettingsGroup title={t("dictation.cloudGateway.modeLabel")}>
+      <div className="space-y-2 px-4 py-3">
         {loadFailed ? (
           <div className="flex items-center justify-between gap-3">
             <p role="alert" className="text-sm text-error">
@@ -262,31 +310,33 @@ export const CloudGatewaySettings = () => {
           <p className="text-sm text-text/60">{t("common.loading")}</p>
         ) : (
           <>
-            <div
-              className="grid grid-cols-2 gap-2"
-              role="group"
-              aria-label={t("dictation.cloudGateway.modeLabel")}
-            >
-              {(["cloud_first", "local_only"] as const).map(
-                (mode: RecognitionMode) => (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div
+                className="flex flex-wrap gap-2"
+                role="group"
+                aria-label={t("dictation.cloudGateway.modeLabel")}
+              >
+                {(["cloud_first", "local_only"] as const).map((option) => (
                   <Button
-                    key={mode}
-                    variant={
-                      selectedMode === mode ? "primary-soft" : "secondary"
-                    }
-                    aria-pressed={selectedMode === mode}
+                    key={option}
+                    variant={mode === option ? "primary-soft" : "secondary"}
+                    aria-pressed={mode === option}
                     disabled={
-                      busy || (mode === "cloud_first" && !canEnableCloud)
+                      busy || (option === "cloud_first" && !canEnableCloud)
                     }
-                    onClick={() => {
-                      setView({ ...view, recognition_mode: mode });
-                      setDirty(true);
-                    }}
+                    onClick={() =>
+                      setModeDraft(
+                        option === view.recognition_mode ? null : option,
+                      )
+                    }
                   >
-                    {t(`dictation.cloudGateway.modes.${mode}`)}
+                    {t(`dictation.cloudGateway.modes.${option}`)}
                   </Button>
-                ),
-              )}
+                ))}
+              </div>
+              <Button disabled={busy || !modeDirty} onClick={saveMode}>
+                {t("dictation.cloudGateway.saveRecognitionMode")}
+              </Button>
             </div>
             {isMac && !canEnableCloud && (
               <p className="text-xs text-text/65">
@@ -294,32 +344,88 @@ export const CloudGatewaySettings = () => {
               </p>
             )}
             {bannerKey && (
-              <p className="text-xs text-text/65 flex items-center gap-1.5">
-                <ShieldCheck
-                  size={14}
-                  className="shrink-0 text-logo-primary"
-                  aria-hidden="true"
-                />
-                <span>{t(`dictation.cloudGateway.banners.${bannerKey}`)}</span>
+              <p className="text-xs text-text/65" role="status">
+                {t(`dictation.cloudGateway.banners.${bannerKey}`)}
               </p>
             )}
+          </>
+        )}
+      </div>
+    </SettingsGroup>
+  );
+};
 
+export const CloudGatewaySettings = ({
+  settings,
+  openOnSetup,
+  children,
+}: GatewaySettingsProps & { openOnSetup: boolean; children?: ReactNode }) => {
+  const { t } = useTranslation();
+  const {
+    view,
+    busy,
+    testing,
+    syncing,
+    loadFailed,
+    isMac,
+    url,
+    autoSync,
+    connectionDirty,
+    updateConnectionDraft,
+    tokenInput,
+    setTokenInput,
+    testResult,
+    saveConnection,
+    updateToken,
+    runTest,
+    runSync,
+  } = settings;
+
+  return (
+    <details
+      open={openOnSetup}
+      className="group rounded-lg border border-mid-gray/20 bg-background"
+    >
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-lg px-4 py-3 hover:bg-mid-gray/5 focus-visible:outline-2 focus-visible:outline-logo-primary [&::-webkit-details-marker]:hidden">
+        <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <span className="text-sm font-medium">
+            {t("dictation.cloudGateway.title")}
+          </span>
+          <span className="text-xs text-text/65">
+            {t(
+              loadFailed
+                ? "dictation.cloudGateway.loadFailed"
+                : !view
+                  ? "common.loading"
+                  : view.gateway_ready
+                    ? "dictation.cloudGateway.connectionConfigured"
+                    : "dictation.cloudGateway.connectionUnconfigured",
+            )}
+          </span>
+        </span>
+        <ChevronDown
+          size={16}
+          className="shrink-0 text-text/65 group-open:rotate-180"
+          aria-hidden="true"
+        />
+      </summary>
+      <div className="space-y-4 border-t border-mid-gray/15 p-4">
+        <p className="text-xs text-text/65">
+          {t("dictation.cloudGateway.description")}
+        </p>
+        {view && !loadFailed && (
+          <>
             <div className="grid gap-3 pt-1">
               <label className="grid gap-1.5 text-sm">
                 {t("dictation.cloudGateway.urlLabel")}
                 <Input
-                  value={view.gateway_url}
-                  disabled={busy || (isMac && testing)}
+                  value={url}
+                  disabled={busy}
                   spellCheck={false}
                   placeholder={t("dictation.cloudGateway.urlPlaceholder")}
-                  onChange={(event) => {
-                    setView({ ...view, gateway_url: event.target.value });
-                    if (isMac) {
-                      setVerifiedUrl("");
-                      setTestResult(null);
-                    }
-                    setDirty(true);
-                  }}
+                  onChange={(event) =>
+                    updateConnectionDraft({ gateway_url: event.target.value })
+                  }
                 />
               </label>
 
@@ -339,7 +445,7 @@ export const CloudGatewaySettings = () => {
                     autoComplete="new-password"
                     spellCheck={false}
                     value={tokenInput}
-                    disabled={busy || (isMac && testing)}
+                    disabled={busy}
                     aria-label={t("dictation.cloudGateway.tokenLabel")}
                     placeholder={t(
                       isMac
@@ -347,15 +453,11 @@ export const CloudGatewaySettings = () => {
                         : "dictation.cloudGateway.tokenPlaceholder",
                     )}
                     onChange={(event) => setTokenInput(event.target.value)}
-                    className="min-w-48 flex-1"
+                    className="min-w-0 basis-48 flex-1"
                   />
                   <Button
                     variant="secondary"
-                    disabled={
-                      busy ||
-                      (isMac && testing) ||
-                      tokenInput.trim().length < 12
-                    }
+                    disabled={busy || tokenInput.trim().length < 12}
                     onClick={() => void updateToken(false)}
                   >
                     {t("dictation.cloudGateway.saveToken")}
@@ -363,7 +465,7 @@ export const CloudGatewaySettings = () => {
                   {view.token_configured && (
                     <Button
                       variant="danger-ghost"
-                      disabled={busy || (isMac && testing)}
+                      disabled={busy}
                       onClick={() => void updateToken(true)}
                     >
                       {t("dictation.cloudGateway.removeToken")}
@@ -376,15 +478,13 @@ export const CloudGatewaySettings = () => {
                 <input
                   type="checkbox"
                   className="mt-1 accent-logo-primary"
-                  checked={view.auto_sync_vocabulary}
+                  checked={autoSync}
                   disabled={busy}
-                  onChange={(event) => {
-                    setView({
-                      ...view,
+                  onChange={(event) =>
+                    updateConnectionDraft({
                       auto_sync_vocabulary: event.target.checked,
-                    });
-                    setDirty(true);
-                  }}
+                    })
+                  }
                 />
                 <span>
                   {t("dictation.cloudGateway.autoSync")}
@@ -440,9 +540,8 @@ export const CloudGatewaySettings = () => {
                   size="sm"
                   disabled={
                     busy ||
-                    testing ||
                     !view.token_configured ||
-                    !normalizeGatewayUrlInput(view.gateway_url)
+                    !normalizeGatewayUrlInput(url)
                   }
                   onClick={() => void runTest()}
                 >
@@ -453,24 +552,24 @@ export const CloudGatewaySettings = () => {
                 <Button
                   variant="secondary"
                   size="sm"
+                  className="inline-flex items-center gap-1"
                   disabled={
                     busy ||
-                    syncing ||
                     !view.token_configured ||
-                    !normalizeGatewayUrlInput(view.gateway_url)
+                    !normalizeGatewayUrlInput(url)
                   }
                   onClick={() => void runSync(false)}
                 >
                   <RefreshCw
                     size={13}
-                    className={`mr-1 ${syncing ? "animate-spin" : ""}`}
+                    className={syncing ? "animate-spin" : undefined}
                     aria-hidden="true"
                   />
                   {t("dictation.cloudGateway.syncNow")}
                 </Button>
                 <Button
-                  disabled={busy || !dirty}
-                  onClick={() => void saveConfig()}
+                  disabled={busy || !connectionDirty}
+                  onClick={saveConnection}
                 >
                   {t("dictation.cloudGateway.save")}
                 </Button>
@@ -478,7 +577,8 @@ export const CloudGatewaySettings = () => {
             </div>
           </>
         )}
+        {children}
       </div>
-    </SettingsGroup>
+    </details>
   );
 };

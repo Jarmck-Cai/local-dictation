@@ -1,5 +1,4 @@
 {
-  "version": "0.1.12-beta.5.macos.1",
   "bundle": {
     "targets": ["app", "dmg"],
     "macOS": {

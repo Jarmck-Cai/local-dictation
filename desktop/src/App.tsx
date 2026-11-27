@@ -31,6 +31,7 @@ function App() {
   const isMac = useOsType() === "macos";
   const [currentSection, setCurrentSection] =
     useState<SidebarSection>("history");
+  const [openGateway, setOpenGateway] = useState(false);
   const [microphoneDenied, setMicrophoneDenied] = useState(false);
   const {
     settings,
@@ -210,6 +211,9 @@ function App() {
     );
   }
 
+  const statusAtTop = currentSection === "history";
+  const status = <DictationStatus key="status" atTop={statusAtTop} />;
+
   return (
     <DictationDataProvider>
       <div
@@ -222,19 +226,26 @@ function App() {
           onSectionChange={setCurrentSection}
         />
         <main className="flex-1 min-w-0 flex flex-col overflow-hidden">
-          <header className="qs-page-header shrink-0">
-            <h1 className="font-semibold text-2xl">
-              {t(SECTIONS_CONFIG[currentSection].labelKey)}
-            </h1>
-          </header>
+          {currentSection !== "meetings" && (
+            <header key="title" className="qs-page-header shrink-0">
+              <h1 className="qs-page font-semibold text-2xl">
+                {t(SECTIONS_CONFIG[currentSection].labelKey)}
+              </h1>
+            </header>
+          )}
+          {statusAtTop && status}
           <div
+            key="content"
             ref={scrollRef}
             className={`qs-content flex-1 overflow-y-auto${currentSection === "meetings" ? " qs-meeting-container" : ""}`}
           >
             {isMac && <AccessibilityPermissions />}
             {isMac && (
               <MacGatewaySetup
-                onConfigure={() => setCurrentSection("general")}
+                onConfigure={() => {
+                  setOpenGateway(true);
+                  setCurrentSection("general");
+                }}
               />
             )}
             {!isMac && microphoneDenied && (
@@ -271,12 +282,12 @@ function App() {
                     id === "meetings" ? "qs-meeting-section" : undefined
                   }
                 >
-                  <Section />
+                  <Section {...(id === "general" ? { openGateway } : {})} />
                 </div>
               );
             })}
           </div>
-          <DictationStatus />
+          {!statusAtTop && status}
         </main>
       </div>
     </DictationDataProvider>

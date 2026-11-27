@@ -1,10 +1,14 @@
-# 轻述 macOS Beta 5 预览
+# 轻述 macOS 0.1.12 预览
 
-## 同步基线
+## 0.1.12 更新
 
-Windows 最新已发布的桌面预览为 [0.1.12-beta.5](https://github.com/Jarmck-Cai/local-dictation/releases/tag/v0.1.12-beta.5)，桌面源码为 `b053568`，网关为 0.2.0。自 0.1.11 起加入本地双路会议录音、断点恢复、会议列表和详情、MSTSC 输入、网关词库同步，以及边录边识别。0.1.11 已有历史分页、全量搜索、纠正和自动词表。仓库历史最早导入的 0.1.2 源码已包含继承自 Handy 的 macOS 采音、辅助功能和粘贴适配器。同步前没有可核对的独立 macOS 分支或安装包，用户设备上的版本需要在该设备确认。
+从 [Windows 0.1.12](https://github.com/Jarmck-Cai/local-dictation/releases/tag/v0.1.12) 同步首页状态与历史搜索、七天用量摘要、设置分组、会议界面和浮窗复制补救。Mac 的权限、钥匙串和默认本地识别承接上一版。Windows 扩展键残留属于 Windows Raw Input 链路。
 
-| 模块 | macOS Beta 5 |
+## Mac 功能基线
+
+Mac 适配起点为 Windows [0.1.12-beta.5](https://github.com/Jarmck-Cai/local-dictation/releases/tag/v0.1.12-beta.5)，桌面源码为 `b053568`，网关为 0.2.0。自 0.1.11 起加入本地双路会议录音、断点恢复、会议列表和详情、MSTSC 输入、网关词库同步，以及边录边识别。0.1.11 已有历史分页、全量搜索、纠正和自动词表。仓库历史最早导入的 0.1.2 源码已包含继承自 Handy 的 macOS 采音、辅助功能和粘贴适配器。同步前没有可核对的独立 macOS 分支或安装包，用户设备上的版本需要在该设备确认。
+
+| 模块 | macOS 0.1.12 |
 | --- | --- |
 | 听写、历史和词库 | 共享 Beta 5 的实时云端、批量及本机回退路径，沿用历史与词库数据库 |
 | 凭据 | 在登录钥匙串单独保存 Claude 密钥与设备令牌。升级保留应用标识和数据目录 |
@@ -25,9 +29,9 @@ MACOSX_DEPLOYMENT_TARGET=14.0 CMAKE_POLICY_VERSION_MINIMUM=3.5 \
 
 [macOS GitHub Actions](https://github.com/Jarmck-Cai/local-dictation/actions/workflows/macos.yml) 构建并校验 Apple Silicon DMG。产物使用 ad-hoc 签名，面向预览验证。Intel 使用同一份适配源码，ONNX Runtime 1.24.2 的动态库需要单独配置，构建路径可参考 [Handy 的 Intel ONNX 准备步骤](../desktop/.github/workflows/build.yml)。Intel 安装包尚待构建和验收。
 
-## Beta 5 的 Mac 首启更新
+## 首次启动与权限
 
-`0.1.12-beta.5.macos.1` 在权限缺失时引导授权麦克风及辅助功能，返回应用可重新检测并初始化快捷键。未配置网关时默认用本地 SenseVoice，可稍后在设置中用连接测试启用云端优先。Mac 听写忽略旧配置的播放静音选项。授权、覆盖升级、旧静音配置及云端切换需在真机验证。
+应用在权限缺失时引导授权麦克风及辅助功能，返回应用可重新检测并初始化快捷键。未配置网关时默认用本地 SenseVoice，可稍后在设置中用连接测试启用云端优先。Mac 听写忽略旧配置的播放静音选项。授权、覆盖升级、旧静音配置及云端切换需在真机验证。
 
 ## 原生验收
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Heart } from "lucide-react";
+import { Heart, Trash2 } from "lucide-react";
 import { useCollectedTerms } from "@/hooks/useCollectedTerms";
 import type { CollectedTermsFilter } from "@/lib/collectedTermsApi";
 import { Button } from "../ui/Button";
@@ -147,8 +147,13 @@ export const CollectedTerms = () => {
                         </span>
                       </Button>
                       <Button
-                        variant={entry.deleted ? "secondary" : "danger-ghost"}
+                        variant={entry.deleted ? "secondary" : "ghost"}
                         size="sm"
+                        className={
+                          entry.deleted
+                            ? undefined
+                            : "inline-flex min-h-7 min-w-7 items-center justify-center"
+                        }
                         disabled={pending}
                         aria-label={t(
                           entry.deleted
@@ -156,12 +161,17 @@ export const CollectedTerms = () => {
                             : "dictation.collectedTerms.deleteTerm",
                           { term: entry.term },
                         )}
+                        title={
+                          entry.deleted
+                            ? undefined
+                            : t("dictation.collectedTerms.delete")
+                        }
                         onClick={() => terms.remove(entry.id, !entry.deleted)}
                       >
-                        {t(
-                          entry.deleted
-                            ? "dictation.collectedTerms.restore"
-                            : "dictation.collectedTerms.delete",
+                        {entry.deleted ? (
+                          t("dictation.collectedTerms.restore")
+                        ) : (
+                          <Trash2 size={14} aria-hidden="true" />
                         )}
                       </Button>
                     </div>
