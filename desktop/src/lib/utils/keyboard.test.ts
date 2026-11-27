@@ -20,6 +20,12 @@ for (const [code, stored, displayed] of compoundKeys) {
 
 assert.equal(getKeyName(keyboardEvent({ key: "CapsLock" })), "capslock");
 assert.equal(
+  formatKeyCombination("alt_left+super_left", "windows"),
+  "Left Alt + Left Win",
+);
+assert.equal(formatKeyCombination("super_right+v", "windows"), "Right Win + V");
+assert.equal(formatKeyCombination("super_left", "linux"), "Left Super");
+assert.equal(
   getKeyName(keyboardEvent({ code: "AudioVolumeUp" })),
   "audiovolumeup",
 );

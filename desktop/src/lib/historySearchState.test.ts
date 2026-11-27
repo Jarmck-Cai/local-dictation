@@ -48,6 +48,20 @@ const fetchPage = async (
 };
 const ids = (state: HistorySearchState) =>
   state.snapshot.entries.map((entry) => entry.id);
+const earlyRequests: HistorySearchRequest[] = [];
+const earlySearch = new HistorySearchState((request) => {
+  earlyRequests.push(request);
+  return fetchPage(request);
+});
+await earlySearch.setInput("终稿专词");
+assert.equal(
+  earlyRequests.length,
+  0,
+  "record the query before listeners are ready",
+);
+await earlySearch.setActive(true);
+assert.equal(earlyRequests.length, 1);
+assert.deepEqual(ids(earlySearch), [1]);
 const workspace = new HistorySearchState(fetchPage);
 await workspace.setActive(true);
 assert.equal(workspace.snapshot.entries.length, 30);

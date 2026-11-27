@@ -795,17 +795,18 @@
       "title": "Text cleanup",
       "description": "Conservatively tidy punctuation and clear errors, preserving language, numbers, negation, paths, and arguments.",
       "mode": "Text cleanup mode",
+      "options": "Cleanup options",
       "modes": {
         "claude": "Claude",
         "local": "Local model",
         "off": "Off"
       },
       "hints": {
-        "claude": "Uses Claude Haiku 5.5. Transcript text and relevant vocabulary hints are sent; audio is not uploaded.",
+        "claude": "Claude cleans up transcripts using relevant vocabulary hints.",
         "local": "Connects to a compatible service on this computer. Failures keep the original text and do not switch to the cloud.",
-        "off": "Uses the original local transcript directly."
+        "off": "Uses the speech recognition result directly."
       },
-      "fallback": "Slow or failed cleanup uses the complete local transcript with confirmed vocabulary.",
+      "fallback": "If cleanup is slow or fails, the transcript with confirmed vocabulary is used.",
       "saved": "Cleanup settings saved",
       "saveFailed": "Settings were not saved. Check the local address and model name, then retry.",
       "loadFailed": "Cleanup settings could not be read.",
@@ -1076,9 +1077,12 @@
       "separator": "·",
       "mode": "{{mode}} · {{strength}}",
       "cloudGatewayMode": "Cloud gateway · offline local fallback",
+      "cloudRecognition": "Cloud recognition",
+      "localRecognition": "Local recognition",
       "modeUnavailable": "Cleanup status unavailable",
       "cloudPaused": "Claude cleanup paused",
       "shortcut": "Hold {{shortcut}} to speak",
+      "shortcutWithKey": "Hold <keycap>{{shortcut}}</keycap> to speak",
       "dataHelp": "View data handling for the current mode",
       "dataTitle": "How this mode handles data",
       "audioLocal": "Audio is recognized locally and is not uploaded.",
@@ -1091,19 +1095,22 @@
       }
     },
     "cloudGateway": {
-      "title": "Cloud gateway and multi-device sync",
+      "title": "Cloud connection",
       "description": "Cloud dictation sends audio to your self-hosted gateway and transcription provider. A compatible gateway begins transcribing while you speak. If cloud recognition is unavailable, the app can use local SenseVoiceSmall.",
       "loadFailed": "Could not load cloud gateway settings.",
-      "modeLabel": "Recognition engine mode",
+      "modeLabel": "Recognition mode",
       "modes": {
-        "cloud_first": "Cloud gateway first (offline fallback)",
-        "local_only": "Local offline only"
+        "cloud_first": "Cloud first",
+        "local_only": "Local only"
       },
       "banners": {
-        "cloudActive": "Active daily mode: Cloud gateway first · Local SenseVoiceSmall stays at 0 MB RAM until needed for offline fallback (auto-unloads after 5 min idle).",
-        "cloudUnconfiguredLocal": "Gateway URL or device token not yet configured — smoothly operating in local offline recognition without errors.",
-        "localOnly": "Pure local offline mode: audio and vocabulary stay 100% on this computer."
+        "cloudActive": "Cloud recognition is active with local fallback.",
+        "cloudUnconfiguredLocal": "Set up the cloud connection to use cloud recognition. Currently using local recognition.",
+        "localOnly": "Local recognition is active."
       },
+      "connectionConfigured": "Gateway configured",
+      "connectionUnconfigured": "Gateway setup needed",
+      "saveRecognitionMode": "Save recognition mode",
       "urlLabel": "Gateway address",
       "urlPlaceholder": "https://dictation.astrmind.com",
       "tokenLabel": "Device access token",

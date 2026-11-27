@@ -1,6 +1,8 @@
 .qs-meetings h1 {
-  font-size: 17px;
+  font-size: 24px;
   font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.025em;
 }
 .qs-meetings h2 {
   font-size: 14px;
@@ -10,22 +12,19 @@
   display: grid;
   gap: 7px;
 }
+.qs-meeting-page-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .qs-meeting-beta {
-  display: inline-block;
-  margin-left: 10px;
   padding: 2px 7px;
   border: 1px solid var(--qs-border);
   border-radius: 5px;
   background: var(--qs-soft);
   font-size: 11px;
   font-weight: 500;
-  vertical-align: middle;
-}
-.qs-meeting-heading .qs-meeting-beta-hint {
-  padding: 8px 10px;
-  border-left: 2px solid var(--qs-border);
-  background: var(--qs-soft);
-  color: var(--color-text);
 }
 .qs-meeting-heading p,
 .qs-meeting-caption {
@@ -221,11 +220,12 @@
   height: 100%;
   min-height: 0;
   gap: 12px;
+  padding-block-start: var(--qs-header-top, 24px);
 }
 .qs-meeting-heading,
 .qs-meeting-retention,
 .qs-meeting-active,
-.qs-meeting-library-head,
+.qs-meeting-filters,
 .qs-meeting-detail-header {
   flex-shrink: 0;
 }
@@ -256,18 +256,11 @@
 .qs-meeting-library[hidden] {
   display: none;
 }
-.qs-meeting-library-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding: 4px 0 12px;
-}
 .qs-meeting-filters {
   display: flex;
   gap: 4px;
   flex-wrap: wrap;
+  padding-bottom: 10px;
 }
 .qs-meeting-filters button[aria-pressed="true"] {
   background: var(--qs-soft);

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, Copy, Trash2 } from "lucide-react";
+import { Check, ChevronDown, Copy, Search, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import type { HistoryEntry } from "@/bindings";
@@ -39,6 +39,11 @@ export const HistorySettings = () => {
   const failed = allHistory ? search.failed : history.failed;
   const retry = allHistory ? search.retry : history.retry;
 
+  const showRecent = () => {
+    setAllHistory(false);
+    void state.setInput("");
+  };
+
   const today = new Date();
   const yesterday = new Date(today);
   yesterday.setDate(today.getDate() - 1);
@@ -60,25 +65,35 @@ export const HistorySettings = () => {
   }
 
   return (
-    <div className="qs-page space-y-6">
-      <UsageOverview />
+    <div className="qs-page space-y-4">
+      <UsageOverview compact />
       <section aria-label={t("dictation.history.title")}>
         <div className="qs-history-toolbar">
-          <div>
-            <h1>
-              {t(
-                allHistory
-                  ? "dictation.historyWorkspace.title"
-                  : "dictation.historyWorkspace.recent",
-              )}
-            </h1>
-            <p className="qs-history-caption">
-              {t(
-                allHistory
-                  ? "dictation.historyWorkspace.pageHint"
-                  : "dictation.historyWorkspace.recentHint",
-              )}
-            </p>
+          <div className="qs-history-search">
+            <label htmlFor="history-search" className="sr-only">
+              {t("dictation.historyWorkspace.searchLabel")}
+            </label>
+            <Search size={16} aria-hidden="true" />
+            <input
+              id="history-search"
+              type="search"
+              value={search.input}
+              aria-describedby="history-search-help"
+              aria-invalid={search.invalidQuery}
+              placeholder={t("dictation.historyWorkspace.searchPlaceholder")}
+              onChange={(event) => {
+                const input = event.currentTarget.value;
+                if (!state.snapshot.composing && input.trim())
+                  setAllHistory(true);
+                void state.setInput(input);
+              }}
+              onCompositionStart={() => state.compositionStart()}
+              onCompositionEnd={(event) => {
+                const input = event.currentTarget.value;
+                if (input.trim()) setAllHistory(true);
+                void state.compositionEnd(input);
+              }}
+            />
           </div>
           <div className="flex flex-wrap gap-2">
             {allHistory && (
@@ -94,7 +109,7 @@ export const HistorySettings = () => {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => setAllHistory((value) => !value)}
+              onClick={allHistory ? showRecent : () => setAllHistory(true)}
             >
               {t(
                 allHistory
@@ -104,45 +119,23 @@ export const HistorySettings = () => {
             </Button>
           </div>
         </div>
-        {allHistory && (
-          <div className="qs-history-search">
-            <label htmlFor="history-search">
-              {t("dictation.historyWorkspace.searchLabel")}
-            </label>
-            <input
-              id="history-search"
-              type="search"
-              value={search.input}
-              aria-describedby="history-search-help"
-              aria-invalid={search.invalidQuery}
-              placeholder={t("dictation.historyWorkspace.searchPlaceholder")}
-              onChange={(event) => void state.setInput(event.target.value)}
-              onCompositionStart={() => state.compositionStart()}
-              onCompositionEnd={(event) =>
-                void state.compositionEnd(event.currentTarget.value)
-              }
-            />
-            <p
-              id="history-search-help"
-              className={
-                search.invalidQuery
-                  ? "text-xs text-error"
-                  : "qs-history-caption"
-              }
-              role={search.invalidQuery ? "alert" : undefined}
-            >
-              {t(
-                search.invalidQuery
-                  ? "dictation.historyWorkspace.queryTooLong"
-                  : "dictation.historyWorkspace.searchHelp",
-              )}
-            </p>
-            {search.refreshAvailable && (
-              <p role="status" className="text-xs text-text/65">
-                {t("dictation.historyWorkspace.newRecords")}
-              </p>
-            )}
-          </div>
+        <p
+          id="history-search-help"
+          className={
+            search.invalidQuery ? "mb-3 text-xs text-error" : "sr-only"
+          }
+          role={search.invalidQuery ? "alert" : undefined}
+        >
+          {t(
+            search.invalidQuery
+              ? "dictation.historyWorkspace.queryTooLong"
+              : "dictation.historyWorkspace.searchHelp",
+          )}
+        </p>
+        {allHistory && search.refreshAvailable && (
+          <p role="status" className="qs-history-caption mb-3">
+            {t("dictation.historyWorkspace.newRecords")}
+          </p>
         )}
         {loading && !entries.length && (
           <p role="status" className="qs-empty">
@@ -244,7 +237,7 @@ export const HistorySettings = () => {
           </nav>
         )}
       </section>
-      <p className="text-xs text-text/45 leading-relaxed">
+      <p className="text-xs text-muted leading-relaxed">
         {t("dictation.retention")}
       </p>
     </div>

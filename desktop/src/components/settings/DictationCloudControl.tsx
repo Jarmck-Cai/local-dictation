@@ -109,42 +109,38 @@ export const DictationCloudControl = () => {
       )
     : 0;
   return (
-    <div className="p-3 rounded-lg border border-mid-gray/20 space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p role="status" aria-live="polite" className="text-sm">
-          {failed
-            ? t("dictation.cloud.loadFailed")
-            : state
-              ? t(`dictation.cloud.states.${state}`, { seconds })
-              : t("common.loading")}
-        </p>
-        {failed ? (
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => setReload((value) => value + 1)}
-          >
-            {t("dictation.retry")}
-          </Button>
-        ) : (
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={busy || !snapshot}
-            onClick={toggle}
-          >
-            {t(
-              state === "manual" ||
-                state === "cooldown" ||
-                state === "nextRecording"
-                ? "dictation.cloud.resume"
-                : "dictation.cloud.pause",
-            )}
-          </Button>
-        )}
-      </div>
-      <p className="text-xs text-text/60">{t("dictation.cloud.hint")}</p>
-      <p className="text-xs text-text/50">{t("dictation.cloud.policy")}</p>
+    <div className="flex flex-wrap items-center justify-between gap-2 py-1">
+      <p role="status" aria-live="polite" className="text-sm">
+        {failed
+          ? t("dictation.cloud.loadFailed")
+          : state
+            ? t(`dictation.cloud.states.${state}`, { seconds })
+            : t("common.loading")}
+      </p>
+      {failed ? (
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => setReload((value) => value + 1)}
+        >
+          {t("dictation.retry")}
+        </Button>
+      ) : (
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={busy || !snapshot}
+          onClick={toggle}
+        >
+          {t(
+            state === "manual" ||
+              state === "cooldown" ||
+              state === "nextRecording"
+              ? "dictation.cloud.resume"
+              : "dictation.cloud.pause",
+          )}
+        </Button>
+      )}
     </div>
   );
 };
