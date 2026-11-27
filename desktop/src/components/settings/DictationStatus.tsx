@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import { Info, Loader2 } from "lucide-react";
 import { useSettings } from "@/hooks/useSettings";
 import { useOsType } from "@/hooks/useOsType";
@@ -13,6 +13,11 @@ import {
   type CleanupStatus,
   type DictationConfigView,
 } from "@/lib/dictation";
+import {
+  CLOUD_GATEWAY_REFRESH,
+  cloudGatewayCommands,
+  type CloudGatewayView,
+} from "@/lib/cloudGateway";
 import { dictationApi, type CloudStatus } from "@/lib/dictationApi";
 import { SnapshotGuard } from "@/lib/dictationState";
 
@@ -23,30 +28,38 @@ type DictationState =
   | "transcribing"
   | "processing";
 
-export const DictationStatus = () => {
+export const DictationStatus = ({ atTop }: { atTop: boolean }) => {
   const { t } = useTranslation();
   const { settings } = useSettings();
   const osType = useOsType();
   const [state, setState] = useState<DictationState>("idle");
   const [fallback, setFallback] = useState(false);
   const [config, setConfig] = useState<DictationConfigView | null>(null);
+  const [gateway, setGateway] = useState<CloudGatewayView | null>(null);
   const [cloud, setCloud] = useState<CloudStatus | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const helpId = useId();
   const configGeneration = useRef(0);
   const { models, currentModel } = useModelStore();
+  const cloudGatewayActive = gateway?.effective_mode === "cloud_first";
   const available =
-    currentModel === RECOGNITION_MODEL_ID &&
-    models.some((model) => model.id === currentModel && model.is_downloaded);
+    cloudGatewayActive ||
+    (currentModel === RECOGNITION_MODEL_ID &&
+      models.some((model) => model.id === currentModel && model.is_downloaded));
 
   useEffect(() => {
     let disposed = false;
     const load = async () => {
       const generation = ++configGeneration.current;
       try {
-        const view = await dictationCommands.getConfig();
-        if (!disposed && generation === configGeneration.current)
+        const [view, gw] = await Promise.all([
+          dictationCommands.getConfig(),
+          cloudGatewayCommands.getConfig().catch(() => null),
+        ]);
+        if (!disposed && generation === configGeneration.current) {
           setConfig(view);
+          setGateway(gw);
+        }
       } catch {
         if (!disposed && generation === configGeneration.current)
           setConfig(null);
@@ -54,9 +67,11 @@ export const DictationStatus = () => {
     };
     void load();
     window.addEventListener(DICTATION_CONFIG_REFRESH, load);
+    window.addEventListener(CLOUD_GATEWAY_REFRESH, load);
     return () => {
       disposed = true;
       window.removeEventListener(DICTATION_CONFIG_REFRESH, load);
+      window.removeEventListener(CLOUD_GATEWAY_REFRESH, load);
     };
   }, []);
 
@@ -125,68 +140,108 @@ export const DictationStatus = () => {
     (cloud.manual_paused ||
       cloud.cooldown_remaining_ms > 0 ||
       cloud.consecutive_failures >= 3);
-  const modeLabel = !config
-    ? t("dictation.footer.modeUnavailable")
-    : config.mode === "claude" && paused
-      ? t("dictation.footer.cloudPaused")
-      : config.mode === "off"
-        ? t("dictation.cleanup.hints.off")
-        : t("dictation.footer.mode", {
-            mode: t(`dictation.cleanup.modes.${config.mode}`),
-            strength: t(`dictation.cleanup.strengths.${config.strength}`),
-          });
+  const footerMode = cloudGatewayActive
+    ? t("dictation.footer.cloudGatewayMode")
+    : !config
+      ? t("dictation.footer.modeUnavailable")
+      : config.mode === "claude" && paused
+        ? t("dictation.footer.cloudPaused")
+        : config.mode === "off"
+          ? t("dictation.cleanup.hints.off")
+          : t("dictation.footer.mode", {
+              mode: t(`dictation.cleanup.modes.${config.mode}`),
+              strength: t(`dictation.cleanup.strengths.${config.strength}`),
+            });
 
+  const modeLabel =
+    atTop && gateway
+      ? t(
+          cloudGatewayActive
+            ? "dictation.footer.cloudRecognition"
+            : "dictation.footer.localRecognition",
+        )
+      : footerMode;
+  const showCleanupPause =
+    atTop &&
+    gateway &&
+    !cloudGatewayActive &&
+    config?.mode === "claude" &&
+    paused;
+  const Container = atTop ? "div" : "footer";
   return (
-    <footer className="qs-status-footer">
-      <div className="qs-status-line">
-        <div className="qs-status-mode" role="status" aria-live="polite">
-          {busy ? (
-            <Loader2 size={13} className="animate-spin" aria-hidden="true" />
-          ) : (
-            <span
-              className={`qs-status-dot ${recording ? "qs-status-dot-recording" : ""}`}
-              aria-hidden="true"
+    <Container className={atTop ? "qs-status-header" : "qs-status-footer"}>
+      <div className="qs-page qs-status-inner">
+        <div className="qs-status-line">
+          <div className="qs-status-mode" role="status" aria-live="polite">
+            {busy ? (
+              <Loader2 size={13} className="animate-spin" aria-hidden="true" />
+            ) : (
+              <span
+                className={`qs-status-dot ${recording ? "qs-status-dot-recording" : ""}`}
+                aria-hidden="true"
+              />
+            )}
+            <span className="qs-status-name">
+              {t(`dictation.status.${status}`)}
+            </span>
+            <span className="text-text/30" aria-hidden="true">
+              {t("dictation.footer.separator")}
+            </span>
+            <span>{modeLabel}</span>
+            {showCleanupPause && (
+              <span>{t("dictation.footer.cloudPaused")}</span>
+            )}
+            <button
+              type="button"
+              className="qs-info"
+              aria-label={t("dictation.footer.dataHelp")}
+              aria-expanded={showHelp}
+              aria-controls={helpId}
+              onClick={() => setShowHelp((value) => !value)}
+            >
+              <Info size={14} aria-hidden="true" />
+            </button>
+          </div>
+          <p className="qs-shortcut">
+            <Trans
+              i18nKey="dictation.footer.shortcutWithKey"
+              values={{ shortcut }}
+              components={{ keycap: <kbd /> }}
             />
-          )}
-          <span>{t(`dictation.status.${status}`)}</span>
-          <span className="text-text/30" aria-hidden="true">
-            {t("dictation.footer.separator")}
-          </span>
-          <span>{modeLabel}</span>
-          <button
-            type="button"
-            className="qs-info"
-            aria-label={t("dictation.footer.dataHelp")}
-            aria-expanded={showHelp}
-            aria-controls={helpId}
-            onClick={() => setShowHelp((value) => !value)}
-          >
-            <Info size={14} aria-hidden="true" />
-          </button>
+          </p>
         </div>
-        <p className="qs-shortcut">
-          {t("dictation.footer.shortcut", { shortcut })}
-        </p>
+        {fallback && (
+          <p role="status" className="mt-1 text-xs text-warning">
+            {t("dictation.status.fallback")}
+          </p>
+        )}
+        <div
+          id={helpId}
+          hidden={!showHelp}
+          className="qs-data-help space-y-1.5"
+        >
+          <h2 className="font-medium text-text">
+            {t("dictation.footer.dataTitle")}
+          </h2>
+          <p>
+            {t(
+              cloudGatewayActive
+                ? "dictation.footer.audioCloudGateway"
+                : "dictation.footer.audioLocal",
+            )}
+          </p>
+          <p>
+            {cloudGatewayActive
+              ? t("dictation.footer.dataModes.cloudGateway")
+              : config
+                ? t(`dictation.footer.dataModes.${config.mode}`)
+                : t("dictation.footer.modeUnavailable")}
+          </p>
+          <p>{t("dictation.retention")}</p>
+          <p>{t("dictation.status.currentCursor")}</p>
+          <p>{t("dictation.status.shortcutHint", { shortcut, cancel })}</p>
+        </div>
       </div>
-      {fallback && (
-        <p role="status" className="mt-1 text-xs text-warning">
-          {t("dictation.status.fallback")}
-        </p>
-      )}
-      <div id={helpId} hidden={!showHelp} className="qs-data-help space-y-1.5">
-        <h2 className="font-medium text-text">
-          {t("dictation.footer.dataTitle")}
-        </h2>
-        <p>{t("dictation.footer.audioLocal")}</p>
-        <p>
-          {config
-            ? t(`dictation.footer.dataModes.${config.mode}`)
-            : t("dictation.footer.modeUnavailable")}
-        </p>
-        <p>{t("dictation.retention")}</p>
-        <p>{t("dictation.status.currentCursor")}</p>
-        <p>{t("dictation.status.shortcutHint", { shortcut, cancel })}</p>
-      </div>
-    </footer>
+    </Container>
   );
 };

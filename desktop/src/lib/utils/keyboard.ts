@@ -184,20 +184,17 @@ const capitalizeKey = (key: string): string => {
  * Handles _left/_right suffixes and capitalizes names.
  * e.g. "shift_left" -> "Left Shift", "option" -> "Option", "space" -> "Space"
  */
-const formatKeyPart = (part: string): string => {
+const formatKeyPart = (part: string, osType: OSType): string => {
   const trimmed = part.trim();
   if (!trimmed) return "";
 
-  if (trimmed.endsWith("_left")) {
-    const name = trimmed.slice(0, -5);
-    return `Left ${capitalizeKey(name)}`;
-  }
-  if (trimmed.endsWith("_right")) {
-    const name = trimmed.slice(0, -6);
-    return `Right ${capitalizeKey(name)}`;
-  }
-
-  return capitalizeKey(trimmed);
+  const side = /_(left|right)$/.exec(trimmed);
+  const key = side ? trimmed.slice(0, side.index) : trimmed;
+  const label =
+    osType === "windows" && /^(super|meta|win)$/i.test(key)
+      ? "Win"
+      : capitalizeKey(key);
+  return side ? `${capitalizeKey(side[1])} ${label}` : label;
 };
 
 /**
@@ -207,10 +204,13 @@ const formatKeyPart = (part: string): string => {
  */
 export const formatKeyCombination = (
   combination: string,
-  _osType: OSType,
+  osType: OSType,
 ): string => {
   if (!combination) return "";
-  return combination.split("+").map(formatKeyPart).join(" + ");
+  return combination
+    .split("+")
+    .map((part) => formatKeyPart(part, osType))
+    .join(" + ");
 };
 
 /**

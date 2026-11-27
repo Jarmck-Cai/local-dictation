@@ -13,3 +13,5 @@
 | Abseil 20240722.0 | The Abseil Authors；[官方固定版本](https://github.com/abseil/abseil-cpp/tree/20240722.0) | [LICENSE](webrtc-apm-licenses/subprojects/abseil-cpp-20240722.0/LICENSE)、[AUTHORS](webrtc-apm-licenses/subprojects/abseil-cpp-20240722.0/AUTHORS)及[LICENSE.build](webrtc-apm-licenses/subprojects/abseil-cpp-20240722.0/LICENSE.build) |
 
 SenseVoice模型许可按官方模型卡链接，于2026-10-28从FunASR提交[dd00b0e42261b628466037f3a522d713399360b6](https://github.com/modelscope/FunASR/blob/dd00b0e42261b628466037f3a522d713399360b6/MODEL_LICENSE)保留。SenseVoice代码仓库许可与模型权重许可分别对待。
+
+实时云端听写使用 tokio-tungstenite 0.29.0、tungstenite 0.29.0、data-encoding 2.11.1、sha1 0.10.7 和 webpki-roots 0.26.11。随包保留 [WebSocket-THIRD-PARTY-LICENSES.txt](WebSocket-THIRD-PARTY-LICENSES.txt)，固定版本及校验值见 Cargo.lock。

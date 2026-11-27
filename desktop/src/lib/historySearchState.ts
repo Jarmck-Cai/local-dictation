@@ -145,7 +145,8 @@ export class HistorySearchState {
     this.cursors = [null];
     this.nextCursor = null;
     this.publish({ anchorId: null, refreshAvailable: false });
-    await this.read();
+    this.dirty = true;
+    if (this.active) await this.read();
   }
 
   retry(): Promise<void> {

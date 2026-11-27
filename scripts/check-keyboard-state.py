@@ -15,89 +15,68 @@ ROOT = Path(__file__).resolve().parents[1]
 TESTS = r'''
 #[cfg(test)] mod regression {
 use super::policy::*;
-fn up() -> State { let mut s = State::new(); s.baseline(0); s }
-#[test] fn observed_up_then_isolated_f22_latch_stops_blocking_after_two_synchronized_rounds() {
-    let mut s = up(); assert_eq!(s.query(false, 1 << 9, 0, 100), Decision::Held);
-    assert_eq!(s.query(false, 1 << 9, 0, 149), Decision::Held);
-    assert_eq!(s.query(false, 1 << 9, 0, 150), Decision::Ready);
-}
 #[test] fn physical_f22_blocks_even_when_unbound_or_async_is_zero() {
-    let mut s = up(); s.raw(1, Some(9), true);
-    assert_eq!(s.query(false, 1 << 9, 0, 100), Decision::Held);
-    assert_eq!(s.query(false, 0, 0, 200), Decision::Held);
+    let mut s = State::new(); s.raw(1, Some(9), true);
+    assert_eq!(s.query(false, 1 << 9, 0), Decision::Held);
+    assert_eq!(s.query(false, 0, 0), Decision::Held);
 }
 #[test] fn configured_high_key_always_blocks_the_async_high() {
-    let mut s = up(); s.query(false, 1 << 9, 1 << 9, 0);
-    assert_eq!(s.query(false, 1 << 9, 1 << 9, 100), Decision::Held);
+    let s = State::new();
+    assert_eq!(s.query(false, (1 << 7) | (1 << 9), 1 << 9), Decision::Held);
 }
-#[test] fn startup_high_without_an_up_anchor_remains_unknown() {
-    let mut s = State::new();
-    assert_eq!(s.query(false, 1 << 9, 0, 0), Decision::Unknown);
-    assert_eq!(s.query(false, 1 << 9, 0, 10000), Decision::Unknown);
-}
-#[test] fn an_unknown_device_break_cannot_certify_another_preexisting_hold_is_up() {
-    let mut s = State::new(); s.raw(1, Some(9), false);
-    assert_eq!(s.query(false, 1 << 9, 0, 0), Decision::Unknown);
-    assert_eq!(s.query(false, 1 << 9, 0, 100), Decision::Unknown);
-}
-#[test] fn reset_cannot_keep_a_stale_known_up_authorization() {
-    let mut s = up(); s.query(false, 1 << 9, 0, 0); s.reset();
-    assert_eq!(s.query(false, 1 << 9, 0, 200), Decision::Unknown);
+#[test] fn unbound_f20_or_f22_at_startup_does_not_delay_paste() {
+    let s = State::new();
+    for key in 0..12 { assert_eq!(s.query(false, 1 << key, 0), Decision::Ready); }
+    assert_eq!(s.query(false, (1 << 7) | (1 << 9), 0), Decision::Ready);
 }
 #[test] fn raw_read_or_registration_failure_never_relaxes_a_high_key() {
-    let mut s = up(); s.query(false, 1 << 9, 0, 0); s.fail();
-    assert_eq!(s.query(false, 1 << 9, 0, 100), Decision::Unknown);
+    let mut s = State::new(); s.fail();
+    assert_eq!(s.query(false, 1 << 9, 0), Decision::Unknown);
 }
 #[test] fn released_devices_do_not_consume_slots_for_a_later_real_physical_hold() {
-    let mut s = up();
+    let mut s = State::new();
     for id in 1..=32 { s.raw(id, Some(9), true); s.raw(id, Some(9), false); }
     s.raw(33, Some(9), true);
-    assert_eq!(s.query(false, 0, 0, 100), Decision::Held);
+    assert_eq!(s.query(false, 0, 0), Decision::Held);
 }
 #[test] fn genuine_simultaneous_device_overflow_remains_unknown_after_tracked_keys_release() {
-    let mut s=up(); for id in 1..=33 { s.raw(id,Some(9),true); }
+    let mut s=State::new(); for id in 1..=33 { s.raw(id,Some(9),true); }
     for id in 1..=32 { s.raw(id,Some(9),false); }
-    assert_eq!(s.query(false,0,0,100),Decision::Unknown);
+    assert_eq!(s.query(false,0,0),Decision::Unknown);
 }
 #[test] fn a_raw_read_failure_never_certifies_all_physical_keys_released() {
-    let mut s=up(); s.fail(); assert_eq!(s.query(false,0,0,100),Decision::Unknown);
+    let mut s=State::new(); s.fail(); assert_eq!(s.query(false,0,0),Decision::Unknown);
 }
 #[test] fn ordinary_key_and_modifier_protection_is_unchanged() {
-    let mut s = up(); assert_eq!(s.query(true, 0, 0, 100), Decision::Held);
-    assert_eq!(s.query(true, 1 << 9, 0, 200), Decision::Held);
+    let s = State::new(); assert_eq!(s.query(true, 0, 0), Decision::Held);
+    assert_eq!(s.query(true, 1 << 9, 0), Decision::Held);
 }
-#[test] fn raw_make_and_break_between_rounds_invalidates_the_old_candidate() {
-    let mut s = up(); s.query(false, 1 << 9, 0, 0);
-    s.raw(1, Some(9), true); s.raw(1, Some(9), false);
-    assert_eq!(s.query(false, 1 << 9, 0, 100), Decision::Held);
-    assert_eq!(s.query(false, 1 << 9, 0, 150), Decision::Ready);
-}
-#[test] fn even_an_unretained_ordinary_raw_event_invalidates_the_candidate() {
-    let mut s = up(); s.query(false, 1 << 9, 0, 0); s.raw(1, None, true);
-    assert_eq!(s.query(false, 1 << 9, 0, 100), Decision::Held);
+#[test] fn last_device_release_allows_the_same_unbound_async_bit_without_delay() {
+    let mut s = State::new(); s.raw(1, Some(9), true);
+    assert_eq!(s.query(false, 1 << 9, 0), Decision::Held);
+    s.raw(1, Some(9), false);
+    assert_eq!(s.query(false, 1 << 9, 0), Decision::Ready);
 }
 #[test] fn two_devices_and_autorepeat_do_not_clear_another_physical_hold() {
-    let mut s = up(); s.raw(1, Some(9), true); s.raw(1, Some(9), true);
+    let mut s = State::new(); s.raw(1, Some(9), true); s.raw(1, Some(9), true);
     s.raw(2, Some(9), true); s.raw(1, Some(9), false);
-    assert_eq!(s.query(false, 0, 0, 0), Decision::Held);
-    s.remove_device(1); assert_eq!(s.query(false, 1 << 9, 0, 100), Decision::Held);
-    s.raw(2, Some(9), false); s.baseline(0);
-    assert_eq!(s.query(false, 0, 0, 200), Decision::Ready);
+    assert_eq!(s.query(false, 0, 0), Decision::Held);
+    s.remove_device(1); assert_eq!(s.query(false, 1 << 9, 0), Decision::Held);
+    s.raw(2, Some(9), false);
+    assert_eq!(s.query(false, 0, 0), Decision::Ready);
 }
-#[test] fn high_set_changes_restart_the_full_stability_window() {
-    let mut s = up(); s.query(false, 1 << 9, 0, 0);
-    assert_eq!(s.query(false, (1 << 9) | 1, 0, 100), Decision::Held);
-    assert_eq!(s.query(false, (1 << 9) | 1, 0, 150), Decision::Ready);
+#[test] fn device_removal_clears_only_the_disconnected_devices_hold() {
+    let mut s = State::new(); s.raw(1, Some(9), true);
+    s.remove_device(2); assert_eq!(s.query(false, 1 << 9, 0), Decision::Held);
+    s.remove_device(1); assert_eq!(s.query(false, 1 << 9, 0), Decision::Ready);
 }
 #[test] fn only_high_function_bindings_are_classified() {
     assert_eq!(configured_mask(["alt_left+F22", "ctrl+f13", "F24"]), (1<<9)|1|(1<<11));
     assert_eq!(configured_mask(["f12", "shift+f8", "alt_left+super_left"]), 0);
 }
-#[test] fn arrival_removal_and_excess_devices_fail_conservatively() {
-    let mut s = up(); s.query(false, 1<<9, 0, 0); s.remove_device(99);
-    assert_eq!(s.query(false, 1<<9, 0, 100), Decision::Unknown);
-    let mut s = up(); for id in 1..=33 { s.raw(id, Some(9), true); }
-    assert_ne!(s.query(false, 1<<9, 0, 100), Decision::Ready);
+#[test] fn a_key_event_without_a_device_does_not_authorize_a_residual() {
+    let mut s = State::new(); s.raw(0, Some(9), true);
+    assert_eq!(s.query(false, 1 << 9, 0), Decision::Unknown);
 }
 }
 '''
@@ -107,8 +86,7 @@ LEGACY_TEST = r'''
 unsafe fn GetForegroundWindow() -> *mut std::ffi::c_void { 1usize as _ }
 unsafe fn GetAsyncKeyState(vk: i32) -> i16 { if vk == 0x85 { i16::MIN } else { 0 } }
 #[test] fn known_up_raw_f22_remains_up_but_async_latch_must_not_block_output() {
-    // A trusted raw-up anchor and two synchronized 50ms rounds are part of the
-    // new contract; the legacy aggregate cannot consume either observation.
+    // The legacy aggregate cannot separate an unbound residual from a real hold.
     assert_eq!(any_keyboard_key_down(), Ok(false));
 }
 '''
@@ -325,9 +303,10 @@ struct Prepared { generation:u64, high:u16, at:Instant }
 struct Request { deadline:Instant, bound:u16 }
 struct Context { state:RefCell<State>, generation:AtomicU64 }
 impl Context {
- fn new(anchored:bool)->Self {let mut state=State::new();if anchored {state.baseline(0)} Self{state:RefCell::new(state),generation:AtomicU64::new(1)}}
- fn fail(&self) {self.generation.fetch_add(1,Ordering::AcqRel);self.state.borrow_mut().fail();}
- fn revoke(&self) {self.generation.fetch_add(1,Ordering::AcqRel); /* REAL_STATE_REVOKE */ }
+ fn new()->Self {Self{state:RefCell::new(State::new()),generation:AtomicU64::new(1)}}
+ fn changed(&self) {self.generation.fetch_add(1,Ordering::AcqRel);}
+ fn fail(&self) {self.changed();self.state.borrow_mut().fail();}
+ // REAL_RESET
 }
 fn ours(_:HWND)->bool {true}
 fn drain_raw(_:HWND,context:&Context)->bool {
@@ -344,64 +323,73 @@ fn ordinary_down()->bool {
 }
 unsafe fn GetQueueStatus(_:u32)->u32 {if PENDING.with(Cell::get) {1<<16} else {0}}
 fn process(context:&Context,deadline:u64)->Result<Prepared,&'static str> {
- let request=Request{deadline:Instant(deadline),bound:0};let hwnd=HWND;let began=Instant(0);
+ let request=Request{deadline:Instant(deadline),bound:0};let hwnd=HWND;
  ACTIVE.with(|ptr|ptr.set(context as *const _));
  // REAL_REQUEST_BRANCH
  result
 }
 #[test] fn a_late_request_is_rejected_but_the_next_fresh_all_up_request_recovers() {
- let context=Context::new(true);NOW.with(|c|c.set(100));
+ let context=Context::new();NOW.with(|c|c.set(100));
  assert_eq!(process(&context,99).err(),Some(UNAVAILABLE));
  NOW.with(|c|c.set(101));assert!(process(&context,200).is_ok());
 }
 #[test] fn pending_raw_rejects_this_round_but_fresh_drain_recovers() {
- let context=Context::new(true);NOW.with(|c|c.set(100));PENDING_ON_SCAN.with(|c|c.set(true));
+ let context=Context::new();NOW.with(|c|c.set(100));PENDING_ON_SCAN.with(|c|c.set(true));
  assert_eq!(process(&context,200).err(),Some(UNAVAILABLE));
  NOW.with(|c|c.set(101));assert!(process(&context,200).is_ok());
 }
 #[test] fn generation_change_rejects_only_that_request() {
- let context=Context::new(true);NOW.with(|c|c.set(100));CHANGE_ON_SCAN.with(|c|c.set(true));
+ let context=Context::new();NOW.with(|c|c.set(100));CHANGE_ON_SCAN.with(|c|c.set(true));
  assert_eq!(process(&context,200).err(),Some(UNAVAILABLE));
  NOW.with(|c|c.set(101));assert!(process(&context,200).is_ok());
 }
 #[test] fn deadline_after_scan_is_rejected_without_permanent_failure() {
- let context=Context::new(true);NOW.with(|c|c.set(100));
+ let context=Context::new();NOW.with(|c|c.set(100));
  // The source expression's post-scan deadline branch is also exercised by
  // a scripted clock change in ordinary_down (installed by the generator).
  AFTER_SCAN_DEADLINE.with(|flag|flag.set(true));
  assert_eq!(process(&context,120).err(),Some(UNAVAILABLE));
  NOW.with(|c|c.set(201));assert!(process(&context,300).is_ok());
 }
-#[test] fn virtual_f22_high_retains_its_up_anchor_across_a_soft_timeout() {
- let context=Context::new(true);HIGH.with(|c|c.set(1<<9));NOW.with(|c|c.set(100));
+#[test] fn a_fresh_request_allows_a_startup_f22_residual_after_a_soft_timeout() {
+ let context=Context::new();HIGH.with(|c|c.set(1<<9));NOW.with(|c|c.set(100));
  assert_eq!(process(&context,99).err(),Some(UNAVAILABLE));
- NOW.with(|c|c.set(200));assert_eq!(process(&context,400).err(),Some("keys_held"));
- NOW.with(|c|c.set(250));assert!(process(&context,400).is_ok());
+ NOW.with(|c|c.set(200));assert!(process(&context,400).is_ok());
 }
-#[test] fn startup_unknown_cannot_get_an_up_anchor_from_soft_revocation() {
- let context=Context::new(false);HIGH.with(|c|c.set(1<<9));NOW.with(|c|c.set(100));
- assert_eq!(process(&context,99).err(),Some(UNAVAILABLE));
- NOW.with(|c|c.set(200));assert_eq!(process(&context,400).err(),Some("keys_held"));
- NOW.with(|c|c.set(300));assert_eq!(process(&context,400).err(),Some("keys_held"));
+#[test] fn residual_f22_does_not_bypass_a_pending_raw_event() {
+ let context=Context::new();HIGH.with(|c|c.set(1<<9));NOW.with(|c|c.set(100));
+ PENDING_ON_SCAN.with(|c|c.set(true));
+ assert_eq!(process(&context,400).err(),Some(UNAVAILABLE));
+ assert!(process(&context,400).is_ok());
 }
 #[test] fn physical_down_survives_soft_revocation_even_if_async_is_zero() {
- let context=Context::new(true);context.state.borrow_mut().raw(1,Some(9),true);NOW.with(|c|c.set(100));
+ let context=Context::new();context.state.borrow_mut().raw(1,Some(9),true);NOW.with(|c|c.set(100));
  assert_eq!(process(&context,99).err(),Some(UNAVAILABLE));
  NOW.with(|c|c.set(200));assert_eq!(process(&context,400).err(),Some("keys_held"));
 }
+#[test] fn session_reset_revokes_prepared_evidence_but_does_not_discard_an_observed_hold() {
+ let context=Context::new();HIGH.with(|c|c.set(1<<9));NOW.with(|c|c.set(100));
+ let prepared=process(&context,400).unwrap();
+ context.state.borrow_mut().raw(1,Some(9),true);
+ context.reset();
+ assert_ne!(context.generation.load(Ordering::Acquire),prepared.generation);
+ assert_eq!(process(&context,400).err(),Some("keys_held"));
+ context.state.borrow_mut().raw(1,Some(9),false);
+ assert!(process(&context,400).is_ok());
+}
 #[test] fn a_hard_read_failure_cannot_be_repaired_by_soft_revocation() {
- let context=Context::new(true);context.fail();NOW.with(|c|c.set(100));
+ let context=Context::new();context.fail();NOW.with(|c|c.set(100));
  assert_eq!(process(&context,99).err(),Some(UNAVAILABLE));
  NOW.with(|c|c.set(200));assert_eq!(process(&context,400).err(),Some(UNAVAILABLE));
- assert_eq!(context.state.borrow_mut().query(false,0,0,300),Decision::Unknown);
+ assert_eq!(context.state.borrow().query(false,0,0),Decision::Unknown);
 }
 #[test] fn a_real_capacity_failure_stays_unknown_after_soft_revocation() {
- let context=Context::new(true);
+ let context=Context::new();
  for device in 1..=33 {context.state.borrow_mut().raw(device,Some(9),true);}
  for device in 1..=32 {context.state.borrow_mut().raw(device,Some(9),false);}
  NOW.with(|c|c.set(100));assert_eq!(process(&context,99).err(),Some(UNAVAILABLE));
  NOW.with(|c|c.set(200));assert_eq!(process(&context,400).err(),Some(UNAVAILABLE));
- assert_eq!(context.state.borrow_mut().query(false,0,0,300),Decision::Unknown);
+ assert_eq!(context.state.borrow().query(false,0,0),Decision::Unknown);
 }
 fn accept_reply(received_id:u64,id:u64,deadline:Instant)->Result<(), &'static str> {
  // REAL_REPLY_GUARD
@@ -450,8 +438,7 @@ def main():
         branch_start=native.index("let result = if Instant::now() >= request.deadline")
         branch_end=native.index("let _ = request.reply.send",branch_start)
         branch=native[branch_start:branch_end].strip()
-        revoke="self.state.borrow_mut().revoke();" if "fn revoke(" in Path(policy).read_text(encoding="utf-8") else ""
-        request_tests=REQUEST_TESTS.replace("// REAL_REQUEST_BRANCH",branch).replace("/* REAL_STATE_REVOKE */",revoke)
+        request_tests=REQUEST_TESTS.replace("// REAL_REQUEST_BRANCH",branch).replace("// REAL_RESET",m.function(native,"reset"))
         reply_start=native.index("if received_id != id")
         reply_end=native.index("\n    result",reply_start)
         request_tests=request_tests.replace("// REAL_REPLY_GUARD",native[reply_start:reply_end])

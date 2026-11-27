@@ -795,17 +795,18 @@
       "title": "文字整理",
       "description": "保守修正标点和明显错误，保留中英文、数字、否定关系、路径及参数。",
       "mode": "文字整理方式",
+      "options": "整理选项",
       "modes": {
         "claude": "Claude",
         "local": "本机模型",
         "off": "关闭整理"
       },
       "hints": {
-        "claude": "使用 Claude Haiku 5.5，发送转写文字和相关词库提示，录音不上传。",
+        "claude": "Claude 整理转写文字，并使用相关词库提示。",
         "local": "连接本机兼容服务，失败时保留原文，不转用云端。",
-        "off": "直接使用本地识别的原始转写。"
+        "off": "直接使用语音识别结果。"
       },
-      "fallback": "整理超时或失败时，使用应用了已确认词库的完整本地转录。",
+      "fallback": "整理超时或失败时，使用应用了已确认词库的转录结果。",
       "saved": "整理设置已保存",
       "saveFailed": "设置未保存，请检查本机地址与模型名称后重试。",
       "loadFailed": "无法读取整理设置。",
@@ -968,7 +969,13 @@
         "unicode_input_submitted": "系统已接受输入，远端落字未确认",
         "unicode_input_submitted_copy_failed": "系统已接受输入，但复制未完成；请检查远端输入框",
         "paste_unconfirmed": "文字是否完整到达尚未确认，请检查输入框",
-        "paste_skipped": "已跳过自动输入，可从历史复制"
+        "paste_skipped": "已跳过自动输入，可从历史复制",
+        "gateway_timeout": "云端网关超时，已按需懒加载本地模型完成兜底",
+        "gateway_unreachable": "云端网关未连通，已按需懒加载本地模型完成兜底",
+        "gateway_unauthorized": "网关设备令牌未通过校验，已回退本地识别",
+        "gateway_upstream_error": "网关上游暂不可用，已回退本地模型完成兜底",
+        "gateway_http_error": "云端网关返回异常，已回退本地识别",
+        "cleanup_not_configured": "网关未配置整理密钥，保留一级识别原文"
       },
       "cleanupFallback": "整理回退：{{reason}}",
       "cleanupFallbackUnknown": "整理未完成，保留本地转录",
@@ -1069,16 +1076,74 @@
     "footer": {
       "separator": "·",
       "mode": "{{mode}} {{strength}}",
+      "cloudGatewayMode": "云端网关优先 · 离线本地兜底",
+      "cloudRecognition": "云端识别",
+      "localRecognition": "本机识别",
       "modeUnavailable": "整理状态暂不可用",
       "cloudPaused": "Claude 整理已暂停",
       "shortcut": "按住 {{shortcut}} 说话",
+      "shortcutWithKey": "按住 <keycap>{{shortcut}}</keycap> 说话",
       "dataHelp": "查看当前模式的数据处理说明",
       "dataTitle": "当前模式如何处理数据",
       "audioLocal": "音频在本机识别，不上传。",
+      "audioCloudGateway": "音频经加密通道在自建网关内存中转发识别（网关零音频落盘）；断网或超时自动按需加载本机 SenseVoiceSmall 离线兜底。",
       "dataModes": {
         "claude": "启用 Claude 整理时，会发送转写文字和相关词库提示。",
         "local": "转写文字交给设置中的本机兼容服务整理，失败时不转用云端。",
-        "off": "关闭整理，直接使用本地识别结果和已确认词库。"
+        "off": "关闭整理，直接使用本地识别结果和已确认词库。",
+        "cloudGateway": "上游 OpenAI 与 Claude 密钥由自建网关集中托管，本机零上游密钥；高频技术词与确认词条跨设备同步。"
+      }
+    },
+    "cloudGateway": {
+      "title": "云端连接",
+      "description": "云端听写会把音频发给自建网关和语音识别服务。支持实时转录的新版网关会在说话时开始识别。识别失败时可使用本机 SenseVoiceSmall。",
+      "loadFailed": "无法读取云端网关设置。",
+      "modeLabel": "识别模式",
+      "modes": {
+        "cloud_first": "云端优先",
+        "local_only": "仅本地"
+      },
+      "banners": {
+        "cloudActive": "当前使用云端识别，失败时切换到本机。",
+        "cloudUnconfiguredLocal": "配置云端连接后可用。当前使用本机识别。",
+        "localOnly": "当前使用本机识别。"
+      },
+      "connectionConfigured": "网关已配置",
+      "connectionUnconfigured": "网关尚未配置",
+      "saveRecognitionMode": "保存识别模式",
+      "urlLabel": "网关地址",
+      "urlPlaceholder": "https://dictation.astrmind.com",
+      "tokenLabel": "设备访问令牌",
+      "tokenPlaceholder": "输入本设备专属令牌（经 Windows DPAPI 加密存储，保存后不回显）",
+      "tokenConfigured": "设备访问令牌已保存至 Windows DPAPI 安全存储（不回显）",
+      "tokenMissing": "尚未配置设备访问令牌",
+      "saveToken": "保存令牌",
+      "removeToken": "移除令牌",
+      "tokenSaved": "设备令牌已加密保存",
+      "tokenRemoved": "设备令牌已移除",
+      "autoSync": "自动跨设备同步技术词表",
+      "autoSyncHint": "将已确认纠错词条、手动词及点赞/高频英文技术词自动同步至网关 SQLite 词库。",
+      "testConnection": "测试连接",
+      "testing": "正在连接…",
+      "testSuccess": "网关连接正常（{{ms}} ms）",
+      "testStatusAuthenticated": "已通过鉴权 · 设备标识「{{device}}」· {{ms}} ms",
+      "testStatusUnauthorized": "网关可达（{{ms}} ms），但设备访问令牌未通过鉴权",
+      "testStatusUpstream": "语音识别：{{asr}} · 文本排版：{{cleanup}} · 云端词条：{{vocab}} 条（版本 {{rev}}）",
+      "notReady": "未就绪",
+      "syncSummary": "已同步生效词条：{{count}} 条 · 版本 {{revision}}",
+      "syncNow": "同步词表",
+      "syncSuccess": "词表同步完成（共 {{active}} 条生效词条，版本 {{revision}}）",
+      "save": "保存网关设置",
+      "saved": "云端网关设置已保存",
+      "errors": {
+        "invalid_gateway_url": "请输入合法的 http:// 或 https:// 网关地址，且不要包含账号密码或查询参数。",
+        "invalid_gateway_token": "设备令牌需至少 12 位可打印 ASCII 字符，且不能包含空格。",
+        "missing_gateway_url": "请先填写网关地址。",
+        "missing_gateway_token": "请先保存设备访问令牌。",
+        "gateway_unauthorized": "设备访问令牌被网关拒绝（401）。",
+        "gateway_timeout": "连接云端网关超时。",
+        "gateway_unreachable": "无法连接到该网关地址。",
+        "generic": "网关操作未完成，请检查地址与网络后重试。"
       }
     },
     "autoPaste": {

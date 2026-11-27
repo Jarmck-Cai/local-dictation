@@ -44,33 +44,30 @@ export function MeetingLibrary({
     <section
       hidden={!visible}
       className="qs-meeting-library"
-      aria-labelledby="meeting-recent-title"
+      aria-label={t("meetings.recent")}
     >
-      <div className="qs-meeting-library-head">
-        <h2 id="meeting-recent-title">{t("meetings.recent")}</h2>
-        <div
-          className="qs-meeting-filters"
-          role="group"
-          aria-label={t("meetings.filterLabel")}
-        >
-          {(["all", "complete", "pending"] as const).map((value) => (
-            <Button
-              key={value}
-              type="button"
-              size="sm"
-              variant="ghost"
-              aria-pressed={filter === value}
-              onClick={() => {
-                position.current = 0;
-                if (scroll.current) scroll.current.scrollTop = 0;
-                setFilter(value);
-              }}
-            >
-              {t(`meetings.filters.${value}`)}
-              <span>{counts[value]}</span>
-            </Button>
-          ))}
-        </div>
+      <div
+        className="qs-meeting-filters"
+        role="group"
+        aria-label={t("meetings.filterLabel")}
+      >
+        {(["all", "complete", "pending"] as const).map((value) => (
+          <Button
+            key={value}
+            type="button"
+            size="sm"
+            variant="ghost"
+            aria-pressed={filter === value}
+            onClick={() => {
+              position.current = 0;
+              if (scroll.current) scroll.current.scrollTop = 0;
+              setFilter(value);
+            }}
+          >
+            {t(`meetings.filters.${value}`)}
+            <span>{counts[value]}</span>
+          </Button>
+        ))}
       </div>
       <div
         className="qs-meeting-library-scroll"

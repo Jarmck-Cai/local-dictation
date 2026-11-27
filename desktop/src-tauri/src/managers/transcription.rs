@@ -43,6 +43,21 @@ mod sensevoice_segments;
 const STREAM_PERF_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const STREAM_FINALIZE_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// In `cloud_first` mode with a configured gateway, lazy-loaded local fallback
+/// models automatically release after 5 minutes of local inactivity even when
+/// the user's global unload timeout is `Never`; explicit shorter/longer choices
+/// are preserved.
+pub(crate) fn effective_model_unload_timeout(
+    configured: ModelUnloadTimeout,
+    cloud_first_configured: bool,
+) -> ModelUnloadTimeout {
+    if configured == ModelUnloadTimeout::Never && cloud_first_configured {
+        ModelUnloadTimeout::Min5
+    } else {
+        configured
+    }
+}
+
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_string()
@@ -120,8 +135,8 @@ struct FinalizedStreamText {
 /// Routes real-time audio frames to the active streaming worker. Shared between
 /// the [`TranscriptionManager`] (opens/closes the route) and the audio recorder's
 /// per-frame callback (feeds frames). The recorder holds an `Arc<StreamRouter>`
-/// directly, so a frame with no stream pending costs a single relaxed atomic
-/// load — no Tauri state lookup, no mutex lock.
+/// directly, so a frame with no stream pending takes no Tauri state lookup or
+/// mutex lock.
 pub struct StreamRouter {
     /// Command channel to the active streaming worker, present from
     /// `start_stream` until `finalize_stream`/`cancel_stream`.
@@ -129,6 +144,7 @@ pub struct StreamRouter {
     /// True while a stream is pending or active (channel is open). The audio
     /// callback checks this first to avoid the mutex lock when no stream runs.
     open: Arc<AtomicBool>,
+    cloud_audio: Arc<crate::cloud_gateway::AudioRoute>,
 }
 
 impl StreamRouter {
@@ -136,6 +152,7 @@ impl StreamRouter {
         Self {
             tx: Mutex::new(None),
             open: Arc::new(AtomicBool::new(false)),
+            cloud_audio: Arc::new(crate::cloud_gateway::AudioRoute::default()),
         }
     }
 
@@ -163,15 +180,19 @@ impl StreamRouter {
         *self.tx.lock().unwrap() = None;
     }
 
-    /// Forward a 16 kHz frame to the active streaming worker. Cheap no-op (a
-    /// single relaxed atomic load) when no stream is pending.
+    /// Forward a 16 kHz frame to the active local or cloud streaming worker.
     pub fn feed(&self, frame: &[f32]) {
+        self.cloud_audio.feed(frame);
         if !self.open.load(Ordering::Relaxed) {
             return;
         }
         if let Some(tx) = self.tx.lock().unwrap().as_ref() {
             let _ = tx.send(StreamCmd::Feed(frame.to_vec()));
         }
+    }
+
+    pub(crate) fn cloud_audio(&self) -> Arc<crate::cloud_gateway::AudioRoute> {
+        Arc::clone(&self.cloud_audio)
     }
 
     /// Whether a stream is pending or active.
@@ -543,7 +564,10 @@ impl TranscriptionManager {
                     }
 
                     let settings = get_settings(&app_handle_cloned);
-                    let timeout = settings.model_unload_timeout;
+                    let timeout = effective_model_unload_timeout(
+                        settings.model_unload_timeout,
+                        crate::cloud_gateway::should_defer_startup_model_load(&app_handle_cloned),
+                    );
 
                     // Skip Immediately — that variant is handled by
                     // maybe_unload_immediately() after each transcription.
@@ -578,6 +602,7 @@ impl TranscriptionManager {
                                     limit_seconds
                                 );
                                 if manager_cloned.maybe_unload_idle(limit_ms) {
+                                    crate::memory::trim_freed_memory();
                                     let unload_duration = unload_start.elapsed();
                                     info!(
                                         "Model unloaded due to inactivity (took {}ms)",
@@ -1577,13 +1602,12 @@ impl TranscriptionManager {
         // an empty engine, while microphone/model readiness checks stay fast.
         let _batch = self.batch_gate.acquire();
 
-        // Prepare each meeting utterance after joining the batch queue. A cold
-        // application, or Immediate cleanup after the previous utterance, may
-        // have no cached model. Use the ordinary selected-model loading path;
+        // Prepare on demand after joining the batch queue. A cold application
+        // (including `cloud_first` lazy fallback), an idle-unloaded session, or
+        // Immediate cleanup after the previous utterance may have no cached
+        // model. `initiate_model_load()` is a cheap no-op when already warm;
         // the batch lease protects its result from conditional idle cleanup.
-        if purpose == TranscriptionPurpose::Meeting {
-            self.initiate_model_load();
-        }
+        self.initiate_model_load();
 
         // Check if model is loaded, if not try to load it
         {
@@ -3563,6 +3587,26 @@ mod tests {
         assert!(matches!(plan.task, Task::Transcribe));
         assert_eq!(plan.language.as_deref(), Some("es"));
         assert_eq!(plan.target_language, None);
+    }
+
+    #[test]
+    fn cloud_first_defaults_lazy_fallback_unload_to_five_minutes_while_keeping_explicit_timeouts() {
+        assert_eq!(
+            effective_model_unload_timeout(ModelUnloadTimeout::Never, true),
+            ModelUnloadTimeout::Min5
+        );
+        assert_eq!(
+            effective_model_unload_timeout(ModelUnloadTimeout::Never, false),
+            ModelUnloadTimeout::Never
+        );
+        assert_eq!(
+            effective_model_unload_timeout(ModelUnloadTimeout::Min2, true),
+            ModelUnloadTimeout::Min2
+        );
+        assert_eq!(
+            effective_model_unload_timeout(ModelUnloadTimeout::Immediately, true),
+            ModelUnloadTimeout::Immediately
+        );
     }
 }
 

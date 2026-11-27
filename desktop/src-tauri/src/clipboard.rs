@@ -38,6 +38,16 @@ fn write_text_to_clipboard(app_handle: &AppHandle, text: &str) -> Result<(), Str
         return write_clipboard_via_wl_copy(text);
     }
 
+    #[cfg(target_os = "windows")]
+    let normalized_crlf;
+    #[cfg(target_os = "windows")]
+    let text = if text.contains('\n') && !text.contains("\r\n") {
+        normalized_crlf = text.replace('\n', "\r\n");
+        normalized_crlf.as_str()
+    } else {
+        text
+    };
+
     app_handle
         .clipboard()
         .write_text(text)

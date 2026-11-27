@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ChevronDown } from "lucide-react";
 import { toast } from "sonner";
 import {
   dictationCommands,
@@ -12,7 +13,7 @@ import { Input } from "../ui/Input";
 import { SettingsGroup } from "../ui/SettingsGroup";
 import { DictationCloudControl } from "./DictationCloudControl";
 
-export const DictationCleanup = () => {
+export const useDictationCleanupSettings = () => {
   const { t } = useTranslation();
   const [config, setConfig] = useState<DictationConfigView | null>(null);
   const [busy, setBusy] = useState(false);
@@ -92,12 +93,81 @@ export const DictationCleanup = () => {
     }
   };
 
+  return {
+    config,
+    setConfig,
+    busy,
+    loadFailed,
+    key,
+    setKey,
+    dirty,
+    setDirty,
+    load,
+    save,
+    changeKey,
+  };
+};
+
+interface CleanupSettingsProps {
+  settings: ReturnType<typeof useDictationCleanupSettings>;
+}
+
+export const ClaudeKeySettings = ({ settings }: CleanupSettingsProps) => {
+  const { t } = useTranslation();
+  const { config, busy, loadFailed, key, setKey, changeKey } = settings;
+  if (!config || loadFailed || config.mode !== "claude") return null;
+
+  return (
+    <div className="space-y-2 border-t border-mid-gray/15 pt-4">
+      <p className="text-sm font-medium">{t("dictation.cleanup.keyLabel")}</p>
+      <p className="text-xs text-text/65">
+        {t(
+          config.claude_key_configured
+            ? "dictation.cleanup.keyConfigured"
+            : "dictation.cleanup.keyMissing",
+        )}
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          type="password"
+          autoComplete="new-password"
+          spellCheck={false}
+          value={key}
+          onChange={(event) => setKey(event.target.value)}
+          disabled={busy}
+          aria-label={t("dictation.cleanup.keyLabel")}
+          placeholder={t("dictation.cleanup.keyPlaceholder")}
+          className="min-w-0 basis-48 flex-1"
+        />
+        <Button
+          variant="secondary"
+          disabled={busy || !key.trim()}
+          onClick={() => changeKey(false)}
+        >
+          {t("dictation.cleanup.saveKey")}
+        </Button>
+        {config.claude_key_configured && (
+          <Button
+            variant="danger-ghost"
+            disabled={busy}
+            onClick={() => changeKey(true)}
+          >
+            {t("dictation.cleanup.removeKey")}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export const DictationCleanup = ({ settings }: CleanupSettingsProps) => {
+  const { t } = useTranslation();
+  const { config, setConfig, busy, loadFailed, dirty, setDirty, load, save } =
+    settings;
+
   return (
     <SettingsGroup title={t("dictation.cleanup.title")}>
-      <div className="p-4 space-y-4">
-        <p className="text-sm text-text/65">
-          {t("dictation.cleanup.description")}
-        </p>
+      <div className="space-y-2 px-4 py-3">
         {loadFailed ? (
           <div className="flex items-center justify-between gap-3">
             <p role="alert" className="text-sm text-error">
@@ -111,175 +181,163 @@ export const DictationCleanup = () => {
           <p className="text-sm text-text/60">{t("common.loading")}</p>
         ) : (
           <>
-            <div
-              className="grid grid-cols-3 gap-2"
-              role="group"
-              aria-label={t("dictation.cleanup.mode")}
-            >
-              {(["claude", "local", "off"] as const).map(
-                (mode: CleanupMode) => (
-                  <Button
-                    key={mode}
-                    variant={
-                      config.mode === mode ? "primary-soft" : "secondary"
-                    }
-                    aria-pressed={config.mode === mode}
-                    disabled={busy}
-                    onClick={() => {
-                      setConfig({ ...config, mode });
-                      setDirty(true);
-                    }}
-                  >
-                    {t(`dictation.cleanup.modes.${mode}`)}
-                  </Button>
-                ),
-              )}
-            </div>
-            <p className="text-xs text-text/65">
-              {t(`dictation.cleanup.hints.${config.mode}`)}
-            </p>
-            {config.mode === "claude" && (
-              <div className="space-y-3">
-                <DictationCloudControl />
-                <p className="text-sm">
-                  {t(
-                    config.claude_key_configured
-                      ? "dictation.cleanup.keyConfigured"
-                      : "dictation.cleanup.keyMissing",
-                  )}
-                </p>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Input
-                    type="password"
-                    autoComplete="new-password"
-                    spellCheck={false}
-                    value={key}
-                    onChange={(event) => setKey(event.target.value)}
-                    disabled={busy}
-                    aria-label={t("dictation.cleanup.keyLabel")}
-                    placeholder={t("dictation.cleanup.keyPlaceholder")}
-                    className="min-w-48 flex-1"
-                  />
-                  <Button
-                    variant="secondary"
-                    disabled={busy || !key.trim()}
-                    onClick={() => changeKey(false)}
-                  >
-                    {t("dictation.cleanup.saveKey")}
-                  </Button>
-                  {config.claude_key_configured && (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div
+                className="flex flex-wrap gap-2"
+                role="group"
+                aria-label={t("dictation.cleanup.mode")}
+              >
+                {(["claude", "local", "off"] as const).map(
+                  (mode: CleanupMode) => (
                     <Button
-                      variant="danger-ghost"
+                      key={mode}
+                      variant={
+                        config.mode === mode ? "primary-soft" : "secondary"
+                      }
+                      aria-pressed={config.mode === mode}
                       disabled={busy}
-                      onClick={() => changeKey(true)}
+                      onClick={() => {
+                        setConfig({ ...config, mode });
+                        setDirty(true);
+                      }}
                     >
-                      {t("dictation.cleanup.removeKey")}
+                      {t(`dictation.cleanup.modes.${mode}`)}
                     </Button>
-                  )}
-                </div>
+                  ),
+                )}
               </div>
-            )}
-            {config.mode === "local" && (
-              <div className="grid gap-3">
-                <label className="grid gap-1.5 text-sm">
-                  {t("dictation.cleanup.localAddress")}
-                  <Input
-                    value={config.local_base_url}
-                    disabled={busy}
-                    spellCheck={false}
-                    placeholder={t("dictation.cleanup.localAddressPlaceholder")}
-                    onChange={(event) => {
-                      setConfig({
-                        ...config,
-                        local_base_url: event.target.value,
-                      });
-                      setDirty(true);
-                    }}
-                  />
-                </label>
-                <label className="grid gap-1.5 text-sm">
-                  {t("dictation.cleanup.localModel")}
-                  <Input
-                    value={config.local_model}
-                    disabled={busy}
-                    spellCheck={false}
-                    placeholder={t("dictation.cleanup.localModelPlaceholder")}
-                    onChange={(event) => {
-                      setConfig({ ...config, local_model: event.target.value });
-                      setDirty(true);
-                    }}
-                  />
-                </label>
-              </div>
-            )}
-            {config.mode !== "off" && (
-              <div className="space-y-3 border-t border-mid-gray/15 pt-4">
-                <p className="text-sm font-medium">
-                  {t("dictation.cleanup.strength")}
-                </p>
-                <div
-                  className="grid grid-cols-3 gap-2"
-                  role="group"
-                  aria-label={t("dictation.cleanup.strength")}
-                >
-                  {(["faithful", "light", "clear"] as const).map(
-                    (strength: CleanupStrength) => (
-                      <Button
-                        key={strength}
-                        variant={
-                          config.strength === strength
-                            ? "primary-soft"
-                            : "secondary"
-                        }
-                        aria-pressed={config.strength === strength}
-                        disabled={busy}
-                        onClick={() => {
-                          setConfig({ ...config, strength });
-                          setDirty(true);
-                        }}
-                      >
-                        {t(`dictation.cleanup.strengths.${strength}`)}
-                      </Button>
-                    ),
-                  )}
-                </div>
-                <p className="text-xs text-text/65">
-                  {t(`dictation.cleanup.strengthHints.${config.strength}`)}
-                </p>
-                <label className="flex items-start gap-2 text-sm cursor-pointer">
-                  <input
-                    type="checkbox"
-                    className="mt-1 accent-logo-primary"
-                    checked={config.natural_paragraphs}
-                    disabled={busy}
-                    onChange={(event) => {
-                      setConfig({
-                        ...config,
-                        natural_paragraphs: event.target.checked,
-                      });
-                      setDirty(true);
-                    }}
-                  />
-                  <span>
-                    {t("dictation.cleanup.paragraphs")}
-                    <span className="block text-xs text-text/60 mt-1">
-                      {t("dictation.cleanup.paragraphsHint")}
-                    </span>
-                  </span>
-                </label>
-                <p className="text-xs text-text/55">
-                  {t("dictation.cleanup.fidelity")}
-                </p>
-              </div>
-            )}
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-xs text-text/55">
-                {t("dictation.cleanup.fallback")}
-              </p>
               <Button disabled={busy || !dirty} onClick={save}>
                 {t("dictation.cleanup.save")}
               </Button>
             </div>
+            <p className="text-xs text-text/65">
+              {t(`dictation.cleanup.hints.${config.mode}`)}
+            </p>
+            {config.mode === "claude" && <DictationCloudControl />}
+            {config.mode !== "off" && (
+              <details className="group border-t border-mid-gray/15">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-md py-2 text-sm font-medium hover:text-text/70 focus-visible:outline-2 focus-visible:outline-logo-primary [&::-webkit-details-marker]:hidden">
+                  {t("dictation.cleanup.options")}
+                  <ChevronDown
+                    size={16}
+                    className="shrink-0 text-text/65 group-open:rotate-180"
+                    aria-hidden="true"
+                  />
+                </summary>
+                <div className="space-y-3 pb-1 pt-2">
+                  <p className="text-xs text-text/65">
+                    {t("dictation.cleanup.description")}
+                  </p>
+                  {config.mode === "claude" && (
+                    <div className="space-y-1 text-xs text-text/65">
+                      <p>{t("dictation.cloud.hint")}</p>
+                      <p>{t("dictation.cloud.policy")}</p>
+                    </div>
+                  )}
+                  {config.mode === "local" && (
+                    <div className="grid gap-3">
+                      <label className="grid gap-1.5 text-sm">
+                        {t("dictation.cleanup.localAddress")}
+                        <Input
+                          value={config.local_base_url}
+                          disabled={busy}
+                          spellCheck={false}
+                          placeholder={t(
+                            "dictation.cleanup.localAddressPlaceholder",
+                          )}
+                          onChange={(event) => {
+                            setConfig({
+                              ...config,
+                              local_base_url: event.target.value,
+                            });
+                            setDirty(true);
+                          }}
+                        />
+                      </label>
+                      <label className="grid gap-1.5 text-sm">
+                        {t("dictation.cleanup.localModel")}
+                        <Input
+                          value={config.local_model}
+                          disabled={busy}
+                          spellCheck={false}
+                          placeholder={t(
+                            "dictation.cleanup.localModelPlaceholder",
+                          )}
+                          onChange={(event) => {
+                            setConfig({
+                              ...config,
+                              local_model: event.target.value,
+                            });
+                            setDirty(true);
+                          }}
+                        />
+                      </label>
+                    </div>
+                  )}
+                  <div className="space-y-3">
+                    <p className="text-sm font-medium">
+                      {t("dictation.cleanup.strength")}
+                    </p>
+                    <div
+                      className="grid grid-cols-3 gap-2"
+                      role="group"
+                      aria-label={t("dictation.cleanup.strength")}
+                    >
+                      {(["faithful", "light", "clear"] as const).map(
+                        (strength: CleanupStrength) => (
+                          <Button
+                            key={strength}
+                            variant={
+                              config.strength === strength
+                                ? "primary-soft"
+                                : "secondary"
+                            }
+                            aria-pressed={config.strength === strength}
+                            disabled={busy}
+                            onClick={() => {
+                              setConfig({ ...config, strength });
+                              setDirty(true);
+                            }}
+                          >
+                            {t(`dictation.cleanup.strengths.${strength}`)}
+                          </Button>
+                        ),
+                      )}
+                    </div>
+                    <p className="text-xs text-text/65">
+                      {t(`dictation.cleanup.strengthHints.${config.strength}`)}
+                    </p>
+                    <label className="flex items-start gap-2 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="mt-1 accent-logo-primary"
+                        checked={config.natural_paragraphs}
+                        disabled={busy}
+                        onChange={(event) => {
+                          setConfig({
+                            ...config,
+                            natural_paragraphs: event.target.checked,
+                          });
+                          setDirty(true);
+                        }}
+                      />
+                      <span>
+                        {t("dictation.cleanup.paragraphs")}
+                        <span className="block text-xs text-text/60 mt-1">
+                          {t("dictation.cleanup.paragraphsHint")}
+                        </span>
+                      </span>
+                    </label>
+                    <p className="text-xs text-text/55">
+                      {t("dictation.cleanup.fidelity")}
+                    </p>
+                    <p className="text-xs text-text/55">
+                      {t("dictation.cleanup.fallback")}
+                    </p>
+                  </div>
+                </div>
+              </details>
+            )}
           </>
         )}
       </div>

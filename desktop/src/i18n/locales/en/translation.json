@@ -795,17 +795,18 @@
       "title": "Text cleanup",
       "description": "Conservatively tidy punctuation and clear errors, preserving language, numbers, negation, paths, and arguments.",
       "mode": "Text cleanup mode",
+      "options": "Cleanup options",
       "modes": {
         "claude": "Claude",
         "local": "Local model",
         "off": "Off"
       },
       "hints": {
-        "claude": "Uses Claude Haiku 5.5. Transcript text and relevant vocabulary hints are sent; audio is not uploaded.",
+        "claude": "Claude cleans up transcripts using relevant vocabulary hints.",
         "local": "Connects to a compatible service on this computer. Failures keep the original text and do not switch to the cloud.",
-        "off": "Uses the original local transcript directly."
+        "off": "Uses the speech recognition result directly."
       },
-      "fallback": "Slow or failed cleanup uses the complete local transcript with confirmed vocabulary.",
+      "fallback": "If cleanup is slow or fails, the transcript with confirmed vocabulary is used.",
       "saved": "Cleanup settings saved",
       "saveFailed": "Settings were not saved. Check the local address and model name, then retry.",
       "loadFailed": "Cleanup settings could not be read.",
@@ -968,7 +969,13 @@
         "unicode_input_submitted": "System accepted input; remote insertion unconfirmed",
         "unicode_input_submitted_copy_failed": "System accepted input; clipboard copy incomplete; check the remote field",
         "paste_unconfirmed": "Complete text arrival unconfirmed; check the input field",
-        "paste_skipped": "Automatic input skipped; copy from history"
+        "paste_skipped": "Automatic input skipped; copy from history",
+        "gateway_timeout": "Cloud gateway timed out; local fallback used",
+        "gateway_unreachable": "Cloud gateway unreachable; local fallback used",
+        "gateway_unauthorized": "Cloud gateway token rejected; local fallback used",
+        "gateway_upstream_error": "Cloud gateway upstream unavailable; local fallback used",
+        "gateway_http_error": "Cloud gateway error; local fallback used",
+        "cleanup_not_configured": "Gateway cleanup not configured; raw transcript used"
       },
       "cleanupFallback": "Cleanup fallback: {{reason}}",
       "cleanupFallbackUnknown": "Cleanup did not finish; local transcript retained",
@@ -1069,16 +1076,74 @@
     "footer": {
       "separator": "·",
       "mode": "{{mode}} · {{strength}}",
+      "cloudGatewayMode": "Cloud gateway · offline local fallback",
+      "cloudRecognition": "Cloud recognition",
+      "localRecognition": "Local recognition",
       "modeUnavailable": "Cleanup status unavailable",
       "cloudPaused": "Claude cleanup paused",
       "shortcut": "Hold {{shortcut}} to speak",
+      "shortcutWithKey": "Hold <keycap>{{shortcut}}</keycap> to speak",
       "dataHelp": "View data handling for the current mode",
       "dataTitle": "How this mode handles data",
       "audioLocal": "Audio is recognized locally and is not uploaded.",
+      "audioCloudGateway": "Audio is streamed in memory to your self-hosted gateway (zero gateway disk writes); if offline, local SenseVoiceSmall runs on demand.",
       "dataModes": {
         "claude": "When Claude cleanup is enabled, transcript text and relevant vocabulary hints are sent to Claude.",
         "local": "Transcript text is sent to the configured local compatible service. Failure does not switch to cloud cleanup.",
-        "off": "Cleanup is off. Local recognition and confirmed vocabulary are used directly."
+        "off": "Cleanup is off. Local recognition and confirmed vocabulary are used directly.",
+        "cloudGateway": "Your gateway holds upstream API keys centrally and syncs technical vocabulary across devices without storing upstream keys on this PC."
+      }
+    },
+    "cloudGateway": {
+      "title": "Cloud connection",
+      "description": "Cloud dictation sends audio to your self-hosted gateway and transcription provider. A compatible gateway begins transcribing while you speak. If cloud recognition is unavailable, the app can use local SenseVoiceSmall.",
+      "loadFailed": "Could not load cloud gateway settings.",
+      "modeLabel": "Recognition mode",
+      "modes": {
+        "cloud_first": "Cloud first",
+        "local_only": "Local only"
+      },
+      "banners": {
+        "cloudActive": "Cloud recognition is active with local fallback.",
+        "cloudUnconfiguredLocal": "Set up the cloud connection to use cloud recognition. Currently using local recognition.",
+        "localOnly": "Local recognition is active."
+      },
+      "connectionConfigured": "Gateway configured",
+      "connectionUnconfigured": "Gateway setup needed",
+      "saveRecognitionMode": "Save recognition mode",
+      "urlLabel": "Gateway address",
+      "urlPlaceholder": "https://dictation.astrmind.com",
+      "tokenLabel": "Device access token",
+      "tokenPlaceholder": "Enter device token (encrypted via Windows DPAPI, never echoed)",
+      "tokenConfigured": "Device token saved in Windows DPAPI secure storage (never displayed)",
+      "tokenMissing": "No device token configured yet",
+      "saveToken": "Save token",
+      "removeToken": "Remove token",
+      "tokenSaved": "Device token encrypted and saved",
+      "tokenRemoved": "Device token removed",
+      "autoSync": "Automatically sync technical vocabulary across devices",
+      "autoSyncHint": "Syncs confirmed rules, manual words, and liked/frequent technical terms with your gateway SQLite store.",
+      "testConnection": "Test connection",
+      "testing": "Testing…",
+      "testSuccess": "Gateway connected ({{ms}} ms)",
+      "testStatusAuthenticated": "Authenticated as device \"{{device}}\" · {{ms}} ms",
+      "testStatusUnauthorized": "Gateway reachable ({{ms}} ms), but device token was rejected",
+      "testStatusUpstream": "ASR: {{asr}} · Cleanup: {{cleanup}} · Synced terms: {{vocab}} (rev {{rev}})",
+      "notReady": "Not configured",
+      "syncSummary": "Synced active terms: {{count}} · Revision {{revision}}",
+      "syncNow": "Sync vocabulary",
+      "syncSuccess": "Vocabulary synced ({{active}} active terms, rev {{revision}})",
+      "save": "Save gateway settings",
+      "saved": "Cloud gateway settings saved",
+      "errors": {
+        "invalid_gateway_url": "Enter a valid http:// or https:// gateway URL without credentials or query strings.",
+        "invalid_gateway_token": "Device token must be at least 12 printable ASCII characters without spaces.",
+        "missing_gateway_url": "Enter the gateway address first.",
+        "missing_gateway_token": "Save a device access token first.",
+        "gateway_unauthorized": "Device token was rejected by the gateway (401).",
+        "gateway_timeout": "Gateway connection timed out.",
+        "gateway_unreachable": "Could not reach the gateway address.",
+        "generic": "Gateway operation did not finish. Check your settings and retry."
       }
     },
     "autoPaste": {

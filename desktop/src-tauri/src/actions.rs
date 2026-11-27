@@ -79,7 +79,11 @@ pub trait ShortcutAction: Send + Sync {
 struct TranscribeAction;
 
 // None is a recording cancellation tombstone, consumed by a racing stop().
-type TimedCleanupSession = (CleanupSession, Instant);
+type TimedCleanupSession = (
+    CleanupSession,
+    crate::cloud_gateway::GatewaySession,
+    Instant,
+);
 static CLEANUP_SESSIONS: Lazy<Mutex<HashMap<String, Option<TimedCleanupSession>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -116,6 +120,7 @@ pub(crate) struct ProcessedTranscription {
     pub cleanup_ms: u64,
     pub cleanup_budget_ms: u64,
     pub cleanup_outcome: String,
+    pub gateway_asr_ms: Option<u64>,
 }
 
 fn processed_outcome(outcome: CleanupOutcome) -> ProcessedTranscription {
@@ -134,6 +139,7 @@ fn processed_outcome(outcome: CleanupOutcome) -> ProcessedTranscription {
             .reason
             .unwrap_or(if outcome.requested { "cleaned" } else { "off" })
             .into(),
+        gateway_asr_ms: None,
     }
 }
 
@@ -169,13 +175,22 @@ impl ShortcutAction for TranscribeAction {
             sessions.remove(binding_id);
         }
 
-        // Load model in the background
         let tm = app.state::<Arc<TranscriptionManager>>();
         let rm = app.state::<Arc<AudioRecordingManager>>();
 
-        // Load ASR model and VAD model in parallel
+        // Freeze the upload route, model, timeout and credential before opening
+        // the microphone; never re-read them in the async transcription path.
+        let cleanup_session = dictation_cleanup::capture_session(app);
+        let mut gateway_session = crate::cloud_gateway::capture_session(app, &cleanup_session);
+        let use_cloud_gateway = gateway_session.is_active();
+
+        // In `cloud_first` mode with a configured gateway, keep local SenseVoice
+        // at 0 MB resident memory during normal recording; it will be lazy-loaded
+        // from disk only if the gateway call fails after key release.
         let kickoff_started = Instant::now();
-        tm.initiate_model_load();
+        if !use_cloud_gateway {
+            tm.initiate_model_load();
+        }
         let rm_clone = Arc::clone(&rm);
         std::thread::spawn(move || {
             if let Err(e) = rm_clone.preload_vad() {
@@ -184,9 +199,8 @@ impl ShortcutAction for TranscribeAction {
         });
         let kickoff_elapsed = kickoff_started.elapsed();
 
-        // Don't open the mic if nothing can transcribe the recording; the load
-        // kicked off above fails and reports why.
-        if !tm.is_model_loaded() {
+        // Don't open the mic in pure local mode if nothing can transcribe it.
+        if !use_cloud_gateway && !tm.is_model_loaded() {
             let selected_model = get_settings(app).selected_model;
             if let Err(e) = app
                 .state::<Arc<ModelManager>>()
@@ -211,13 +225,13 @@ impl ShortcutAction for TranscribeAction {
             .state::<Arc<ModelManager>>()
             .get_model_info(&settings.selected_model);
 
-        // Use the app-facing model capability as the single pre-recording source
-        // for live streaming decisions. Unknown support is represented as false
-        // until the model registry is updated by discovery or runtime load.
-        let model_supports_streaming = selected_model_info
-            .as_ref()
-            .map(|m| m.supports_streaming)
-            .unwrap_or(false);
+        // Local live overlays follow the selected local model capability.
+        // Cloud dictation streams through the gateway without live pasting.
+        let model_supports_streaming = !use_cloud_gateway
+            && selected_model_info
+                .as_ref()
+                .map(|m| m.supports_streaming)
+                .unwrap_or(false);
         let vad_policy = if !settings.vad_enabled {
             VadPolicy::Disabled
         } else if model_supports_streaming {
@@ -227,6 +241,9 @@ impl ShortcutAction for TranscribeAction {
         };
         if model_supports_streaming {
             tm.start_stream();
+        }
+        if use_cloud_gateway {
+            gateway_session.start_live(app, tm.stream_router().cloud_audio());
         }
         let plan_elapsed = plan_started.elapsed();
 
@@ -253,11 +270,11 @@ impl ShortcutAction for TranscribeAction {
         );
         debug!("Microphone mode - always_on: {}", is_always_on);
 
-        // Freeze the upload route, model, timeout and credential before opening
-        // the microphone; never re-read them in the async transcription path.
-        let cleanup_session = dictation_cleanup::capture_session(app);
         if let Ok(mut sessions) = CLEANUP_SESSIONS.lock() {
-            sessions.insert(binding_id.clone(), Some((cleanup_session, Instant::now())));
+            sessions.insert(
+                binding_id.clone(),
+                Some((cleanup_session, gateway_session, Instant::now())),
+            );
         }
         let mut recording_error: Option<String> = None;
         let recording_start_time = Instant::now();
@@ -366,12 +383,12 @@ impl ShortcutAction for TranscribeAction {
         // Claim the recording before changing its UI. Cancellation drops the
         // credential-bearing session and leaves a tombstone, so a release that
         // races with Esc cannot produce a second cancellation/no-audio record.
-        let (cleanup_session, recording_started_at) = match CLEANUP_SESSIONS
+        let (cleanup_session, mut gateway_session, recording_started_at) = match CLEANUP_SESSIONS
             .lock()
             .ok()
             .and_then(|mut sessions| sessions.remove(binding_id))
         {
-            Some(Some((session, started))) => (session, Some(started)),
+            Some(Some((session, gateway, started))) => (session, gateway, Some(started)),
             Some(None) => {
                 if let (Some(coordinator), Some(id)) =
                     (app.try_state::<TranscriptionCoordinator>(), recording_id)
@@ -380,7 +397,11 @@ impl ShortcutAction for TranscribeAction {
                 }
                 return;
             }
-            None => (CleanupSession::unavailable(), None),
+            None => (
+                CleanupSession::unavailable(),
+                crate::cloud_gateway::GatewaySession::inactive(),
+                None,
+            ),
         };
         // Prevent a slow microphone from emitting a ready event or start chime
         // after the user has already requested stop.
@@ -414,8 +435,12 @@ impl ShortcutAction for TranscribeAction {
 
         let binding_id = binding_id.to_string();
         let post_process = cleanup_session.is_enabled();
-        let mut timing =
-            crate::dictation_metrics::DictationTiming::new(cleanup_session.mode_name());
+        let initial_mode_label = if gateway_session.is_active() {
+            "cloud_gateway"
+        } else {
+            cleanup_session.mode_name()
+        };
+        let mut timing = crate::dictation_metrics::DictationTiming::new(initial_mode_label);
         timing.recording_ms = recording_ms;
         timing.begin_resources();
 
@@ -472,23 +497,71 @@ impl ShortcutAction for TranscribeAction {
                         crate::audio_toolkit::save_wav_file(&wav_path, &samples_for_wav)
                     });
 
-                    // Transcribe concurrently with WAV save. If a live stream was
-                    // running, finalize it and use its text (all audio was already
-                    // fed to the stream); otherwise batch-transcribe the samples.
                     let transcription_time = Instant::now();
-                    let transcription_result = match tm.finalize_stream() {
-                        // A finalized stream with usable text wins. An empty result
-                        // (no active stream, produced nothing, or a finalize error
-                        // after the engine was returned) falls back to a full batch
-                        // transcription of the same audio. A finalize timeout is
-                        // surfaced instead — the worker may still hold the engine,
-                        // so a batch fallback would contend with it.
-                        Ok(Some(text)) if !text.trim().is_empty() => Ok(text),
-                        Ok(_) => tm.transcribe(samples),
-                        Err(err) => Err(err),
+                    let mut gateway_completed: Option<ProcessedTranscription> = None;
+                    let mut gateway_fallback_reason: Option<&'static str> = None;
+
+                    if gateway_session.is_active() {
+                        match complete_unless_cancelled(
+                            crate::cloud_gateway::dictate_with_session(
+                                &ah,
+                                &mut gateway_session,
+                                &samples,
+                            ),
+                            || rm.was_cancelled_since(cancel_generation),
+                        )
+                        .await
+                        {
+                            None => {
+                                let _ = wav_handle.await;
+                                timing.asr_ms =
+                                    crate::dictation_metrics::elapsed_ms(transcription_time);
+                                timing.outcome = "cancelled".into();
+                                timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
+                                crate::dictation_metrics::record(&ah, timing);
+                                utils::hide_recording_overlay(&ah);
+                                set_tray_state(&ah, TrayIconState::Idle);
+                                return;
+                            }
+                            Some(Ok(processed)) => {
+                                timing.asr_ms = processed.gateway_asr_ms.unwrap_or_else(|| {
+                                    crate::dictation_metrics::elapsed_ms(transcription_time)
+                                });
+                                timing.snapshot_resources("asr");
+                                timing.snapshot_resources("cleanup");
+                                gateway_completed = Some(processed);
+                            }
+                            Some(Err(reason)) => {
+                                warn!(
+                                    "Cloud gateway unavailable ({reason}); lazy-loading local SenseVoiceSmall fallback"
+                                );
+                                gateway_fallback_reason = Some(reason);
+                                timing.mode = "cloud_fallback_local".into();
+                            }
+                        }
+                    }
+
+                    let transcription_result = if let Some(ref gw) = gateway_completed {
+                        Ok(gw.raw_text.clone())
+                    } else {
+                        let local_asr_started = Instant::now();
+                        let res = match tm.finalize_stream() {
+                            Ok(Some(text)) if !text.trim().is_empty() => Ok(text),
+                            Ok(_) => {
+                                let tm_local = Arc::clone(&tm);
+                                tauri::async_runtime::spawn_blocking(move || {
+                                    tm_local.transcribe(samples)
+                                })
+                                .await
+                                .map_err(|e| anyhow::anyhow!("Local ASR task panicked: {e}"))
+                                .and_then(|r| r)
+                            }
+                            Err(err) => Err(err),
+                        };
+                        timing.asr_ms = crate::dictation_metrics::elapsed_ms(local_asr_started);
+                        timing.snapshot_resources("asr");
+                        res
                     };
-                    timing.asr_ms = crate::dictation_metrics::elapsed_ms(transcription_time);
-                    timing.snapshot_resources("asr");
 
                     // Await WAV save and verify
                     let wav_saved = match wav_handle.await {
@@ -532,31 +605,47 @@ impl ShortcutAction for TranscribeAction {
                                 utils::redact_text(&transcription)
                             );
 
-                            if post_process && !transcription.trim().is_empty() {
-                                if use_streaming_overlay {
-                                    tm.emit_stream_working(StreamWorkKind::Polishing);
-                                } else {
-                                    show_processing_overlay(&ah);
+                            let mut processed = if let Some(gw_processed) = gateway_completed {
+                                gw_processed
+                            } else {
+                                if post_process && !transcription.trim().is_empty() {
+                                    if use_streaming_overlay {
+                                        tm.emit_stream_working(StreamWorkKind::Polishing);
+                                    } else {
+                                        show_processing_overlay(&ah);
+                                    }
+                                }
+                                let cleanup_time = Instant::now();
+                                let Some(local_processed) = complete_unless_cancelled(
+                                    process_with_session(&ah, &transcription, &cleanup_session),
+                                    || rm.was_cancelled_since(cancel_generation),
+                                )
+                                .await
+                                else {
+                                    debug!(
+                                        "Transcription operation cancelled during output handling"
+                                    );
+                                    timing.cleanup_ms =
+                                        crate::dictation_metrics::elapsed_ms(cleanup_time);
+                                    timing.outcome = "cancelled".into();
+                                    timing.total_ms =
+                                        crate::dictation_metrics::elapsed_ms(stop_time);
+                                    crate::dictation_metrics::record(&ah, timing);
+                                    utils::hide_recording_overlay(&ah);
+                                    set_tray_state(&ah, TrayIconState::Idle);
+                                    return;
+                                };
+                                timing.snapshot_resources("cleanup");
+                                local_processed
+                            };
+                            if let Some(gw_reason) = gateway_fallback_reason {
+                                if matches!(
+                                    processed.cleanup_outcome.as_str(),
+                                    "off" | "missing_claude_api_key"
+                                ) {
+                                    processed.cleanup_outcome = gw_reason.into();
                                 }
                             }
-                            let cleanup_time = Instant::now();
-                            let Some(processed) = complete_unless_cancelled(
-                                process_with_session(&ah, &transcription, &cleanup_session),
-                                || rm.was_cancelled_since(cancel_generation),
-                            )
-                            .await
-                            else {
-                                debug!("Transcription operation cancelled during output handling");
-                                timing.cleanup_ms =
-                                    crate::dictation_metrics::elapsed_ms(cleanup_time);
-                                timing.outcome = "cancelled".into();
-                                timing.total_ms = crate::dictation_metrics::elapsed_ms(stop_time);
-                                crate::dictation_metrics::record(&ah, timing);
-                                utils::hide_recording_overlay(&ah);
-                                set_tray_state(&ah, TrayIconState::Idle);
-                                return;
-                            };
-                            timing.snapshot_resources("cleanup");
 
                             if rm.was_cancelled_since(cancel_generation) {
                                 debug!("Transcription operation cancelled before paste");
@@ -767,8 +856,15 @@ impl ShortcutAction for CancelAction {
                 let modes: Vec<_> = sessions
                     .values_mut()
                     .filter_map(|session| {
-                        crate::dictation_metrics::claim_recording_cancel(active, session)
-                            .map(|(session, _)| session.mode_name())
+                        crate::dictation_metrics::claim_recording_cancel(active, session).map(
+                            |(cleanup, gateway, _)| {
+                                if gateway.is_active() {
+                                    "cloud_gateway"
+                                } else {
+                                    cleanup.mode_name()
+                                }
+                            },
+                        )
                     })
                     .collect();
                 if !active {
